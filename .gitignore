@@ -1,0 +1,114 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+
+# Environment
+.env
+.env.local
+.env.production
+backend/.env
+backend/.env.local
+backend/.env.production
+
+# Database
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build
+dist/
+build/
+
+# Testing
+coverage/
+
+# Temporary
+tmp/
+temp/
+
+# Dependencies
+node_modules/
+backend/node_modules/
+
+# Environment
+.env
+.env.local
+.env.production
+backend/.env
+backend/.env.local
+backend/.env.production
+
+# Database
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build
+dist/
+build/
+
+# Testing
+coverage/
+
+# Temporary
+tmp/
+temp/
+
+#JavaScript
+assets/portal.js
+
+# Real payment QR codes (keep placeholders tracked, hide real assets)
+assets/gcashqr.jpg
+assets/mayaqr.jpg
+assets/qrph.png
+assets/images/buko.png
+assets/images/pancake.png
+assets/images/siomai.png
+
+# Backup/export files that may contain real voucher or customer data
+*.csv
+*.xlsx
+!backend/templates/*.csv
+!backend/templates/*.xlsx
+
+# Render / deployment config with secrets (if not already covered by .env)
+render.yaml.local
+
+# Session/auth tokens if stored as files
+*.session
+*.token
+
+# MacroDroid config exports (may contain phone numbers, API keys)
+macrodroid-config*.xml

@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#2d6a4f">
+  <title>Connected — WiFi Portal</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <div class="page-wrapper">
+    <header class="portal-header portal-header--success" role="banner">
+      <div class="logo-container">
+        <svg class="logo-svg" width="52" height="52" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+          <circle cx="26" cy="26" r="18" fill="none" stroke="white" stroke-width="3"/>
+          <polyline points="18,26 23,32 34,19" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1 class="brand-name" id="brand-name">Bukuhan WiFi</h1>
+        <p class="brand-tagline" id="brand-tagline">You're connected!</p>
+      </div>
+    </header>
+
+    <main class="portal-main" role="main">
+      <section class="success-card" aria-labelledby="success-heading">
+        <div class="success-icon" aria-hidden="true">
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="32" cy="32" r="30" fill="#e6f4ea" stroke="#188038" stroke-width="3"/>
+            <polyline points="20,32 28,40 44,22" stroke="#188038" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2 id="success-heading" class="card-title card-title--success">Authentication Successful</h2>
+        <p class="card-subtitle" id="success-message">You are now connected to the guest network.</p>
+
+        <div id="session-info" class="session-info-box hidden">
+          <div class="session-info-row">
+            <span class="session-info-label">Session ID</span>
+            <span class="session-info-value" id="info-session-id">—</span>
+          </div>
+          <div class="session-info-row">
+            <span class="session-info-label">Time remaining</span>
+            <span class="session-info-value" id="info-time-remaining">—</span>
+          </div>
+          <div class="session-info-row" id="info-state-row">
+            <span class="session-info-label">Status</span>
+            <span class="session-info-value session-info-value--badge" id="info-state">active</span>
+          </div>
+        </div>
+
+        <div id="redirect-notice" class="redirect-notice">
+          <p>Redirecting to your destination in <span id="countdown-display" aria-live="polite">5</span> seconds…</p>
+          <a href="#" id="redirect-btn" class="btn btn--outline btn--full" role="button">
+            Continue to website
+            <svg class="btn-icon btn-icon--right" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M5 12h14M12 5l7 7-7 7"/>
+            </svg>
+          </a>
+        </div>
+
+        <div class="action-links" id="action-links">
+          <a href="status.html" class="btn btn--secondary btn--full" id="status-link">
+            View Session Status
+          </a>
+        </div>
+      </section>
+
+      <footer class="portal-footer" role="contentinfo">
+        <p class="support-info">
+          Need help?
+          <a href="mailto:support@example.com" class="support-link">Contact support</a>
+        </p>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Auto-redirect logic: reads URL params for destination and session ID -->
+  <script>
+    (function () {
+      'use strict';
+      var params = new URLSearchParams(window.location.search);
+      var destination = decodeURIComponent(params.get('redirectUrl') || params.get('targetUrl') || '');
+      var sessionId = params.get('sessionId') || '';
+      var autoRedirectSeconds = parseInt(params.get('countdown') || '5', 10);
+      var DEFAULT_DEST = 'https://www.example.com/welcome';
+
+      // Validation: only allow http/https URLs on the allowlist
+      var ALLOWED_PATTERNS = [
+        /^https?:\/\/([a-z0-9-]+\.)*example\.com\//i,
+        /^https?:\/\/([a-z0-9-]+\.)*google\.com\//i,
+      ];
+      function isAllowed(url) {
+        if (!url) return false;
+        try {
+          var u = new URL(url);
+          // In production: expand ALLOWED_PATTERNS with operator-configured domains
+          return u.protocol === 'https:' || u.protocol === 'http:';
+        } catch (e) { return false; }
+      }
+
+      var dest = isAllowed(destination) ? destination : DEFAULT_DEST;
+
+      document.getElementById('redirect-btn').href = dest;
+
+      var count = autoRedirectSeconds;
+      var display = document.getElementById('countdown-display');
+      var tid = setInterval(function () {
+        count--;
+        if (display) display.textContent = count;
+        if (count <= 0) {
+          clearInterval(tid);
+          window.location.href = dest;
+        }
+      }, 1000);
+
+      // Populate session info if sessionId provided
+      if (sessionId) {
+        // Persist the session ID so status.html can recover it later,
+        // even after the auto-redirect takes the user off this page.
+        try {
+          window.localStorage.setItem('portalSessionId', sessionId);
+          window.sessionStorage.setItem('portalSessionId', sessionId);
+        } catch (e) { /* storage unavailable */ }
+
+        var infoBox = document.getElementById('session-info');
+        var sidEl = document.getElementById('info-session-id');
+        var statusLink = document.getElementById('status-link');
+        if (infoBox && sidEl) {
+          sidEl.textContent = sessionId;
+          infoBox.classList.remove('hidden');
+                    if (statusLink) statusLink.href = 'status.html?sessionId=' + encodeURIComponent(sessionId) + (params.get('voucherType') ? '&voucherType=' + encodeURIComponent(params.get('voucherType')) : '');
+        }
+      }
+    })();
+  </script>
+</body>
+</html>

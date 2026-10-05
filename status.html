@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#2d6a4f">
+  <title>Session Status — WiFi Portal</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    /* ============================================================
+       status.html scoped styles — theme inherited from assets/style.css
+       (cream card, green/brown theme, light green grid background kept).
+       ============================================================ */
+
+    /* ---- Centered not-found / error state ---- */
+    .notfound-icon {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 14px;
+    }
+    .card-title--center { text-align: center; }
+    .card-subtitle--center {
+      text-align: center;
+      max-width: 340px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    /* ---- Stacked full-width buttons (Refresh / Return to Login) ---- */
+    .notfound-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-top: 18px;
+    }
+    .nf-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      box-sizing: border-box;
+      min-height: 48px;
+      padding: 12px 20px;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 700;
+      font-family: inherit;
+      text-decoration: none;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.10);
+      transition: background 160ms ease, box-shadow 160ms ease, transform 80ms ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .nf-btn--primary {
+      background: var(--green, #2d6a4f);
+      color: #ffffff;
+      border: none;
+    }
+    .nf-btn--primary:hover {
+      background: var(--green-hover, #1b4332);
+      box-shadow: 0 4px 12px rgba(45, 106, 79, 0.30);
+    }
+    .nf-btn--secondary {
+      background: transparent;
+      color: var(--green, #2d6a4f);
+      border: 2px solid var(--green, #2d6a4f);
+      box-shadow: none;
+    }
+    .nf-btn--secondary:hover {
+      background: rgba(45, 106, 79, 0.08);
+    }
+    .nf-btn:active { transform: scale(0.98); }
+    .nf-btn:focus-visible {
+      outline: 3px solid rgba(45, 106, 79, 0.45);
+      outline-offset: 2px;
+    }
+    .nf-btn svg { flex-shrink: 0; }
+
+    /* ---- "Still need help? Contact support" in-card line ---- */
+    .support-line {
+      text-align: center;
+      margin: 18px 0 0;
+      font-size: 0.875rem;
+      color: var(--text-2, #5c5548);
+    }
+    .support-line .support-trigger { font-size: 0.875rem; }
+
+    /* ---- "Contact support" trigger styled like a link ---- */
+    .support-trigger {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      color: var(--green, #2d6a4f);
+      font-weight: 700;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-trigger:hover { text-decoration: underline; }
+    .support-trigger:focus-visible {
+      outline: 2px solid var(--green, #2d6a4f);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    /* ---- Support modal (same code/styling as error.html) ---- */
+    body.modal-open { overflow: hidden; }
+
+    .support-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(44, 24, 16, 0.55);
+      -webkit-backdrop-filter: blur(4px);
+      backdrop-filter: blur(4px);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 200ms ease, visibility 0s linear 200ms;
+    }
+    .support-modal-overlay.is-open {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 200ms ease;
+    }
+
+    .support-modal {
+      background: var(--surface, #fffcf5);
+      border-radius: 16px;
+      box-shadow: var(--shadow-lg, 0 8px 32px rgba(92, 61, 17, 0.14));
+      max-width: 420px;
+      width: 100%;
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      transform: scale(0.94) translateY(10px);
+      transition: transform 200ms ease;
+    }
+    .support-modal-overlay.is-open .support-modal {
+      transform: scale(1) translateY(0);
+    }
+
+    .support-modal__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 20px 20px 14px;
+      border-bottom: 1px solid var(--border-light, #e8d5bc);
+      background: var(--surface-2, #f7f0e3);
+    }
+    .support-modal__title {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 700;
+      color: var(--text, #3d3327);
+    }
+    .support-modal__subtitle {
+      margin: 3px 0 0;
+      font-size: 0.8125rem;
+      color: var(--text-3, #8a7d68);
+      line-height: 1.4;
+    }
+    .support-modal__close {
+      flex-shrink: 0;
+      width: 34px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      border-radius: var(--radius-sm, 10px);
+      color: var(--text-3, #8a7d68);
+      cursor: pointer;
+      transition: var(--transition, 180ms ease);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-modal__close:hover { color: var(--text, #3d3327); background: var(--surface-3, #ede0c8); }
+    .support-modal__close:focus-visible {
+      outline: 2px solid var(--green, #2d6a4f);
+      outline-offset: 2px;
+    }
+
+    .support-modal__body {
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .support-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      background: var(--surface-2, #f7f0e3);
+      border: 1px solid var(--border-light, #e8d5bc);
+      border-radius: 12px;
+    }
+    .support-row__icon {
+      flex-shrink: 0;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--accent, #e9f5db);
+      color: var(--green, #2d6a4f);
+      border-radius: 10px;
+    }
+    .support-row__label {
+      display: block;
+      font-size: 0.6875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-3, #8a7d68);
+      margin-bottom: 2px;
+    }
+    .support-row__value {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--green, #2d6a4f);
+      text-decoration: none;
+      word-break: break-word;
+    }
+    .support-row__value:hover { text-decoration: underline; }
+
+    .support-modal__footer { padding: 4px 20px 20px; }
+
+    .support-modal__close-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 48px;
+      background: var(--surface, #fffcf5);
+      color: var(--green, #2d6a4f);
+      font-size: 16px;
+      font-weight: 700;
+      font-family: inherit;
+      border: 2px solid var(--green, #2d6a4f);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background var(--transition, 180ms ease), transform 80ms ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-modal__close-btn:hover { background: rgba(45, 106, 79, 0.08); }
+    .support-modal__close-btn:active { transform: scale(0.98); }
+    .support-modal__close-btn:focus-visible {
+      outline: 3px solid rgba(45, 106, 79, 0.45);
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 480px) {
+      .support-modal { max-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page-wrapper">
+    <header class="portal-header" role="banner">
+      <div class="logo-container">
+        <svg class="logo-svg" width="52" height="52" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+          <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+          <circle cx="26" cy="43" r="2.5" fill="white"/>
+        </svg>
+      </div>
+      <div class="brand-text">
+        <h1 class="brand-name">Bukuhan WiFi</h1>
+        <p class="brand-tagline">Your Session</p>
+      </div>
+    </header>
+
+    <main class="portal-main" role="main">
+
+      <!-- Loading state -->
+      <div id="loading-state" class="status-card" aria-busy="true" aria-label="Loading session information">
+        <div class="spinner-container">
+          <div class="spinner" role="img" aria-label="Loading"></div>
+          <p>Checking your session…</p>
+        </div>
+      </div>
+
+      <!-- Active session state -->
+      <section id="session-active" class="status-card hidden" aria-labelledby="active-heading" aria-live="polite">
+        <h2 id="active-heading" class="card-title card-title--status">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2d6a4f" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+            <polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+          Session Active
+        </h2>
+
+        <!-- Circular countdown widget -->
+        <div class="countdown-widget" aria-label="Time remaining">
+          <div class="countdown-circle-wrap">
+            <svg class="countdown-ring" viewBox="0 0 160 160" aria-hidden="true">
+              <circle class="countdown-ring__bg" cx="80" cy="80" r="70"/>
+              <circle
+                id="countdown-ring-fg"
+                class="countdown-ring__fg"
+                cx="80" cy="80" r="70"
+              />
+            </svg>
+            <div class="countdown-center">
+              <span class="countdown-time" id="countdown-time-display" aria-live="off" aria-atomic="true">--:--</span>
+              <span class="countdown-time-label">remaining</span>
+            </div>
+          </div>
+          <p class="countdown-subtitle" id="countdown-subtitle">
+            Tap Pause to freeze your time
+          </p>
+        </div>
+
+        <!-- Session details -->
+        <dl class="session-details" id="session-details">
+          <div class="session-detail-row">
+            <dt>Voucher</dt>
+            <dd id="detail-voucher">—</dd>
+          </div>
+          <div class="session-detail-row">
+            <dt>Plan</dt>
+            <dd id="detail-plan">—</dd>
+          </div>
+          <div class="session-detail-row">
+            <dt>Session ID</dt>
+            <dd id="detail-session-id">—</dd>
+          </div>
+          <div class="session-detail-row">
+            <dt>Started</dt>
+            <dd id="detail-started">—</dd>
+          </div>
+          <div class="session-detail-row">
+            <dt>Expires</dt>
+            <dd id="detail-expires">—</dd>
+          </div>
+        </dl>
+
+        <!-- Pause / Resume controls -->
+        <div id="controls-section" class="controls-section">
+          <button
+            type="button"
+            id="btn-pause"
+            class="btn btn--secondary btn--full"
+            aria-describedby="pause-hint"
+          >
+            <svg class="btn-icon btn-icon--left" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="6" y="4" width="4" height="16"/>
+              <rect x="14" y="4" width="4" height="16"/>
+            </svg>
+            <span id="pause-label">Pause Session</span>
+          </button>
+          <p id="pause-hint" class="form-hint form-hint--centered">
+            Freezes your remaining time. Useful during meals or when stepping away.
+          </p>
+        </div>
+
+        <!-- Pause confirmation dialog -->
+        <div id="pause-confirm" class="confirm-dialog hidden" role="dialog" aria-labelledby="pause-confirm-heading">
+          <h3 id="pause-confirm-heading">Pause your session?</h3>
+          <p>Your remaining time will be saved. You can resume at any time.</p>
+          <div class="confirm-actions">
+            <button type="button" id="btn-pause-confirm" class="btn btn--primary">Yes, pause</button>
+            <button type="button" id="btn-pause-cancel" class="btn btn--outline">Cancel</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Paused state -->
+      <section id="session-paused" class="status-card status-card--paused hidden" aria-labelledby="paused-heading" aria-live="assertive">
+        <h2 id="paused-heading" class="card-title card-title--status card-title--paused">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#b45309" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="14" y="4" width="4" height="16" rx="1" fill="#b45309"/>
+            <rect x="6" y="4" width="4" height="16" rx="1" fill="#b45309"/>
+          </svg>
+          Session Paused
+        </h2>
+        <p class="card-subtitle">Your session timer is frozen. Tap Resume to continue.</p>
+        <div class="countdown-widget">
+          <div class="countdown-circle-wrap">
+            <svg class="countdown-ring" viewBox="0 0 160 160" aria-hidden="true">
+              <circle class="countdown-ring__bg" cx="80" cy="80" r="70"/>
+              <circle
+                id="paused-ring-fg"
+                class="countdown-ring__fg"
+                cx="80" cy="80" r="70"
+                style="stroke: var(--warning-border);"
+              />
+            </svg>
+            <div class="countdown-center">
+              <span class="countdown-time" id="paused-time-display">--:--</span>
+              <span class="countdown-time-label">frozen</span>
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          id="btn-resume"
+          class="btn btn--primary btn--full"
+          style="margin-top: 4px;"
+        >
+          <svg class="btn-icon btn-icon--left" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polygon points="5 3 19 12 5 21 5 3"/>
+          </svg>
+          Resume Session
+        </button>
+      </section>
+
+      <!-- Expired state -->
+      <section id="session-expired" class="status-card status-card--expired hidden" aria-labelledby="expired-heading" aria-live="assertive">
+        <div class="error-icon" aria-hidden="true">
+          <svg width="56" height="56" viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="28" cy="28" r="26" fill="#fff0ed" stroke="#c0392b" stroke-width="2.5"/>
+            <line x1="18" y1="18" x2="38" y2="38" stroke="#c0392b" stroke-width="3" stroke-linecap="round"/>
+            <line x1="38" y1="18" x2="18" y2="38" stroke="#c0392b" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2 id="expired-heading" class="card-title card-title--error">Session Expired</h2>
+        <p class="card-subtitle">Your WiFi session has ended. Purchase a new session or enter a voucher to reconnect.</p>
+        <a href="index.html" class="btn btn--primary btn--full" role="button">
+          Return to Login
+        </a>
+      </section>
+
+      <!-- Not-found state -->
+      <section id="session-unknown" class="status-card hidden" aria-labelledby="unknown-heading" aria-live="polite">
+        <div class="notfound-icon" aria-hidden="true">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#8a7d68" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12.5"/>
+            <circle cx="12" cy="16" r="0.4" fill="#8a7d68"/>
+          </svg>
+        </div>
+        <h2 id="unknown-heading" class="card-title card-title--center">Session Not Found</h2>
+        <p class="card-subtitle card-subtitle--center">
+          We couldn't find an active session for this device. If you just connected, wait a few seconds and tap Refresh.
+          If your time has run out, return to login to use a new voucher.
+        </p>
+        <div class="notfound-actions">
+          <button type="button" id="btn-refresh-unknown" class="nf-btn nf-btn--primary">
+            <svg class="btn-icon btn-icon--left" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+              <path d="M3 3v5h5"/>
+            </svg>
+            Refresh
+          </button>
+          <a href="index.html" role="button" class="nf-btn nf-btn--secondary">Return to Login</a>
+        </div>
+        <p class="support-line">Still need help?
+          <button type="button" class="support-trigger" aria-haspopup="dialog">Contact support</button>
+        </p>
+      </section>
+
+      <!-- Connection-error state (server unreachable / server error) -->
+      <section id="session-error" class="status-card hidden" aria-labelledby="error-state-heading" aria-live="polite">
+        <div class="notfound-icon" aria-hidden="true">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#8a7d68" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M5 12.55a11 11 0 0 1 14 0"/>
+            <path d="M8.53 15.94a6 6 0 0 1 6.95 0"/>
+            <circle cx="12" cy="19.5" r="0.6" fill="#8a7d68"/>
+            <line x1="4" y1="4" x2="20" y2="20"/>
+          </svg>
+        </div>
+        <h2 id="error-state-heading" class="card-title card-title--center">Connection Problem</h2>
+        <p class="card-subtitle card-subtitle--center">
+          We couldn't reach the server to check your session. Your connection may still be working — please try again in a moment.
+        </p>
+        <div class="notfound-actions">
+          <button type="button" id="btn-refresh-error" class="nf-btn nf-btn--primary">
+            <svg class="btn-icon btn-icon--left" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+              <path d="M3 3v5h5"/>
+            </svg>
+            Refresh
+          </button>
+          <a href="index.html" role="button" class="nf-btn nf-btn--secondary">Return to Login</a>
+        </div>
+        <p class="support-line">Still need help?
+          <button type="button" class="support-trigger" aria-haspopup="dialog">Contact support</button>
+        </p>
+      </section>
+
+      <!-- Status refresh footer -->
+      <div class="status-footer">
+        <p id="last-updated" class="last-updated">Loading…</p>
+        <p id="polling-status" class="polling-status" aria-live="polite"></p>
+      </div>
+    </main>
+  </div>
+
+  <!-- Contact Support modal (same code/styling as error.html) -->
+  <div class="support-modal-overlay" id="support-modal" role="dialog" aria-modal="true" aria-labelledby="support-modal-title" aria-hidden="true">
+    <div class="support-modal">
+      <header class="support-modal__header">
+        <div>
+          <h3 class="support-modal__title" id="support-modal-title">Contact Support</h3>
+          <p class="support-modal__subtitle">We're here to help you get connected.</p>
+        </div>
+        <button type="button" class="support-modal__close" id="support-modal-close" aria-label="Close contact support dialog">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+            <line x1="6" y1="6" x2="18" y2="18"/>
+            <line x1="18" y1="6" x2="6" y2="18"/>
+          </svg>
+        </button>
+      </header>
+
+      <div class="support-modal__body">
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M13.5 21v-7h2.4l.4-3h-2.8V9.1c0-.9.3-1.5 1.6-1.5h1.3V4.9c-.3 0-1.1-.1-2-.1-2 0-3.4 1.2-3.4 3.5V11H8.5v3H11v7h2.5z"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Facebook Page</span>
+            <a class="support-row__value" id="support-facebook" href="#" target="_blank" rel="noopener noreferrer"></a>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Contact Number</span>
+            <a class="support-row__value" id="support-phone" href="#"></a>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="2"/>
+              <path d="m22 7-10 6L2 7"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Email</span>
+            <a class="support-row__value" id="support-email" href="#"></a>
+          </div>
+        </div>
+      </div>
+
+      <footer class="support-modal__footer">
+        <button type="button" class="support-modal__close-btn" id="support-modal-close-btn">Close</button>
+      </footer>
+    </div>
+  </div>
+
+  <script>
+    /* ============================================================
+       status.html — Session status polling and countdown
+       Backend enforces expiration. This page only DISPLAYS state.
+       ============================================================ */
+    (function () {
+      'use strict';
+
+      // ---- Config ----
+      var CONFIG = window.CONFIG || {};
+      var API_BASE = CONFIG.apiBaseUrl || '';
+      var POLL_INTERVAL = CONFIG.statusPollingInterval || 30000;
+      var SESSION_ID = '';
+
+      // ---- Ring circumference for the SVG circle ----
+      var RING_R = 70;
+      var RING_CIRC = 2 * Math.PI * RING_R; // ~439.8
+
+      // ---- DOM refs ----
+      var $ = function (id) { return document.getElementById(id); };
+      var els = {
+        loading:      $('loading-state'),
+        active:       $('session-active'),
+        paused:       $('session-paused'),
+        expired:      $('session-expired'),
+        unknown:      $('session-unknown'),
+        connError:    $('session-error'),
+        cdTime:       $('countdown-time-display'),
+        cdRing:       $('countdown-ring-fg'),
+        pausedTime:   $('paused-time-display'),
+        pausedRing:   $('paused-ring-fg'),
+        subtitle:     $('countdown-subtitle'),
+        detailVoucher: $('detail-voucher'),
+        detailPlan:   $('detail-plan'),
+        detailSid:    $('detail-session-id'),
+        detailStart:  $('detail-started'),
+        detailExpiry: $('detail-expires'),
+        btnPause:     $('btn-pause'),
+        pauseConfirm: $('pause-confirm'),
+        btnPauseConfirm: $('btn-pause-confirm'),
+        btnPauseCancel:  $('btn-pause-cancel'),
+        btnResume:    $('btn-resume'),
+        controls:     $('controls-section'),
+        lastUpdated:  $('last-updated'),
+        pollingStatus: $('polling-status'),
+        pauseLabel:   $('pause-label'),
+        pauseHint:    $('pause-hint'),
+        btnRefreshUnknown: $('btn-refresh-unknown'),
+        btnRefreshError:   $('btn-refresh-error'),
+      };
+
+      var pollTimer = null;
+      var countdownTimer = null;
+      var localSeconds = null;
+      var totalSeconds = null;   // used to calculate ring fill ratio
+
+      // ---- Helpers ----
+      function pad(n) { return String(n).padStart(2, '0'); }
+
+      function formatDuration(totalSecs) {
+        if (totalSecs == null || totalSecs < 0) return '--:--';
+        var h = Math.floor(totalSecs / 3600);
+        var m = Math.floor((totalSecs % 3600) / 60);
+        var s = totalSecs % 60;
+        if (h > 0) return pad(h) + ':' + pad(m) + ':' + pad(s);
+        return pad(m) + ':' + pad(s);
+      }
+
+      function formatDate(iso) {
+        try {
+          var d = new Date(iso);
+          return d.toLocaleString();
+        } catch (e) { return iso || '—'; }
+      }
+
+      // Update the SVG ring fill based on remaining/total ratio
+      function updateRing(ring, remaining, total) {
+        if (!ring) return;
+        var ratio = total > 0 ? Math.max(0, Math.min(1, remaining / total)) : 0;
+        var offset = RING_CIRC * (1 - ratio);
+        ring.style.strokeDasharray = RING_CIRC.toFixed(1);
+        ring.style.strokeDashoffset = offset.toFixed(1);
+
+        // Colour: green → amber → red as time runs low
+        ring.classList.remove('is-warning', 'is-critical');
+        if (ratio <= 0.15) {
+          ring.classList.add('is-critical');
+        } else if (ratio <= 0.30) {
+          ring.classList.add('is-warning');
+        }
+      }
+
+      function showSection(name) {
+        [els.loading, els.active, els.paused, els.expired, els.unknown, els.connError]
+          .forEach(function (el) { if (el) el.classList.add('hidden'); });
+        var map = { loading: els.loading, active: els.active, paused: els.paused,
+                    expired: els.expired, unknown: els.unknown, error: els.connError };
+        if (map[name]) map[name].classList.remove('hidden');
+      }
+
+      function updateCountdownDisplay(totalSecs) {
+        localSeconds = Math.max(0, Math.floor(totalSecs));
+        var timeStr = formatDuration(localSeconds);
+        if (els.cdTime) els.cdTime.textContent = timeStr;
+        updateRing(els.cdRing, localSeconds, totalSeconds);
+      }
+
+      function tickCountdown() {
+        if (localSeconds === null || localSeconds <= 0) return;
+        localSeconds--;
+        updateCountdownDisplay(localSeconds);
+        if (localSeconds <= 0) {
+          clearInterval(countdownTimer);
+          fetchStatus();
+        }
+      }
+
+      function startCountdownTick() {
+        clearInterval(countdownTimer);
+        countdownTimer = setInterval(tickCountdown, 1000);
+      }
+
+      // ---- API calls ----
+      function fetchStatus() {
+        if (!SESSION_ID) return;
+        var url = API_BASE + '/api/session/status?sessionId=' + encodeURIComponent(SESSION_ID);
+        fetch(url, { method: 'GET', cache: 'no-store' })
+          .then(function (r) {
+            // Parse JSON even for error statuses so we can read the code
+            return r.json().then(function (body) {
+              return { ok: r.ok, status: r.status, body: body };
+            });
+          })
+          .then(function (res) {
+            if (!res.ok) {
+              var errCode = (res.body && res.body.code) || '';
+              if (res.status === 404 && errCode === 'SESSION_NOT_FOUND') {
+                // Genuinely no session for this device
+                showSection('unknown');
+              } else {
+                // Server error (5xx), rate limit, or other failure —
+                // NOT a "not found" case; show the retry-friendly screen.
+                showSection('error');
+                scheduleRetry();
+              }
+              return;
+            }
+            renderStatus(res.body);
+          })
+          .catch(function (err) {
+            console.warn('Session status fetch failed:', err.message);
+            // Network unreachable — do not claim "not found"
+            showSection('error');
+            scheduleRetry();
+          });
+      }
+
+      function doPause() {
+        var url = API_BASE + '/api/session/pause';
+        return fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: SESSION_ID }),
+        }).then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        });
+      }
+
+      function doResume() {
+        var url = API_BASE + '/api/session/resume';
+        return fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId: SESSION_ID }),
+        }).then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        });
+      }
+
+      // ---- Render ----
+      function renderStatus(data) {
+        if (els.lastUpdated) {
+          els.lastUpdated.textContent = 'Last updated: ' + new Date().toLocaleTimeString();
+        }
+
+        if (!data || !data.sessionId) {
+          showSection('unknown');
+          return;
+        }
+
+        var state = data.state || 'unknown';
+        SESSION_ID = data.sessionId;
+
+        if (els.detailVoucher) els.detailVoucher.textContent = data.voucherCode || '—';
+        if (els.detailPlan)    els.detailPlan.textContent =
+          data.voucherType === 'premium' ? 'Premium' : 'Standard';
+        if (els.detailSid)    els.detailSid.textContent    = data.sessionId || '—';
+        if (els.detailStart) els.detailStart.textContent  = formatDate(data.startedAt);
+        if (els.detailExpiry) els.detailExpiry.textContent = formatDate(data.expiresAt);
+
+        if (state === 'active') {
+          showSection('active');
+          localSeconds = Math.floor(data.remainingSeconds || 0);
+          totalSeconds = data.totalSeconds || localSeconds; // use server-provided total for ring
+          updateCountdownDisplay(localSeconds);
+          startCountdownTick();
+
+          // Pause only for Premium sessions
+          var isPremium = data.voucherType === 'premium';
+          if (els.controls) {
+            if (CONFIG.showPauseResume && data.canPause !== false && isPremium) {
+              els.controls.classList.remove('hidden');
+              if (els.btnPause) els.btnPause.disabled = false;
+            } else {
+              els.controls.classList.add('hidden');
+            }
+          }
+        } else if (state === 'paused') {
+          showSection('paused');
+          clearInterval(countdownTimer);
+          var pausedSecs = Math.floor(data.remainingSeconds || 0);
+          if (els.pausedTime) els.pausedTime.textContent = formatDuration(pausedSecs);
+          updateRing(els.pausedRing, pausedSecs, pausedSecs || 1);
+        } else if (state === 'expired') {
+          showSection('expired');
+          clearInterval(countdownTimer);
+          localSeconds = 0;
+        } else {
+          showSection('unknown');
+        }
+
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(fetchStatus, POLL_INTERVAL);
+      }
+
+      // ---- Event handlers ----
+      if (els.btnPause) {
+        els.btnPause.addEventListener('click', function () {
+          if (els.controls) els.controls.classList.add('hidden');
+          if (els.pauseConfirm) els.pauseConfirm.classList.remove('hidden');
+        });
+      }
+
+      if (els.btnPauseConfirm) {
+        els.btnPauseConfirm.addEventListener('click', function () {
+          els.btnPauseConfirm.disabled = true;
+          els.btnPauseCancel.disabled = true;
+          if (els.pollingStatus) els.pollingStatus.textContent = 'Pausing session…';
+          doPause()
+            .then(function (data) {
+              if (els.pollingStatus) els.pollingStatus.textContent = '';
+              renderStatus(data);
+            })
+            .catch(function (err) {
+              if (els.pollingStatus) els.pollingStatus.textContent = 'Failed to pause. Please try again.';
+              if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
+              if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
+              if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
+              if (els.controls) els.controls.classList.remove('hidden');
+            });
+        });
+      }
+
+      if (els.btnPauseCancel) {
+        els.btnPauseCancel.addEventListener('click', function () {
+          if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
+          if (els.controls) els.controls.classList.remove('hidden');
+        });
+      }
+
+      if (els.btnResume) {
+        els.btnResume.addEventListener('click', function () {
+          els.btnResume.disabled = true;
+          if (els.pollingStatus) els.pollingStatus.textContent = 'Resuming session…';
+          doResume()
+            .then(function (data) {
+              if (els.pollingStatus) els.pollingStatus.textContent = '';
+              renderStatus(data);
+            })
+            .catch(function (err) {
+              if (els.pollingStatus) els.pollingStatus.textContent = 'Failed to resume. Please try again.';
+              els.btnResume.disabled = false;
+            });
+        });
+      }
+
+      // ---- Refresh buttons (not-found / connection-error states) ----
+      function handleRefreshClick(btn) {
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+          btn.disabled = true;
+          showSection('loading');
+          fetchStatus();
+          // Re-enable shortly after in case the fetch fails and the
+          // error screen re-renders with a fresh button instance.
+          setTimeout(function () { btn.disabled = false; }, 2000);
+        });
+      }
+      handleRefreshClick(els.btnRefreshUnknown);
+      handleRefreshClick(els.btnRefreshError);
+
+      // ---- Init ----
+      // Identifier resolution order:
+      //   1. URL ?sessionId=  (set by portal.js / success.html after login)
+      //   2. localStorage     (persisted at login — survives redirects)
+      //   3. sessionStorage   (tab-scoped fallback)
+      var params = new URLSearchParams(window.location.search);
+      var urlSessionId = params.get('sessionId') || '';
+      var storedSessionId = '';
+      try {
+        storedSessionId = window.localStorage.getItem('portalSessionId')
+          || window.sessionStorage.getItem('portalSessionId') || '';
+      } catch (e) { /* storage unavailable */ }
+
+      SESSION_ID = urlSessionId || storedSessionId || (CONFIG.sessionId || '');
+
+      // If the ID came from the URL, persist it so later visits without
+      // the query parameter still find the session.
+      if (urlSessionId) {
+        try {
+          window.localStorage.setItem('portalSessionId', urlSessionId);
+          window.sessionStorage.setItem('portalSessionId', urlSessionId);
+        } catch (e) { /* storage unavailable */ }
+      }
+
+      if (SESSION_ID) {
+        showSection('loading');
+        fetchStatus();
+      } else {
+        showSection('unknown');
+      }
+
+      // Auto-retry when a fetch fails so a transient server/network error
+      // recovers without user action (the error screen also has a Refresh
+      // button as an explicit option).
+      function scheduleRetry() {
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(function () {
+          if (!document.hidden && SESSION_ID) fetchStatus();
+        }, Math.min(POLL_INTERVAL, 30000));
+      }
+
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden) {
+          clearTimeout(pollTimer);
+          clearInterval(countdownTimer);
+        } else {
+          fetchStatus();
+        }
+      });
+
+      /* ============================================================
+         Contact Support modal — same code/behavior as error.html
+         ============================================================ */
+      var SUPPORT_CONFIG = {
+        facebookName: '[FACEBOOK_PAGE_NAME]',
+        facebookUrl:  '[FACEBOOK_URL]',
+        phone:        '[+63 9XX XXX XXXX]',
+        email:        '[support@example.com]'
+      };
+
+      var supportOverlay = document.getElementById('support-modal');
+      var supportTriggers = document.querySelectorAll('.support-trigger');
+      var supportCloseX = document.getElementById('support-modal-close');
+      var supportCloseBtn = document.getElementById('support-modal-close-btn');
+      var supportLastFocused = null;
+
+      // Populate support details from SUPPORT_CONFIG
+      var fbLink = document.getElementById('support-facebook');
+      var phoneLink = document.getElementById('support-phone');
+      var emailLink = document.getElementById('support-email');
+
+      fbLink.textContent = SUPPORT_CONFIG.facebookName;
+      fbLink.href = SUPPORT_CONFIG.facebookUrl;
+
+      phoneLink.textContent = SUPPORT_CONFIG.phone;
+      phoneLink.href = 'tel:' + SUPPORT_CONFIG.phone.replace(/[^+0-9]/g, '');
+
+      emailLink.textContent = SUPPORT_CONFIG.email;
+      emailLink.href = 'mailto:' + SUPPORT_CONFIG.email;
+
+      function openSupportModal() {
+        supportLastFocused = document.activeElement;
+        supportOverlay.classList.add('is-open');
+        supportOverlay.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+        supportCloseX.focus();
+      }
+
+      function closeSupportModal() {
+        supportOverlay.classList.remove('is-open');
+        supportOverlay.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('modal-open');
+        if (supportLastFocused && typeof supportLastFocused.focus === 'function') {
+          supportLastFocused.focus();
+        }
+      }
+
+      Array.prototype.forEach.call(supportTriggers, function (trigger) {
+        trigger.addEventListener('click', openSupportModal);
+      });
+      supportCloseX.addEventListener('click', closeSupportModal);
+      supportCloseBtn.addEventListener('click', closeSupportModal);
+
+      // Click on the dark overlay (outside the dialog) closes the modal
+      supportOverlay.addEventListener('click', function (e) {
+        if (e.target === supportOverlay) closeSupportModal();
+      });
+
+      // Escape closes; Tab is trapped inside the modal while it is open
+      document.addEventListener('keydown', function (e) {
+        if (!supportOverlay.classList.contains('is-open')) return;
+
+        if (e.key === 'Escape') {
+          closeSupportModal();
+          return;
+        }
+
+        if (e.key === 'Tab') {
+          var focusables = supportOverlay.querySelectorAll(
+            'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          );
+          if (!focusables.length) return;
+          var first = focusables[0];
+          var last = focusables[focusables.length - 1];
+
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      });
+
+    })();
+  </script>
+</body>
+</html>

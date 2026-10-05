@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#2d6a4f">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>GoodVibesVendoWifi — Welcome</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232d6a4f'/><path d='M6 22 Q16 10 26 22' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/><path d='M11 26 Q16 18 21 26' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/><circle cx='16' cy='29' r='1.5' fill='white'/></svg>">
+  <style>
+    :root {
+      --green:        #2d6a4f;
+      --green-hover:  #1b4332;
+      --accent:       #e9f5db;
+      --surface:      #fffcf5;
+      --surface-2:    #f7f0e3;
+      --text:         #2c1810;
+      --text-2:       #6b4226;
+      --text-3:       #a07850;
+      --border-light: #e8d5bc;
+      --radius-sm:    10px;
+      --radius-md:    16px;
+      --radius-lg:    24px;
+      --shadow-card:  0 4px 24px rgba(92, 61, 17, 0.11), 0 2px 8px rgba(92, 61, 17, 0.07);
+      --shadow-md:    0 4px 16px rgba(92, 61, 17, 0.12), 0 2px 6px rgba(92, 61, 17, 0.08);
+      --transition:   180ms ease;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      background-color: var(--accent);
+      background-image:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 60 60'%3E%3Cg fill='none' stroke='%23c9a96e' stroke-width='0.6' opacity='0.35'%3E%3Cline x1='10' y1='0' x2='10' y2='60'/%3E%3Cline x1='30' y1='0' x2='30' y2='60'/%3E%3Cline x1='50' y1='0' x2='50' y2='60'/%3E%3Cline x1='0' y1='10' x2='60' y2='10' stroke-dasharray='3 4'/%3E%3Cline x1='0' y1='30' x2='60' y2='30' stroke-dasharray='3 4'/%3E%3Cline x1='0' y1='50' x2='60' y2='50' stroke-dasharray='3 4'/%3E%3C/g%3E%3C/svg%3E");
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--green);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    /* ---- Header: static brand bar (original structure, no marquee) ---- */
+    .welcome-header {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 18px 20px 16px;
+      background: var(--surface);
+      border-bottom: 2px solid var(--border-light);
+      box-shadow: var(--shadow-md);
+    }
+    .welcome-header__logo { flex-shrink: 0; display: block; }
+    .welcome-header__name {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    /* ---- Main card ---- */
+    .welcome-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 24px 16px 32px;
+      max-width: 540px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .welcome-card {
+      background: var(--surface);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      padding: 28px 24px;
+      text-align: center;
+    }
+    .welcome-card__badge {
+      display: inline-block;
+      padding: 5px 14px;
+      border-radius: 999px;
+      background: var(--accent);
+      border: 1px solid var(--border-light);
+      color: var(--green);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+    }
+    .welcome-card__title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--green);
+      margin-bottom: 8px;
+    }
+    .welcome-card__subtitle {
+      font-size: 0.95rem;
+      color: var(--text-2);
+      margin-bottom: 22px;
+    }
+    .welcome-card__list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 24px;
+      text-align: left;
+    }
+    .welcome-card__list li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      color: var(--text-2);
+    }
+    .welcome-card__list svg { flex-shrink: 0; color: var(--green); }
+
+    /* ---- Continue button ---- */
+    .welcome-card__cta {
+      display: block;
+      width: 100%;
+      padding: 14px 20px;
+      background: var(--green);
+      color: #fff;
+      border: 2px solid var(--green);
+      border-radius: var(--radius-md);
+      font-family: var(--font);
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      cursor: pointer;
+      transition: background-color var(--transition), border-color var(--transition), box-shadow var(--transition);
+      box-shadow: 0 2px 8px rgba(45, 106, 79, 0.25);
+    }
+    .welcome-card__cta:hover {
+      background: var(--green-hover);
+      border-color: var(--green-hover);
+      box-shadow: 0 4px 14px rgba(45, 106, 79, 0.30);
+    }
+    .welcome-card__cta:active {
+      background: var(--green-hover);
+      box-shadow: 0 1px 4px rgba(45, 106, 79, 0.30);
+    }
+    .welcome-card__cta:focus-visible { box-shadow: 0 0 0 3px rgba(45, 106, 79, 0.35); }
+    .welcome-card__hint {
+      margin-top: 12px;
+      font-size: 0.82rem;
+      color: var(--text-3);
+    }
+
+    /* ---- Footer ---- */
+    .welcome-footer {
+      padding: 14px 16px;
+      text-align: center;
+      border-top: 1px solid var(--border-light);
+      background: var(--surface);
+      font-size: 0.8rem;
+      color: var(--text-3);
+    }
+
+    @media (max-width: 480px) {
+      .welcome-header { padding: 14px 16px 12px; gap: 10px; }
+      .welcome-header__name { font-size: 1.05rem; }
+      .welcome-card { padding: 22px 18px; }
+      .welcome-card__title { font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+  <header class="welcome-header" role="banner" aria-label="GoodVibesVendoWifi welcome">
+    <svg class="welcome-header__logo" width="40" height="40" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+      <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+      <circle cx="26" cy="43" r="2.5" fill="white"/>
+    </svg>
+    <span class="welcome-header__name">GoodVibesVendoWifi</span>
+  </header>
+
+  <main class="welcome-main">
+    <section class="welcome-card" aria-labelledby="welcome-title">
+      <span class="welcome-card__badge">Free Guest Wi-Fi</span>
+      <h1 class="welcome-card__title" id="welcome-title">Welcome! 👋</h1>
+      <p class="welcome-card__subtitle">You're one tap away from fast internet at the vendo. Get connected in seconds with your voucher code.</p>
+      <ul class="welcome-card__list">
+        <li>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          Enter your voucher code on the next screen
+        </li>
+        <li>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
+          No account needed — just accept the terms and connect
+        </li>
+        <li>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+          Fast, reliable speeds for browsing and streaming
+        </li>
+      </ul>
+      <button type="button" class="welcome-card__cta" id="continue-btn">Continue</button>
+      <p class="welcome-card__hint">Tap Continue to proceed to the login step</p>
+    </section>
+  </main>
+
+  <footer class="welcome-footer">
+    GoodVibesVendoWifi — thanks for hanging out with us! 🥥
+  </footer>
+
+  <script>
+    (function () {
+      'use strict';
+      var btn = document.getElementById('continue-btn');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        // Mark the welcome step as completed for the rest of the flow.
+        try { sessionStorage.setItem('welcomeCompleted', '1'); } catch (e) { /* storage unavailable */ }
+        // Forward any existing query params (client MAC, SSID, etc.) to the hosted login.
+        var params = window.location.search || '';
+        window.location.href = 'https://omada-captive-portal.onrender.com/' + params;
+      });
+    })();
+  </script>
+</body>
+</html>
+

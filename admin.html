@@ -1,0 +1,841 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Panel &mdash; WiFi Portal</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    body {
+      background: var(--surface-2);
+      margin: 0;
+      font-family: var(--font, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif);
+      color: var(--text);
+    }
+  </style>
+</head>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<body>
+  <div class="admin-layout">
+         <!-- Mobile burger toggle &mdash; always fixed at top-left, outside the sidebar -->
+    <button class="admin-sidebar__toggle" id="sidebar-toggle" aria-label="Toggle navigation">
+                  <i class="bi bi-list"></i>
+    </button>
+
+    <!-- Collapsible Sidebar -->
+    <aside class="admin-sidebar collapsed-mobile" id="admin-sidebar">
+      <div class="admin-sidebar__header"></div>
+      <div class="admin-sidebar__content">
+        <div class="admin-sidebar__logo">
+          <span class="admin-sidebar__logo-icon">&#128213;</span>
+          <span class="admin-sidebar__logo-text">Admin Panel</span>
+        </div>
+        <ul class="admin-sidebar__nav" id="admin-sidebar-nav">
+          <li class="admin-sidebar__nav-item">
+            <button class="admin-sidebar__nav-link admin-sidebar__nav-link--active" data-page="dashboard">
+              <span class="admin-sidebar__nav-link-icon">&#128202;</span>
+              <span class="admin-sidebar__nav-link-text">Dashboard</span>
+            </button>
+          </li>
+          <li class="admin-sidebar__nav-item">
+            <button class="admin-sidebar__nav-link" data-page="vouchers">
+              <span class="admin-sidebar__nav-link-icon">&#127979;</span>
+              <span class="admin-sidebar__nav-link-text">Vouchers</span>
+            </button>
+          </li>
+          <li class="admin-sidebar__nav-item">
+            <button class="admin-sidebar__nav-link" data-page="sessions">
+              <span class="admin-sidebar__nav-link-icon">&#128468;</span>
+              <span class="admin-sidebar__nav-link-text">Sessions</span>
+            </button>
+          </li>
+          <li class="admin-sidebar__nav-item">
+            <button class="admin-sidebar__nav-link" data-page="import">
+              <span class="admin-sidebar__nav-link-icon">&#8695;</span>
+              <span class="admin-sidebar__nav-link-text">Import</span>
+            </button>
+          </li>
+          <li class="admin-sidebar__nav-item">
+            <button class="admin-sidebar__nav-link" data-page="logout">
+              <span class="admin-sidebar__nav-link-icon">&#8617;</span>
+              <span class="admin-sidebar__nav-link-text">Logout</span>
+            </button>
+          </li>
+        </ul>
+        <!-- Admin user footer -->
+        <div class="admin-sidebar__footer">
+          <div class="admin-user">
+            <span class="admin-user__icon">&#128100;</span>
+            <div class="admin-user__info">
+              <span class="admin-user__label">Logged in as:</span>
+              <span class="admin-user__name" id="admin-username">admin</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Mobile overlay -->
+    <div class="admin-overlay" id="admin-overlay"></div>
+
+    <!-- Main Content -->
+    <main class="admin-main">
+      <header class="admin-header">
+        <div class="page-title">WiFi Portal &mdash; Admin Panel</div>
+      </header>
+
+      <!-- Dashboard Section -->
+      <div class="admin-card content-section active" id="section-dashboard">
+        <h2>Dashboard</h2>
+        <div class="admin-grid" id="stats-grid"></div>
+        <div id="dashboard-chart">
+          <h3>Voucher Status Breakdown</h3>
+          <canvas id="stats-chart" width="400" height="200"></canvas>
+        </div>
+      </div>
+
+      <!-- Vouchers Section -->
+      <div class="admin-card content-section" id="section-vouchers">
+        <div class="admin-card--header">
+          <h2 class="admin-card--title">Vouchers</h2>
+          <button type="button" class="btn btn--danger" id="btn-delete-all" disabled>Delete All Vouchers</button>
+        </div>
+        <div id="delete-all-msg"></div>
+        <div id="tab-vouchers"></div>
+      </div>
+
+      <!-- Sessions Section -->
+      <div class="admin-card content-section" id="section-sessions">
+        <h2>Sessions</h2>
+        <div id="tab-sessions"></div>
+      </div>
+
+      <!-- Import Section -->
+      <div class="admin-card content-section" id="section-import">
+        <h2>Import Vouchers</h2>
+        <div id="tab-import"></div>
+      </div>
+    </main>
+  </div>
+
+    <!-- Delete All Vouchers confirmation modal -->
+    <div class="admin-modal-overlay" id="delete-all-overlay" hidden>
+      <div class="admin-modal" role="dialog" aria-modal="true" aria-labelledby="delete-all-title">
+        <h3 id="delete-all-title">Delete All Vouchers</h3>
+        <p id="delete-all-text"></p>
+        <p class="admin-modal__warn">This action cannot be undone.</p>
+        <div id="delete-all-error" class="admin-modal__error" hidden></div>
+        <div class="admin-modal__actions">
+          <button type="button" class="btn btn--secondary" id="delete-all-cancel">Cancel</button>
+          <button type="button" class="btn btn--danger" id="delete-all-confirm">Delete All</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="config/config.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
+      var ADMIN_TOKEN = localStorage.getItem('adminToken') || '';
+
+      // Cache DOM elements
+      var els = {
+        statsGrid:      document.getElementById('stats-grid'),
+        dashboardChart: document.getElementById('dashboard-chart'),
+        tabVouchers:    document.getElementById('tab-vouchers'),
+        tabSessions:    document.getElementById('tab-sessions'),
+        tabImport:      document.getElementById('tab-import'),
+        sectionDashboard: document.getElementById('section-dashboard'),
+        sectionVouchers: document.getElementById('section-vouchers'),
+        sectionSessions:   document.getElementById('section-sessions'),
+        sectionImport:     document.getElementById('section-import'),
+        sidebar:        document.getElementById('admin-sidebar'),
+        sidebarToggle:  document.getElementById('sidebar-toggle'),
+        sidebarNav:     document.getElementById('admin-sidebar-nav'),
+        overlay:        document.getElementById('admin-overlay'),
+        adminUsername: document.getElementById('admin-username'),
+        btnDeleteAll:   document.getElementById('btn-delete-all'),
+        deleteAllMsg:   document.getElementById('delete-all-msg'),
+        deleteAllOverlay: document.getElementById('delete-all-overlay'),
+        deleteAllText:  document.getElementById('delete-all-text'),
+        deleteAllError: document.getElementById('delete-all-error'),
+        deleteAllCancel: document.getElementById('delete-all-cancel'),
+        deleteAllConfirm: document.getElementById('delete-all-confirm'),
+      };
+
+      var sidebarLinks = document.querySelectorAll('.admin-sidebar__nav-link');
+
+            function toggleSidebar(forceState) {
+        var isMobile = window.innerWidth <= 768;
+        if (isMobile) {
+          // Determine target state: if forceState given use it, else toggle
+          var targetCollapsed;
+          if (forceState !== undefined) {
+            targetCollapsed = forceState;
+          } else {
+            targetCollapsed = !els.sidebar.classList.contains('collapsed-mobile');
+          }
+          if (targetCollapsed) {
+            els.sidebar.classList.add('collapsed-mobile');
+            els.overlay.classList.add('hidden');
+          } else {
+            els.sidebar.classList.remove('collapsed-mobile');
+            els.overlay.classList.remove('hidden');
+          }
+          setToggleIcon(targetCollapsed);
+        } else {
+          var targetCollapsed;
+          if (forceState !== undefined) {
+            targetCollapsed = forceState;
+          } else {
+            targetCollapsed = !els.sidebar.classList.contains('collapsed');
+          }
+          if (targetCollapsed) {
+            els.sidebar.classList.add('collapsed');
+          } else {
+            els.sidebar.classList.remove('collapsed');
+          }
+          setToggleIcon(targetCollapsed);
+        }
+      }
+
+
+      function navigateTo(page) {
+        var isMobile = window.innerWidth <= 768;
+        if (isMobile) {
+          // Close sidebar on mobile after navigation
+          els.sidebar.classList.add('collapsed-mobile');
+          els.overlay.classList.add('hidden');
+          setToggleIcon(true);
+        }
+        sidebarLinks.forEach(function (link) {
+          link.classList.remove('admin-sidebar__nav-link--active');
+        });
+        var targetLink = document.querySelector('.admin-sidebar__nav-link[data-page="' + page + '"]');
+        if (targetLink) {
+          targetLink.classList.add('admin-sidebar__nav-link--active');
+        }
+        var sections = [
+          { el: els.sectionDashboard, name: 'dashboard' },
+          { el: els.sectionVouchers, name: 'vouchers' },
+          { el: els.sectionSessions, name: 'sessions' },
+          { el: els.sectionImport, name: 'import' },
+        ];
+        sections.forEach(function (s) {
+          if (s.el) {
+            if (s.name === page) { s.el.classList.add('active'); }
+            else { s.el.classList.remove('active'); }
+          }
+        });
+        if (page === 'vouchers') { loadVouchers(); }
+        else if (page === 'sessions') { loadSessions(); }
+        else if (page === 'import') { renderImportForm(); }
+      }
+
+
+      function logout() {
+        localStorage.removeItem('adminToken');
+        localStorage.removeItem('adminUsername');
+        window.location.href = 'login.html';
+      }
+
+      // Fixed api() &mdash; handles responses with null/empty bodies (e.g. DELETE 204 No Content)
+      function api(path, opts) {
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        if (ADMIN_TOKEN) opts.headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
+        return fetch(API_BASE + path, opts)
+          .then(function (r) {
+            var contentType = r.headers.get('content-type') || '';
+            if (contentType.indexOf('application/json') !== -1) {
+              return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; });
+            }
+            // No JSON body (e.g. DELETE 204 No Content) &mdash; return empty object
+            return { ok: r.ok, status: r.status, data: {} };
+          });
+      }
+
+      function checkAuth() {
+        if (!ADMIN_TOKEN) {
+          window.location.href = 'login.html';
+        }
+      }
+
+      checkAuth();
+
+      // Fetch admin username from API
+      function fetchAdminUsername() {
+        api('/api/admin/me')
+          .then(function (res) {
+            if (res.ok && res.data && res.data.username) {
+              if (els.adminUsername) {
+                els.adminUsername.textContent = res.data.username;
+              }
+              localStorage.setItem('adminUsername', res.data.username);
+            }
+          })
+          .catch(function () {
+            var username = localStorage.getItem('adminUsername') || 'admin';
+            if (els.adminUsername) {
+              els.adminUsername.textContent = username;
+            }
+          });
+      }
+
+      fetchAdminUsername();
+
+      function stat(label, value) {
+        return '<div class="stat-card"><div class="stat-value">' + (value || 0) + '</div><div class="stat-label">' + label + '</div></div>';
+      }
+
+
+      function loadVouchers() {
+        if (!els.tabVouchers) return;
+        els.tabVouchers.innerHTML = '<p class="muted">Loadingâ€¦</p>';
+        api('/api/admin/vouchers')
+          .then(function (res) {
+            if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load vouchers');
+            var vouchers = res.data.vouchers || [];
+            els.tabVouchers.innerHTML = renderVouchers(vouchers);
+            updateDeleteAllState(vouchers.length);
+          })
+          .catch(function (err) {
+            els.tabVouchers.innerHTML = '<p class="error-msg">' + err.message + '</p>';
+            updateDeleteAllState(0);
+          });
+      }
+
+      // Enable the Delete All button only when there is something to delete
+      function updateDeleteAllState(count) {
+        if (els.btnDeleteAll) {
+          els.btnDeleteAll.disabled = count === 0;
+          els.btnDeleteAll.textContent = count > 0
+            ? 'Delete All Vouchers (' + count + ')'
+            : 'Delete All Vouchers';
+        }
+      }
+
+      // ---- Delete All Vouchers: confirmation modal ----
+      function openDeleteAllModal(count) {
+        if (!els.deleteAllOverlay) return;
+        if (els.deleteAllText) {
+          els.deleteAllText.textContent = 'This will permanently delete ' + count +
+            ' voucher' + (count === 1 ? '' : 's') + '.';
+        }
+        if (els.deleteAllError) {
+          els.deleteAllError.hidden = true;
+          els.deleteAllError.textContent = '';
+        }
+        if (els.deleteAllConfirm) {
+          els.deleteAllConfirm.disabled = false;
+          els.deleteAllConfirm.textContent = 'Delete All';
+        }
+        els.deleteAllOverlay.hidden = false;
+        if (els.deleteAllCancel) els.deleteAllCancel.focus();
+      }
+
+      function closeDeleteAllModal() {
+        if (els.deleteAllOverlay) els.deleteAllOverlay.hidden = true;
+      }
+
+      function deleteAllVouchers() {
+        if (!els.deleteAllConfirm || els.deleteAllConfirm.disabled) return;
+        // Loading state - prevents double clicks while the request runs
+        els.deleteAllConfirm.disabled = true;
+        els.deleteAllConfirm.textContent = 'Deletingâ€¦';
+        if (els.deleteAllError) {
+          els.deleteAllError.hidden = true;
+        }
+        api('/api/admin/vouchers/delete-all', { method: 'POST' })
+          .then(function (res) {
+            if (res.ok) {
+              closeDeleteAllModal();
+              if (els.deleteAllMsg) {
+                els.deleteAllMsg.innerHTML = '<p class="success-msg">' + escapeHtml(
+                  (res.data && res.data.message) ||
+                  'All vouchers deleted. IDs will restart from 1 on the next import.'
+                ) + '</p>';
+              }
+              loadVouchers();
+              loadDashboard();
+            } else {
+              // Show the specific error returned by the backend, dismissible
+              els.deleteAllConfirm.disabled = false;
+              els.deleteAllConfirm.textContent = 'Delete All';
+              if (els.deleteAllError) {
+                els.deleteAllError.textContent = (res.data && res.data.error) ||
+                  'Failed to delete all vouchers. Please try again.';
+                els.deleteAllError.hidden = false;
+              }
+            }
+          })
+          .catch(function (err) {
+            els.deleteAllConfirm.disabled = false;
+            els.deleteAllConfirm.textContent = 'Delete All';
+            if (els.deleteAllError) {
+              els.deleteAllError.textContent = 'Network error: ' + err.message;
+              els.deleteAllError.hidden = false;
+            }
+          });
+      }
+
+      // Render vouchers table using event delegation &mdash; no inline onclick handlers
+      function renderVouchers(vouchers) {
+        if (!vouchers.length) {
+          return '<p class="muted">No vouchers found.</p>';
+        }
+        var rows = vouchers.map(function (item, idx) {
+          var stateClass = item.used_at ? 'used' : (item.state || 'active');
+          var stateLabel = item.used_at ? 'Used' : (item.state || 'active');
+          // ID is kept only as data-voucher-id (never shown) so the single
+          // Delete button still works after the raw ID column was removed.
+          return '<tr data-id="' + (item.id || 0) + '">' +
+            '<td>' + (idx + 1) + '</td>' +
+            '<td>' + escapeHtml(item.code) + '</td>' +
+            '<td><span class="badge badge-' + (item.type || 'standard') + '">' + escapeHtml(item.type || 'standard') + '</span></td>' +
+            '<td>' + (item.duration_minutes || 0) + ' min</td>' +
+            '<td>' + (item.price ? formatPrice(item.price) : '&mdash;') + '</td>' +
+            '<td><span class="badge badge-' + stateClass + '">' + escapeHtml(stateLabel) + '</span></td>' +
+            '<td><button type="button" class="btn btn--danger btn--delete-voucher" data-voucher-id="' + (item.id || 0) + '">Delete</button></td>' +
+            '</tr>';
+        }).join('');
+        return '<table><thead><tr><th>#</th><th>Code</th><th>Type</th><th>Duration</th><th>Price</th><th>State</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      }
+
+      // deleteVoucher with explicit button parameter &mdash; no reliance on global `event` object
+      function deleteVoucher(id, btn) {
+        if (!confirm('Are you sure you want to delete this voucher? This action cannot be undone.')) return;
+        if (btn) {
+          btn.classList.add('btn--danger--loading');
+          btn.textContent = 'Deletingâ€¦';
+          btn.disabled = true;
+        }
+        api('/api/admin/vouchers/' + id, { method: 'DELETE' })
+          .then(function (res) {
+            if (res.ok) {
+              loadVouchers();
+              loadDashboard();
+            } else {
+              alert(res.data && res.data.error || 'Delete failed');
+            }
+          })
+          .catch(function (err) {
+            alert('Delete failed: ' + err.message);
+          })
+          .finally(function () {
+            if (btn) {
+              btn.classList.remove('btn--danger--loading');
+              btn.textContent = 'Delete';
+              btn.disabled = false;
+            }
+          });
+      }
+
+
+      function loadSessions() {
+        if (!els.tabSessions) return;
+        els.tabSessions.innerHTML = '<p class="muted">Loadingâ€¦</p>';
+        api('/api/admin/sessions')
+          .then(function (res) {
+            if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load sessions');
+            var sessions = res.data.sessions || [];
+            els.tabSessions.innerHTML = renderSessions(sessions);
+          })
+          .catch(function (err) {
+            els.tabSessions.innerHTML = '<p class="error-msg">' + err.message + '</p>';
+          });
+      }
+
+      // Render sessions table using event delegation &mdash; no inline onclick handlers
+      function renderSessions(sessions) {
+        if (!sessions.length) {
+          return '<p class="muted">No active sessions.</p>';
+        }
+        var rows = sessions.map(function (item) {
+          return '<tr>' +
+            '<td>' + (item.session_id || '&mdash;') + '</td>' +
+            '<td>' + escapeHtml(item.client_mac) + '</td>' +
+            '<td>' + (item.ssid_name || '&mdash;') + '</td>' +
+            '<td>' + escapeHtml(item.voucher_type || 'standard') + '</td>' +
+            '<td>' + (item.duration_minutes || 0) + '</td>' +
+            '<td><span class="badge badge-' + (item.state || 'active') + '">' + escapeHtml(item.state || 'active') + '</span></td>' +
+            '<td>' + (item.expires_at ? formatDate(item.expires_at) : '&mdash;') + '</td>' +
+            '<td><button type="button" class="btn btn--warning btn--expire-session" data-session-id="' + escapeHtml(item.session_id || '') + '">Expire</button></td>' +
+            '</tr>';
+        }).join('');
+        return '<table><thead><tr><th>ID</th><th>MAC</th><th>SSID</th><th>Type</th><th>Duration</th><th>State</th><th>Expires</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      }
+
+      // expireSession with explicit button parameter &mdash; no reliance on global `event` object
+      function expireSession(sessionId, btn) {
+        if (!confirm('Expire this session?')) return;
+        if (btn) {
+          btn.classList.add('btn--expire--loading');
+          btn.textContent = 'Expiringâ€¦';
+          btn.disabled = true;
+        }
+        api('/api/admin/sessions/' + encodeURIComponent(sessionId) + '/expire', { method: 'POST' })
+          .then(function (res) {
+            if (res.ok) {
+              loadSessions();
+              loadDashboard();
+            } else {
+              alert(res.data && res.data.error || 'Expire failed');
+            }
+          })
+          .catch(function (err) {
+            alert('Expire failed: ' + err.message);
+          })
+          .finally(function () {
+            if (btn) {
+              btn.classList.remove('btn--expire--loading');
+              btn.textContent = 'Expire';
+              btn.disabled = false;
+            }
+          });
+    }
+
+      function escapeHtml(str) {
+        if (!str) return '';
+        var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+        return String(str).replace(/[&<>"']/g, function (c) { return map[c]; });
+      }
+
+      function formatPrice(amount) {
+        // amount is integer centavos - convert once, here
+        return '\u20b1' + (amount / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+
+      function formatDate(iso) {
+        try { return new Date(iso).toLocaleString(); } catch (e) { return iso || ''; }
+      }
+
+      // Template data shared by CSV and XLSX export
+      var TEMPLATE_HEADERS = ['ID', 'Code', 'Type', 'Duration', 'Price'];
+      var TEMPLATE_ROWS = [
+        [1, '123456', 'standard', 60, '\u20b150.00'],
+        [2, '789012', 'premium', 120, '\u20b1100.00']
+      ];
+
+      function buildCsv() {
+        var lines = [TEMPLATE_HEADERS.join(',')];
+        TEMPLATE_ROWS.forEach(function (row) {
+          lines.push(row.map(function (v) {
+            var s = String(v);
+            if (s.indexOf(',') !== -1 || s.indexOf('"') !== -1) {
+              return '"' + s.replace(/"/g, '""') + '"';
+            }
+            return s;
+          }).join(','));
+        });
+        return lines.join('\r\n') + '\r\n';
+      }
+
+      function downloadCsvTemplate() {
+        var csvContent = buildCsv();
+        var BOM = new Uint8Array([0xEF, 0xBB, 0xBF]);
+        var blob = new Blob([BOM, csvContent], { type: 'text/csv;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'voucher-template.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function downloadXlsxTemplate() {
+        if (!window.XLSX) {
+          alert('XLSX library not loaded. Try CSV format.');
+          return;
+        }
+        var wsData = [TEMPLATE_HEADERS].concat(TEMPLATE_ROWS);
+        var ws = XLSX.utils.aoa_to_sheet(wsData);
+        // Set column widths for readability
+        ws['!cols'] = [{ wch: 6 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
+        var wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Vouchers');
+        var wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+        var blob = new Blob([wbout], { type: 'application/octet-stream' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = 'voucher-template.xlsx';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function downloadTemplate(format) {
+        if (format === 'xlsx') {
+          downloadXlsxTemplate();
+        } else {
+          downloadCsvTemplate();
+        }
+      }
+
+          function renderImportForm() {
+        if (!els.tabImport) return;
+        els.tabImport.innerHTML =
+          '<h3>Import Vouchers from CSV/XLSX</h3>' +
+          '<p class="muted">Required columns: ID, Code, Type, Duration, Price. Code must be 6-digit numeric (ID should auto-increment starting from 1).</p>' +
+          '<form id="import-form">' +
+          '<div class="form-row">' +
+          '<div class="form-field full-width"><label for="import-file">File</label><input type="file" id="import-file" accept=".csv,.xlsx,.xls" style="width:100%"></div>' +
+          '<div class="form-field full-width"><button type="submit" class="btn btn--primary">Import Vouchers</button></div>' +
+          '<div class="form-field full-width">' +
+          '<label for="template-format">Download Template</label>' +
+          '<select id="template-format" class="form-select" style="max-width:100%">' +
+          '<option value="csv">CSV (.csv)</option>' +
+          '<option value="xlsx">Excel (.xlsx)</option>' +
+          '</select>' +
+          '</div>' +
+          '<div class="form-field full-width"><button type="button" class="btn btn--outline" id="download-template">Download</button></div>' +
+          '</div></form><div id="import-result"></div>';
+
+        var form = document.getElementById('import-form');
+        var templateBtn = document.getElementById('download-template');
+        var templateFormat = document.getElementById('template-format');
+        if (templateBtn) {
+          templateBtn.addEventListener('click', function () {
+            var fmt = templateFormat ? (templateFormat.value || 'csv') : 'csv';
+            downloadTemplate(fmt);
+          });
+        }
+        if (form) {
+          form.addEventListener('submit', function (e) {
+            e.preventDefault();
+            var fileInput = document.getElementById('import-file');
+            var result = document.getElementById('import-result');
+            if (!fileInput.files || !fileInput.files[0]) {
+              result.innerHTML = '<p class="error-msg">No file selected</p>';
+              return;
+            }
+            var file = fileInput.files[0];
+            var formData = new FormData();
+            formData.append('file', file);
+            api('/api/admin/vouchers/import', { method: 'POST', body: formData })
+              .then(function (res) {
+                if (res.ok) {
+                  result.innerHTML = '<p class="success-msg">' + (res.data.message || 'Import successful') + '</p>';
+                  loadVouchers();
+                } else {
+                  result.innerHTML = '<p class="error-msg">' + escapeHtml((res.data && res.data.error) || 'Import failed') + '</p>';
+                }
+              })
+              .catch(function (err) {
+                result.innerHTML = '<p class="error-msg">' + err.message + '</p>';
+              });
+          });
+        }
+      }
+
+      function loadDashboard() {
+        if (!els.dashboardChart) return;
+
+        var maxRetries = 3;
+        var retryDelay = 4000;
+        var attempt = 0;
+
+        function showLoading(msg) {
+          els.dashboardChart.innerHTML =
+            '<div class="loading-container">' +
+            '<div class="spinner"></div>' +
+            '<p class="muted">' + msg + '</p>' +
+            '</div>';
+        }
+
+        function fetchStats() {
+          showLoading('Loading dashboard data, please wait a moment...');
+
+          api('/api/admin/stats')
+            .then(function (res) {
+              if (!res.ok) {
+                var errMsg = (res.data && res.data.error) || '';
+                if (res.status === 429 ||
+                    errMsg.toLowerCase().includes('too many requests') ||
+                    errMsg.toLowerCase().includes('rate')) {
+                  throw new Error('RATE_LIMITED');
+                }
+                throw new Error(errMsg || 'API error');
+              }
+
+              var s = res.data.stats;
+
+              if (els.statsGrid) {
+                els.statsGrid.innerHTML = [
+                  stat('Total Vouchers', s.totalVouchers),
+                  stat('Active Vouchers', s.activeVouchers),
+                  stat('Used Vouchers', s.usedVouchers),
+                  stat('Total Sessions', s.totalSessions),
+                  stat('Active Sessions', s.activeSessions),
+                  stat('Paused Sessions', s.pausedSessions),
+                  stat('Premium Sessions', s.premiumSessions),
+                  stat('Total Revenue', '\u20b1' + (s.totalRevenue / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+                ].join('');
+              }
+
+              els.dashboardChart.innerHTML = '<canvas id="stats-chart" width="400" height="200"></canvas>';
+              var ctx = document.getElementById('stats-chart').getContext('2d');
+
+              new Chart(ctx, {
+                type: 'pie',
+                data: {
+                  labels: ['Active Vouchers', 'Used Vouchers', 'Expired Vouchers'],
+                  datasets: [{
+                    data: [s.activeVouchers, s.usedVouchers, Math.max(0, (s.totalVouchers - s.activeVouchers - s.usedVouchers))],
+                                        backgroundColor: ['#2d6a4f', '#dc2626', '#9ca3af'],
+                  }]
+                },
+                options: {
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  plugins: { legend: { position: 'bottom' } }
+                }
+              });
+            })
+            .catch(function (err) {
+              if (err.message === 'RATE_LIMITED' && attempt < maxRetries) {
+                attempt++;
+                showLoading('Retrying in 4 seconds... (attempt ' + attempt + ' of ' + maxRetries + ')');
+                setTimeout(fetchStats, retryDelay);
+              } else if (err.message === 'RATE_LIMITED') {
+                els.dashboardChart.innerHTML =
+                  '<p class="muted">The server is busy (rate limited). ' +
+                  '<a href="javascript:loadDashboard()">Refresh now</a> ' +
+                  'or try again in a few minutes.</p>';
+              } else {
+                els.dashboardChart.innerHTML = '<p class="error-msg">Failed to load stats: ' + err.message + '</p>';
+              }
+            });
+        }
+
+        fetchStats();
+      }
+
+      // Sidebar navigation &mdash; event delegation on nav container
+      els.sidebarNav.addEventListener('click', function (e) {
+        var link = e.target.closest('.admin-sidebar__nav-link');
+        if (!link) return;
+        var page = link.getAttribute('data-page');
+        if (page === 'logout') { logout(); return; }
+        navigateTo(page);
+      });
+
+            // Cached toggle icon
+      var sidebarToggleIcon = els.sidebarToggle ? els.sidebarToggle.querySelector('i.bi') : null;
+
+            function setToggleIcon(collapsed) {
+        if (!sidebarToggleIcon) return;
+        if (collapsed) {
+          // Sidebar is closed â†’ show hamburger (click to open)
+          sidebarToggleIcon.classList.remove('bi-x-lg');
+          sidebarToggleIcon.classList.add('bi-list');
+        } else {
+          // Sidebar is open â†’ show X (click to close)
+          sidebarToggleIcon.classList.remove('bi-list');
+          sidebarToggleIcon.classList.add('bi-x-lg');
+        }
+      }
+
+      // Hamburger toggle
+      els.sidebarToggle.addEventListener('click', function () { toggleSidebar(); });
+
+            // Overlay click closes sidebar (mobile)
+      els.overlay.addEventListener('click', function () {
+        els.sidebar.classList.add('collapsed-mobile');
+        els.overlay.classList.add('hidden');
+        setToggleIcon(true);
+      });
+
+      // Event delegation for voucher delete buttons
+      document.addEventListener('click', function (e) {
+        var btn = e.target.closest('.btn--delete-voucher');
+        if (btn) {
+          var id = btn.getAttribute('data-voucher-id');
+          deleteVoucher(id, btn);
+        }
+      });
+
+      // Delete All Vouchers wiring
+      if (els.btnDeleteAll) {
+        els.btnDeleteAll.addEventListener('click', function () {
+          // Count vouchers currently shown in the table
+          var rows = els.tabVouchers ? els.tabVouchers.querySelectorAll('tbody tr').length : 0;
+          if (rows > 0) openDeleteAllModal(rows);
+        });
+      }
+      if (els.deleteAllCancel) {
+        els.deleteAllCancel.addEventListener('click', closeDeleteAllModal);
+      }
+      if (els.deleteAllConfirm) {
+        els.deleteAllConfirm.addEventListener('click', deleteAllVouchers);
+      }
+      // Click outside the modal (on the dimmed overlay) closes it
+      if (els.deleteAllOverlay) {
+        els.deleteAllOverlay.addEventListener('click', function (e) {
+          if (e.target === els.deleteAllOverlay) closeDeleteAllModal();
+        });
+      }
+      // Escape closes the modal
+      document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && els.deleteAllOverlay && !els.deleteAllOverlay.hidden) {
+          closeDeleteAllModal();
+        }
+      });
+
+      // Event delegation for session expire buttons
+      document.addEventListener('click', function (e) {
+        var btn = e.target.closest('.btn--expire-session');
+        if (btn) {
+          var sid = btn.getAttribute('data-session-id');
+          expireSession(sid, btn);
+        }
+      });
+
+                                    // Reset sidebar state on resize between mobile/desktop breakpoints
+                  (function () {
+                    var resizeTimer;
+                    var lastBreakpoint = window.innerWidth <= 768 ? 'mobile' : 'desktop';
+                    window.addEventListener('resize', function () {
+                      clearTimeout(resizeTimer);
+                      resizeTimer = setTimeout(function () {
+                        var isMobile = window.innerWidth <= 768;
+                        var currentBreakpoint = isMobile ? 'mobile' : 'desktop';
+                        if (currentBreakpoint === lastBreakpoint) return;
+                        lastBreakpoint = currentBreakpoint;
+                        if (isMobile) {
+                          els.sidebar.classList.remove('collapsed');
+                          els.sidebar.classList.add('collapsed-mobile');
+                          els.overlay.classList.add('hidden');
+                          setToggleIcon(true);
+                        } else {
+                          els.sidebar.classList.remove('collapsed-mobile');
+                          els.sidebar.classList.remove('collapsed');
+                          els.overlay.classList.add('hidden');
+                          setToggleIcon(false);
+                        }
+                      }, 100);
+                    });
+                  })();
+
+      // Initialize toggle icon state (sidebar starts collapsed on mobile, expanded on desktop)
+      setToggleIcon(window.innerWidth <= 768);
+
+      // Show dashboard by default, then load vouchers
+      loadDashboard();
+      loadVouchers();
+    })();
+  </script>
+</body>
+</html>
+
+
+

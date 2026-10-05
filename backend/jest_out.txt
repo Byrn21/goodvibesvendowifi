@@ -1,0 +1,108 @@
+﻿  console.log
+    [migrate_fix] Sessions table not found ÔÇö CREATE TABLE will handle it.
+
+      at log (src/db/migrate_fix.js:115:15)
+
+  console.log
+    [migrate_fix] Vouchers table not found ÔÇö CREATE TABLE will handle it.
+
+      at log (src/db/migrate_fix.js:162:15)
+
+  console.log
+    Omada portal backend running on port 0 [test]
+
+      at Server.log (src/server.js:204:13)
+
+  console.error
+    [webhook/macrodroid] Omada auth failed for ref REF-OMADA-FAIL-1: controller down
+
+    [0m [90m 189 |[39m       })[33m;[39m
+     [90m 190 |[39m     } [36mcatch[39m (omadaErr) {
+    [31m[1m>[22m[39m[90m 191 |[39m       console[33m.[39merror([32m'[webhook/macrodroid] Omada auth failed for ref '[39m [33m+[39m refNo [33m+[39m [32m':'[39m[33m,[39m omadaErr[33m.[39mmessage)[33m;[39m
+     [90m     |[39m               [31m[1m^[22m[39m
+     [90m 192 |[39m       [36mawait[39m db[33m.[39mrun(
+     [90m 193 |[39m         [32m`UPDATE sessions SET omada_auth_failed = 1, updated_at = ? WHERE session_id = ?`[39m[33m,[39m
+     [90m 194 |[39m         [[36mnew[39m [33mDate[39m()[33m.[39mtoISOString()[33m,[39m sessionId][0m
+
+      at error (src/routes/webhook.js:191:15)
+
+  console.error
+    [webhook/macrodroid] MISSING_PORTAL_CONTEXT for AA:BB:CC:DD:EE:FF ref REF-NO-CTX-1: no portal_client_context row for AA:BB:CC:DD:EE:FF
+
+    [0m [90m 163 |[39m
+     [90m 164 |[39m     [36mif[39m (contextReason) {
+    [31m[1m>[22m[39m[90m 165 |[39m       console[33m.[39merror([32m'[webhook/macrodroid] MISSING_PORTAL_CONTEXT for '[39m [33m+[39m normalizedMac [33m+[39m [32m' ref '[39m [33m+[39m refNo [33m+[39m [32m': '[39m [33m+[39m contextReason)[33m;[39m
+     [90m     |[39m               [31m[1m^[22m[39m
+     [90m 166 |[39m       [36mawait[39m db[33m.[39mrun(
+     [90m 167 |[39m         [32m`UPDATE sessions SET omada_auth_failed = 1, updated_at = ? WHERE session_id = ?`[39m[33m,[39m
+     [90m 168 |[39m         [[36mnew[39m [33mDate[39m()[33m.[39mtoISOString()[33m,[39m sessionId][0m
+
+      at error (src/routes/webhook.js:165:15)
+
+  console.error
+    [webhook/macrodroid] MISSING_PORTAL_CONTEXT for AA:BB:CC:DD:EE:FF ref REF-STALE-CTX-1: context stale (age 7200s > max 3600s) for AA:BB:CC:DD:EE:FF
+
+    [0m [90m 163 |[39m
+     [90m 164 |[39m     [36mif[39m (contextReason) {
+    [31m[1m>[22m[39m[90m 165 |[39m       console[33m.[39merror([32m'[webhook/macrodroid] MISSING_PORTAL_CONTEXT for '[39m [33m+[39m normalizedMac [33m+[39m [32m' ref '[39m [33m+[39m refNo [33m+[39m [32m': '[39m [33m+[39m contextReason)[33m;[39m
+     [90m     |[39m               [31m[1m^[22m[39m
+     [90m 166 |[39m       [36mawait[39m db[33m.[39mrun(
+     [90m 167 |[39m         [32m`UPDATE sessions SET omada_auth_failed = 1, updated_at = ? WHERE session_id = ?`[39m[33m,[39m
+     [90m 168 |[39m         [[36mnew[39m [33mDate[39m()[33m.[39mtoISOString()[33m,[39m sessionId][0m
+
+      at error (src/routes/webhook.js:165:15)
+
+node.exe : FAIL __tests__/webhook.test.js
+At line:1 char:1
++ & "C:\Program Files\nodejs/node.exe" "C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (FAIL __tests__/webhook.test.js:String) [], RemoteE 
+   xception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  POST /api/webhooks/macrodroid
+    ÔêÜ 401 when secret_token is missing (28 ms)
+    ÔêÜ 401 when secret_token is wrong (9 ms)
+    ÔêÜ 400 when amount is missing or non-positive (10 ms)
+    ÔêÜ 400 when ref_no is missing or too long (5 ms)
+    ÔêÜ 400 when mac_address is invalid (2 ms)
+    ÔêÜ 400 when amount grants zero minutes at the configured rate (3 ms)
+    ÔêÜ 200 success: rows written, Omada called, session active, minutes correct (6 ms)
+    ÔêÜ 409 duplicate ref_no is rejected before any new write (6 ms)
+    ÔêÜ 502 when Omada authorization fails: payment still recorded, flag set (10 ms)
+    ÔêÜ MAC is normalized to canonical uppercase colon format on save (4 ms)
+    ÔêÜ 422 MISSING_PORTAL_CONTEXT when no context row exists: payment durable, flag set, Omada 
+never called (6 ms)
+    ├ù 422 MISSING_PORTAL_CONTEXT when context row is partial (missing ap_mac): Omada never 
+called
+    ÔêÜ 422 MISSING_PORTAL_CONTEXT when context row is stale (seen_at > 1h old): Omada never 
+called (5 ms)
+
+  ÔùÅ POST /api/webhooks/macrodroid ÔÇ║ 422 MISSING_PORTAL_CONTEXT when context row is partial 
+(missing ap_mac): Omada never called
+
+    SqliteError: NOT NULL constraint failed: portal_client_context.ap_mac
+
+    [0m [90m 167 |[39m     [36masync[39m run(sql[33m,[39m params [33m=[39m []) {
+     [90m 168 |[39m       [36mconst[39m stmt [33m=[39m 
+sqliteDb[33m.[39mprepare(sql)[33m;[39m
+    [31m[1m>[22m[39m[90m 169 |[39m       [36mconst[39m info [33m=[39m 
+stmt[33m.[39mrun([33m...[39mparams)[33m;[39m
+     [90m     |[39m                         [31m[1m^[22m[39m
+     [90m 170 |[39m       [36mreturn[39m {
+     [90m 171 |[39m         rowCount[33m:[39m info[33m.[39mchanges[33m,[39m
+     [90m 172 |[39m         insertId[33m:[39m info[33m.[39mlastInsertRowid[33m,[39m[0m
+
+      at Object.run (src/db/client.js:169:25)
+      at run (__tests__/webhook.test.js:91:17)
+      at Object.seedContext (__tests__/webhook.test.js:258:11)
+
+Test Suites: 1 failed, 1 total
+Tests:       1 failed, 12 passed, 13 total
+Snapshots:   0 total
+Time:        0.767 s, estimated 1 s
+Ran all test suites matching /__tests__\\webhook.test.js/i.
+Jest did not exit one second after the test run has completed.
+
+'This usually means that there are asynchronous operations that weren't stopped in your tests. 
+Consider running Jest with `--detectOpenHandles` to troubleshoot this issue.

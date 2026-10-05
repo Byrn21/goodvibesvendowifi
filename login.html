@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin Login - WiFi Portal</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    body { background: #f0f2f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .login-container { max-width: 400px; width: 100%; }
+    .login-card { background: #fff; border-radius: 12px; padding: 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); }
+    .login-card h1 { margin: 0 0 8px 0; color: #1a1a1a; font-size: 24px; }
+    .login-card p.muted { color: #888; font-size: 14px; margin: 0 0 24px 0; }
+    .form-row { margin-bottom: 16px; }
+    .form-row label { display: block; font-size: 13px; font-weight: 500; color: #333; margin-bottom: 6px; }
+    .form-row input { width: 100%; padding: 10px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; }
+    .btn--primary { width: 100%; padding: 12px 16px; background: #2d6a4f; color: #fff; border: none; border-radius: 6px; font-size: 14px; font-weight: 500; cursor: pointer; }
+    .btn--primary:hover { background: #245842; }
+    .error-msg { color: #c62828; font-size: 13px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="login-container">
+    <div class="login-card">
+      <h1>WiFi Portal - Admin Login</h1>
+      <p class="muted">Enter your credentials to access the admin panel.</p>
+      <div id="login-form">
+        <div class="form-row">
+          <label for="username">Username</label>
+          <input type="text" id="username" autocomplete="username">
+        </div>
+        <div class="form-row">
+          <label for="password">Password</label>
+          <input type="password" id="password" autocomplete="current-password">
+        </div>
+        <button id="login-btn" class="btn--primary">Log In</button>
+        <div id="login-error" class="error-msg"></div>
+      </div>
+    </div>
+  </div>
+  <script src="config/config.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
+
+      var btn = document.getElementById('login-btn');
+      var errorDiv = document.getElementById('login-error');
+
+      var MAX_AUTO_RETRIES = 3;
+      var autoRetryCount = 0;
+      var retryTimer = null;
+
+      function setDisabled(disabled) {
+        btn.disabled = disabled;
+        btn.textContent = disabled ? 'Please wait…' : 'Log In';
+      }
+
+      // Live countdown, then retry the login automatically
+      function scheduleRetry(seconds, username, password) {
+        if (retryTimer) clearInterval(retryTimer);
+        var remaining = Math.min(seconds, 900); // cap display at 15 min
+        setDisabled(true);
+        retryTimer = setInterval(function () {
+          errorDiv.textContent = 'Too many login attempts. Retrying in ' + remaining + ' second' + (remaining === 1 ? '' : 's') + '…';
+          remaining--;
+          if (remaining < 0) {
+            clearInterval(retryTimer);
+            retryTimer = null;
+            attemptLogin(username, password);
+          }
+        }, 1000);
+      }
+
+      function attemptLogin(username, password) {
+        errorDiv.textContent = '';
+        setDisabled(true);
+
+        fetch(API_BASE + '/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: username, password: password })
+        }).then(function (r) {
+          return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; });
+        }).then(function (res) {
+          if (res.ok && res.data.success) {
+            if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+            localStorage.setItem('adminToken', res.data.token);
+            window.location.href = 'admin.html';
+            return;
+          }
+          if (res.status === 429 || res.data.code === 'RATE_LIMITED') {
+            var waitSecs = parseInt(res.data.retryAfterSeconds, 10);
+            // Fallback: backend always sends retryAfterSeconds, but if it is
+            // missing (e.g. an older server), default to 60 seconds.
+            if (isNaN(waitSecs) || waitSecs <= 0) waitSecs = 60;
+            errorDiv.textContent = res.data.error || 'Too many login attempts. Please try again later.';
+            if (autoRetryCount < MAX_AUTO_RETRIES) {
+              autoRetryCount++;
+              scheduleRetry(waitSecs, username, password);
+            }
+            return;
+          }
+          setDisabled(false);
+          errorDiv.textContent = res.data.error || 'Login failed. Check your credentials.';
+        }).catch(function (err) {
+          setDisabled(false);
+          errorDiv.textContent = 'Connection error: ' + err.message;
+        });
+      }
+
+      btn.addEventListener('click', function () {
+        if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+        var username = document.getElementById('username').value.trim();
+        var password = document.getElementById('password').value;
+
+        if (!username || !password) {
+          errorDiv.textContent = 'Please enter both username and password.';
+          return;
+        }
+
+        autoRetryCount = 0;
+        attemptLogin(username, password);
+      });
+    })();
+  </script>
+</body>
+</html>
