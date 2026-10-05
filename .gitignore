@@ -89,14 +89,6 @@ temp/
 #JavaScript
 assets/portal.js
 
-# Real payment QR codes (keep placeholders tracked, hide real assets)
-assets/gcashqr.jpg
-assets/mayaqr.jpg
-assets/qrph.png
-assets/images/buko.png
-assets/images/pancake.png
-assets/images/siomai.png
-
 # Backup/export files that may contain real voucher or customer data
 *.csv
 *.xlsx
