@@ -24,6 +24,17 @@ COPY login.html    /app/public/login.html
 COPY assets/         /app/public/assets/
 COPY config/config.js /app/public/config/config.js
 
+# --- Store location injection (build-time) ---
+# index.html ships with the __STORE_LOCATION__ placeholder. Render passes the
+# dashboard's environment variables to Docker builds as build arguments (see
+# render.com/docs/docker), so STORE_LOCATION is available here. When it is unset
+# or empty the script injects the fallback text "Store location coming soon".
+# The script is copied to /app (not /app/public) so it is never served as a
+# static file; at /app it resolves index.html at /app/public/index.html.
+COPY inject-secrets.js /app/inject-secrets.js
+ARG STORE_LOCATION
+RUN node inject-secrets.js
+
 # Expose port (Render sets $PORT dynamically at runtime)
 ENV NODE_ENV=production
 

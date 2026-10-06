@@ -37,7 +37,8 @@ services:
         value: info
       - key: DEFAULT_REDIRECT_URL
         value: https://www.google.com
-      # Secrets � set these in the Render dashboard
+      # Secrets — set these in the Render dashboard
+      # STORE_LOCATION (injected into index.html at build time by inject-secrets.js)
       # ADMIN_API_KEY
       # ADMIN_USERNAME
       # ADMIN_PASSWORD
