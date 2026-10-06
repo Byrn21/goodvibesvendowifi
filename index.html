@@ -8,6 +8,181 @@
   <title>WiFi Portal — Connect</title>
   <link rel="stylesheet" href="assets/style.css">
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232d6a4f'/><path d='M6 22 Q16 10 26 22' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/><path d='M11 26 Q16 18 21 26' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/><circle cx='16' cy='29' r='1.5' fill='white'/></svg>">
+  <!-- Contact Support modal — identical markup, styling and behavior to status.html -->
+  <style>
+    /* ---- "Contact support" trigger styled like a link ---- */
+    .support-trigger {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      color: var(--green, #2d6a4f);
+      font-weight: 700;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-trigger:hover { text-decoration: underline; }
+    .support-trigger:focus-visible {
+      outline: 2px solid var(--green, #2d6a4f);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    /* ---- Support modal (same code/styling as error.html) ---- */
+    body.modal-open { overflow: hidden; }
+
+    .support-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(44, 24, 16, 0.55);
+      -webkit-backdrop-filter: blur(4px);
+      backdrop-filter: blur(4px);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 200ms ease, visibility 0s linear 200ms;
+    }
+    .support-modal-overlay.is-open {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 200ms ease;
+    }
+
+    .support-modal {
+      background: var(--surface, #fffcf5);
+      border-radius: 16px;
+      box-shadow: var(--shadow-lg, 0 8px 32px rgba(92, 61, 17, 0.14));
+      max-width: 420px;
+      width: 100%;
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      transform: scale(0.94) translateY(10px);
+      transition: transform 200ms ease;
+    }
+    .support-modal-overlay.is-open .support-modal {
+      transform: scale(1) translateY(0);
+    }
+
+    .support-modal__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 20px 20px 14px;
+      border-bottom: 1px solid var(--border-light, #e8d5bc);
+      background: var(--surface-2, #f7f0e3);
+    }
+    .support-modal__title {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 700;
+      color: var(--text, #3d3327);
+    }
+    .support-modal__subtitle {
+      margin: 3px 0 0;
+      font-size: 0.8125rem;
+      color: var(--text-3, #8a7d68);
+      line-height: 1.4;
+    }
+    .support-modal__close {
+      flex-shrink: 0;
+      width: 34px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      border-radius: var(--radius-sm, 10px);
+      color: var(--text-3, #8a7d68);
+      cursor: pointer;
+      transition: var(--transition, 180ms ease);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-modal__close:hover { color: var(--text, #3d3327); background: var(--surface-3, #ede0c8); }
+    .support-modal__close:focus-visible {
+      outline: 2px solid var(--green, #2d6a4f);
+      outline-offset: 2px;
+    }
+
+    .support-modal__body {
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .support-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      background: var(--surface-2, #f7f0e3);
+      border: 1px solid var(--border-light, #e8d5bc);
+      border-radius: 12px;
+    }
+    .support-row__icon {
+      flex-shrink: 0;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--accent, #e9f5db);
+      color: var(--green, #2d6a4f);
+      border-radius: 10px;
+    }
+    .support-row__label {
+      display: block;
+      font-size: 0.6875rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-3, #8a7d68);
+      margin-bottom: 2px;
+    }
+    .support-row__value {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--green, #2d6a4f);
+      text-decoration: none;
+      word-break: break-word;
+    }
+    .support-row__value:hover { text-decoration: underline; }
+
+    .support-modal__footer { padding: 4px 20px 20px; }
+
+    .support-modal__close-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 48px;
+      background: var(--surface, #fffcf5);
+      color: var(--green, #2d6a4f);
+      font-size: 16px;
+      font-weight: 700;
+      font-family: inherit;
+      border: 2px solid var(--green, #2d6a4f);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background var(--transition, 180ms ease), transform 80ms ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-modal__close-btn:hover { background: rgba(45, 106, 79, 0.08); }
+    .support-modal__close-btn:active { transform: scale(0.98); }
+    .support-modal__close-btn:focus-visible {
+      outline: 3px solid rgba(45, 106, 79, 0.45);
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 480px) {
+      .support-modal { max-width: 100%; }
+    }
+  </style>
 </head>
 <body>
   <!-- Skip to main content -->
@@ -535,7 +710,7 @@
       <footer class="portal-footer" role="contentinfo">
         <p class="support-info" id="support-info">
           Need help?
-          <a href="__SUPPORT_EMAIL__" id="support-email" class="support-link">Contact support</a>
+          <button type="button" class="support-trigger" aria-haspopup="dialog">Contact support</button>
         </p>
         <p class="powered-by">Powered by Bukuhan WiFi Vendo</p>
       </footer>
@@ -705,6 +880,67 @@
   </div>
 </div><!-- /.page-wrapper -->
 
+  <!-- Contact Support modal (same code/styling as error.html) -->
+  <div class="support-modal-overlay" id="support-modal" role="dialog" aria-modal="true" aria-labelledby="support-modal-title" aria-hidden="true">
+    <div class="support-modal">
+      <header class="support-modal__header">
+        <div>
+          <h3 class="support-modal__title" id="support-modal-title">Contact Support</h3>
+          <p class="support-modal__subtitle">We're here to help you get connected.</p>
+        </div>
+        <button type="button" class="support-modal__close" id="support-modal-close" aria-label="Close contact support dialog">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+            <line x1="6" y1="6" x2="18" y2="18"/>
+            <line x1="18" y1="6" x2="6" y2="18"/>
+          </svg>
+        </button>
+      </header>
+
+      <div class="support-modal__body">
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M13.5 21v-7h2.4l.4-3h-2.8V9.1c0-.9.3-1.5 1.6-1.5h1.3V4.9c-.3 0-1.1-.1-2-.1-2 0-3.4 1.2-3.4 3.5V11H8.5v3H11v7h2.5z"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Facebook Page</span>
+            <a class="support-row__value" id="support-facebook" href="#" target="_blank" rel="noopener noreferrer"></a>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Contact Number</span>
+            <a class="support-row__value" id="support-phone" href="#"></a>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="2"/>
+              <path d="m22 7-10 6L2 7"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Email</span>
+            <a class="support-row__value" id="support-email" href="#"></a>
+          </div>
+        </div>
+      </div>
+
+      <footer class="support-modal__footer">
+        <button type="button" class="support-modal__close-btn" id="support-modal-close-btn">Close</button>
+      </footer>
+    </div>
+  </div>
+
   <script src="assets/carousel.js"></script>
   <script src="config/config.js"></script>
   <script src="assets/portal.js"></script>
@@ -716,6 +952,124 @@
       // Expose on window for debug / status page reuse
       window.__portalCarousel = carousel;
     });
+  </script>
+  <script>
+    /* ============================================================
+       Contact Support modal — same code/behavior as status.html
+       ============================================================ */
+    (function () {
+      // The modal markup ships with the page, so this is only a guard against
+      // the script being kept while the component is removed.
+      var supportOverlay = document.getElementById('support-modal');
+      if (!supportOverlay) return;
+
+      var SUPPORT_CONFIG = {
+        facebookName: '__FACEBOOK_PAGE_NAME__',
+        facebookUrl:  '__FACEBOOK_URL__',
+        phone:        '__CONTACT_NUMBER__',
+        email:        '__SUPPORT_EMAIL__'
+      };
+
+      var supportTriggers = document.querySelectorAll('.support-trigger');
+      var supportCloseX = document.getElementById('support-modal-close');
+      var supportCloseBtn = document.getElementById('support-modal-close-btn');
+      var supportLastFocused = null;
+
+      // Populate the support details. The values are injected at build time by
+      // inject-secrets.js; when one was not configured its row is hidden, so the
+      // modal never shows a raw placeholder or a malformed tel:/mailto: link.
+      function fillSupportRow(id, text, href) {
+        var link = document.getElementById(id);
+        if (!link) return;
+
+        var row = link.closest ? link.closest('.support-row') : link.parentNode;
+        var value = String(text || '').trim();
+
+        if (!value) {
+          if (row) row.style.display = 'none';
+          return;
+        }
+
+        link.textContent = value;
+
+        if (href && href !== '#') {
+          link.href = href;
+        } else {
+          // No usable target — remove the link behaviour instead of leaving
+          // behind an inert "#" that only reloads the page.
+          link.removeAttribute('href');
+          link.removeAttribute('target');
+        }
+      }
+
+      fillSupportRow('support-facebook', SUPPORT_CONFIG.facebookName, SUPPORT_CONFIG.facebookUrl);
+      fillSupportRow(
+        'support-phone',
+        SUPPORT_CONFIG.phone,
+        SUPPORT_CONFIG.phone ? 'tel:' + SUPPORT_CONFIG.phone.replace(/[^+0-9]/g, '') : ''
+      );
+      fillSupportRow(
+        'support-email',
+        SUPPORT_CONFIG.email,
+        SUPPORT_CONFIG.email ? 'mailto:' + SUPPORT_CONFIG.email : ''
+      );
+
+      function openSupportModal() {
+        supportLastFocused = document.activeElement;
+        supportOverlay.classList.add('is-open');
+        supportOverlay.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+        supportCloseX.focus();
+      }
+
+      function closeSupportModal() {
+        supportOverlay.classList.remove('is-open');
+        supportOverlay.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('modal-open');
+        if (supportLastFocused && typeof supportLastFocused.focus === 'function') {
+          supportLastFocused.focus();
+        }
+      }
+
+      Array.prototype.forEach.call(supportTriggers, function (trigger) {
+        trigger.addEventListener('click', openSupportModal);
+      });
+      supportCloseX.addEventListener('click', closeSupportModal);
+      supportCloseBtn.addEventListener('click', closeSupportModal);
+
+      // Click on the dark overlay (outside the dialog) closes the modal
+      supportOverlay.addEventListener('click', function (e) {
+        if (e.target === supportOverlay) closeSupportModal();
+      });
+
+      // Escape closes; Tab is trapped inside the modal while it is open
+      document.addEventListener('keydown', function (e) {
+        if (!supportOverlay.classList.contains('is-open')) return;
+
+        if (e.key === 'Escape') {
+          closeSupportModal();
+          return;
+        }
+
+        if (e.key === 'Tab') {
+          var focusables = supportOverlay.querySelectorAll(
+            'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          );
+          if (!focusables.length) return;
+          var first = focusables[0];
+          var last = focusables[focusables.length - 1];
+
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      });
+
+    })();
   </script>
 </body>
 </html>

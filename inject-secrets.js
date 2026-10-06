@@ -6,11 +6,16 @@
  * the public GitHub repository while still rendering on the live site.
  *
  * Placeholders replaced (see the PLACEHOLDERS table below):
- *   __STORE_LOCATION__      <- STORE_LOCATION      (index.html)
- *   __FACEBOOK_PAGE_NAME__  <- FACEBOOK_PAGE_NAME  (error.html, status.html)
- *   __FACEBOOK_URL__        <- FACEBOOK_URL        (error.html, status.html)
- *   __CONTACT_NUMBER__      <- CONTACT_NUMBER      (error.html, status.html)
+ *   __STORE_LOCATION__      <- STORE_LOCATION      (index.html — HTML text)
+ *   __FACEBOOK_PAGE_NAME__  <- FACEBOOK_PAGE_NAME  (index.html, error.html, status.html)
+ *   __FACEBOOK_URL__        <- FACEBOOK_URL        (index.html, error.html, status.html)
+ *   __CONTACT_NUMBER__      <- CONTACT_NUMBER      (index.html, error.html, status.html)
  *   __SUPPORT_EMAIL__       <- SUPPORT_EMAIL       (all four pages)
+ *
+ * One page may hold both kinds of token: index.html renders the store location
+ * as HTML but builds its Contact Support config out of JS string literals. The
+ * HTML-vs-JS context is therefore resolved per placeholder, not per file (see
+ * TARGETS and contextFor() below), so a single pass replaces every token.
  *
  * Set the real values in the Render dashboard (Environment Variables) — never in
  * this repository. Missing values never render a broken `tel:`/`mailto:` link:
@@ -99,13 +104,37 @@ const PLACEHOLDERS = [
  * Target pages. `context` selects which renderer above applies:
  *   html — tokens live in HTML attributes/text (safe to HTML-escape)
  *   js   — tokens live inside a JavaScript string literal (needs JS escaping)
+ *
+ * A page is not limited to one context. `context` is therefore either a plain
+ * string (the same context for every token in that file) or an object keyed by
+ * placeholder token, with an optional `default` for the tokens not listed:
+ *
+ *   { default: 'js', '__STORE_LOCATION__': 'html' }
  */
 const TARGETS = [
-  { name: 'index.html', context: 'html' },
+  // Store hours are HTML text; the Contact Support modal config is JS.
+  { name: 'index.html', context: { default: 'js', '__STORE_LOCATION__': 'html' } },
   { name: 'success.html', context: 'html' },
   { name: 'error.html', context: 'js' },
   { name: 'status.html', context: 'js' },
 ];
+
+/**
+ * Pick the context ('html' or 'js') that applies to one placeholder in one
+ * target file.
+ *
+ * `target.context` is either a string (applies to every token in the file) or
+ * a token -> context map with an optional `default` entry. Anything else falls
+ * back to HTML, the safe default for a token sitting in markup.
+ */
+function contextFor(target, placeholder) {
+  const context = target.context;
+  if (typeof context === 'string') return context;
+  if (context && typeof context === 'object') {
+    return context[placeholder.token] || context.default || 'html';
+  }
+  return 'html';
+}
 
 /**
  * Locate the directory holding the portal HTML.
@@ -188,7 +217,8 @@ function main() {
     const notes = [];
 
     for (const placeholder of PLACEHOLDERS) {
-      const render = placeholder[target.context];
+      const context = contextFor(target, placeholder);
+      const render = placeholder[context];
       if (!render) continue; // token is not used in this context
 
       const pattern = new RegExp(placeholder.token, 'g');
@@ -205,7 +235,7 @@ function main() {
       });
 
       counts[placeholder.env] = (counts[placeholder.env] || 0) + matches.length;
-      notes.push(placeholder.env + ' (' + matches.length + 'x' + (raw ? '' : ', unset') + ')');
+      notes.push(placeholder.env + ' (' + matches.length + 'x ' + context + (raw ? '' : ', unset') + ')');
     }
 
     if (output === html) continue; // page had no placeholders — leave it alone
