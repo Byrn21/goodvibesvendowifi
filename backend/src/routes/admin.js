@@ -15,14 +15,29 @@
  *   GET    /api/admin/sessions   — List active sessions
  *   POST   /api/admin/sessions/:id/expire — Force-expire a session
  *   GET    /api/admin/stats      — Dashboard statistics
+ *
+ * Pending-claim dashboard (all routes require the `x-admin-password` header,
+ * matched against process.env.ADMIN_PASSWORD; fail closed when unset):
+ *   GET    /api/admin/claims/pending     — List manual payment claims awaiting review
+ *   POST   /api/admin/claims/approve     — Authorize the device and process the claim
+ *   POST   /api/admin/claims/reject      — Mark a claim rejected
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const router = express.Router();
 const { getDb } = require('../db/client');
 const { expireSession } = require('../services/session');
 const { parsePriceToCentavos } = require('../utils/price');
+const { normalizeMac } = require('../utils/device-id');
+const { computeMinutesFromAmount } = require('../utils/duration');
+const omadaService = require('../services/omada');
+
+// Duration granted when a claim's amount is missing/unrecognized (manual
+// claims are written with amount = NULL by POST /api/payment/claim). Kept as
+// a named constant — never a magic number inline.
+const DEFAULT_CLAIM_DURATION_MINUTES = 60;
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
@@ -56,6 +71,255 @@ router.post('/login', (req, res, next) => {
     next(err);
   }
 });
+
+// ── Pending-claims dashboard (x-admin-password auth) ───────────────────
+// Separate from the API-key/token auth above so the existing /api/admin/*
+// routes and their tests are untouched. Applied to EVERY claims route via
+// router.use(...).
+
+/** Constant-time string comparison (avoids leaking the password by timing). */
+function safeEqualPassword(a, b) {
+  const bufA = Buffer.from(String(a || ''), 'utf8');
+  const bufB = Buffer.from(String(b || ''), 'utf8');
+  if (bufA.length !== bufB.length) {
+    crypto.timingSafeEqual(Buffer.alloc(32), Buffer.alloc(32));
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Require the `x-admin-password` header to match process.env.ADMIN_PASSWORD.
+ * FAIL CLOSED: when ADMIN_PASSWORD is unset, every request is rejected 401
+ * (the dashboard is never reachable without an explicit configured secret).
+ */
+function requireAdminPassword(req, res, next) {
+  const configured = process.env.ADMIN_PASSWORD || '';
+  if (!configured) {
+    return res.status(401).json({
+      success: false,
+      error: 'Admin dashboard is not configured. Set ADMIN_PASSWORD on the server.',
+      code: 'ADMIN_NOT_CONFIGURED',
+    });
+  }
+  const provided = req.headers['x-admin-password'];
+  if (typeof provided !== 'string' || !safeEqualPassword(provided, configured)) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized — invalid admin password.',
+      code: 'UNAUTHORIZED',
+    });
+  }
+  return next();
+}
+
+const claimsRouter = express.Router();
+claimsRouter.use(requireAdminPassword);
+
+// GET /api/admin/claims/pending — claims waiting for manual review, newest
+// first. webhook_events has no client_mac column, so the submitting device is
+// joined from the sessions row created at claim time (same session_id).
+//
+// NOTE: `status = 'pending'` is the only pending value this codebase writes
+// (see POST /api/payment/claim). The spec mentioned 'pending_claim', but that
+// string does not exist anywhere in the codebase, so it is intentionally not
+// included rather than inventing an unverified status.
+claimsRouter.get('/pending', async (req, res, next) => {
+  try {
+    const db = getDb();
+    const rows = await db.query(`
+      SELECT w.ref_no       AS ref_no,
+             w.session_id   AS session_id,
+             w.status       AS status,
+             w.amount       AS amount,
+             w.processed_at AS event_at,
+             s.client_mac   AS client_mac,
+             s.created_at   AS session_created_at
+      FROM webhook_events w
+      LEFT JOIN sessions s ON s.session_id = w.session_id
+      WHERE w.status = 'pending'
+      ORDER BY COALESCE(s.created_at, w.processed_at) DESC
+    `);
+
+    const claims = rows.map(r => ({
+      ref_no: r.ref_no,
+      client_mac: r.client_mac || null,
+      timestamp: r.session_created_at || r.event_at || null,
+      amount: r.amount,
+      session_id: r.session_id || null,
+    }));
+
+    return res.json({ success: true, claims });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/claims/approve — { ref_no, client_mac }
+// Order matters: resolve context and authorize on the controller FIRST, then
+// persist. A controller failure therefore leaves the claim pending (retryable)
+// and the session untouched.
+claimsRouter.post('/approve', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const refNo = typeof body.ref_no === 'string' ? body.ref_no.trim() : '';
+    if (!refNo) {
+      return res.status(400).json({ success: false, error: 'ref_no is required.', code: 'MISSING_REF_NO' });
+    }
+    const clientMac = normalizeMac(body.client_mac);
+    if (!clientMac) {
+      return res.status(400).json({
+        success: false,
+        error: 'client_mac is required and must be a valid MAC address.',
+        code: 'MISSING_CLIENT_MAC',
+      });
+    }
+
+    const db = getDb();
+
+    // (a) The claim must exist and still be pending.
+    const claim = await db.getOne('SELECT * FROM webhook_events WHERE ref_no = ? LIMIT 1', [refNo]);
+    if (!claim) {
+      return res.status(404).json({
+        success: false,
+        error: 'No claim found for reference ' + refNo + '.',
+        code: 'CLAIM_NOT_FOUND',
+      });
+    }
+    if (claim.status !== 'pending') {
+      return res.status(409).json({
+        success: false,
+        error: 'Claim is not pending (current status: ' + claim.status + ').',
+        code: 'CLAIM_NOT_PENDING',
+      });
+    }
+
+    // Session linked to the claim (its client_mac is authoritative).
+    const session =
+      (await db.getOne('SELECT * FROM sessions WHERE session_id = ? LIMIT 1', [claim.session_id])) ||
+      (await db.getOne('SELECT * FROM sessions WHERE ref_no = ? LIMIT 1', [refNo]));
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        error: 'No session is linked to this claim.',
+        code: 'SESSION_NOT_FOUND',
+      });
+    }
+    if (session.client_mac && session.client_mac !== clientMac) {
+      return res.status(400).json({
+        success: false,
+        error: 'client_mac does not match the device that submitted this claim.',
+        code: 'CLIENT_MAC_MISMATCH',
+      });
+    }
+
+    // (a) Controller context captured at portal landing.
+    const ctx = await db.getOne(
+      'SELECT client_ip, ap_mac, ssid_name, radio_id FROM portal_client_context WHERE client_mac = ?',
+      [clientMac]
+    );
+    if (!ctx || !ctx.ap_mac || !ctx.ssid_name || ctx.radio_id === null || ctx.radio_id === undefined) {
+      return res.status(404).json({
+        success: false,
+        error: 'No portal context found for this device. Have the customer re-open the captive portal page, then retry.',
+        code: 'MISSING_PORTAL_CONTEXT',
+      });
+    }
+
+    // (b) Duration from the claim's amount, else the named default.
+    const fromAmount = computeMinutesFromAmount(claim.amount);
+    const durationMinutes = fromAmount > 0 ? fromAmount : DEFAULT_CLAIM_DURATION_MINUTES;
+    const sessionId = session.session_id || claim.session_id;
+
+    // (c) Authorize on the controller BEFORE writing — a failure is retryable.
+    try {
+      await omadaService.authenticateClient({
+        clientMac,
+        clientIp: ctx.client_ip || '',
+        apMac: ctx.ap_mac,
+        ssidName: ctx.ssid_name,
+        radioId: ctx.radio_id,
+        durationMinutes,
+        sessionId,
+      });
+    } catch (omadaErr) {
+      console.error('[admin/claims] Omada auth failed for ref ' + refNo + ':', omadaErr.message);
+      // Diagnostic flag only — claim status and session state are left
+      // unchanged so the operator can retry this claim.
+      await db.run(
+        'UPDATE sessions SET omada_auth_failed = 1, updated_at = ? WHERE session_id = ?',
+        [new Date().toISOString(), sessionId]
+      );
+      return res.status(502).json({
+        success: false,
+        error: 'Controller authorization failed. The claim was left pending — please retry.',
+        code: 'OMADA_ERROR',
+      });
+    }
+
+    // (d) Persist: activate the session, then flip the claim to the existing
+    // 'processed' status. Session-first keeps a failed second write retryable
+    // (the claim stays visible) rather than hiding an inactive session.
+    const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
+
+    await db.run(
+      `UPDATE sessions
+         SET state = 'active', started_at = COALESCE(started_at, ?),
+             expires_at = ?, omada_auth_failed = 0, updated_at = ?
+       WHERE session_id = ?`,
+      [now, expiresAt, now, sessionId]
+    );
+    await db.run(
+      `UPDATE webhook_events SET status = 'processed', processed_at = ? WHERE ref_no = ?`,
+      [now, refNo]
+    );
+
+    console.log('[admin/claims] approved ref ' + refNo + ' for ' + clientMac + ' (' + durationMinutes + ' min)');
+    // (e) Success.
+    return res.json({
+      success: true,
+      expires_at: expiresAt,
+      session_id: sessionId,
+      duration_minutes: durationMinutes,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/admin/claims/reject — { ref_no }
+claimsRouter.post('/reject', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const refNo = typeof body.ref_no === 'string' ? body.ref_no.trim() : '';
+    if (!refNo) {
+      return res.status(400).json({ success: false, error: 'ref_no is required.', code: 'MISSING_REF_NO' });
+    }
+
+    const db = getDb();
+    const result = await db.run(
+      "UPDATE webhook_events SET status = 'rejected', processed_at = ? WHERE ref_no = ? AND status = 'pending'",
+      [new Date().toISOString(), refNo]
+    );
+    if (!result || result.rowCount === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'No pending claim found for reference ' + refNo + '.',
+        code: 'CLAIM_NOT_FOUND',
+      });
+    }
+
+    console.log('[admin/claims] rejected ref ' + refNo);
+    return res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Mounted BEFORE requireAuth so the password-protected claims routes are
+// reachable without an API key / bearer token.
+router.use('/claims', claimsRouter);
 
 router.use(requireAuth);
 

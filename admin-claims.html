@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pending Claims &mdash; WiFi Portal</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <style>
+    /* Functional page only — reuses the shared Bukuhan theme (cream surfaces,
+       palm-green accents, same font/button base) with a few local tweaks. */
+    body {
+      background: var(--surface-2);
+      margin: 0;
+      font-family: var(--font);
+      color: var(--text);
+    }
+
+    .overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: var(--surface-2);
+      z-index: 10;
+    }
+    .overlay[hidden] { display: none; }
+
+    .login-card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--surface);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius, 12px);
+      padding: 28px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    }
+    .login-card h1 { margin: 0 0 6px; font-size: 1.35rem; }
+    .login-card p { margin: 0 0 18px; font-size: 0.875rem; color: var(--text-2); }
+    .login-card label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 6px; }
+    .login-card input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      font-size: 0.95rem;
+      font-family: var(--font);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm, 8px);
+      background: var(--surface);
+      color: var(--text);
+      margin-bottom: 14px;
+    }
+    .login-card input:focus { outline: none; border-color: var(--border-focus); }
+
+    .wrap { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+    .page-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .page-header h1 { font-size: 1.25rem; margin: 0; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius, 12px);
+      overflow: hidden;
+    }
+
+    table { width: 100%; border-collapse: collapse; }
+    th, td {
+      text-align: left;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      border-bottom: 1px solid var(--border-light);
+      vertical-align: top;
+    }
+    th { background: var(--accent); color: var(--green-hover); font-weight: 600; white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: none; }
+    td.mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85rem; }
+
+    .row-actions { display: flex; gap: 8px; }
+    .btn-approve { background: var(--green); color: #fff; border-color: var(--green); }
+    .btn-approve:hover:not(:disabled) { background: var(--green-hover); border-color: var(--green-hover); }
+    .btn-reject { background: var(--error); color: #fff; border-color: var(--error); }
+    .btn-reject:hover:not(:disabled) { background: var(--error-hover); border-color: var(--error-hover); }
+
+    .row-error { color: var(--error-text); font-size: 0.78rem; margin-top: 6px; }
+
+    .error-msg { color: var(--error-text); font-size: 0.85rem; margin-top: 10px; min-height: 1.1em; }
+    .banner {
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+      color: var(--error-text);
+      border-radius: var(--radius-sm, 8px);
+      padding: 10px 14px;
+      font-size: 0.85rem;
+      margin-bottom: 14px;
+    }
+    .banner[hidden] { display: none; }
+
+    .empty {
+      padding: 40px 20px;
+      text-align: center;
+      color: var(--text-2);
+      font-size: 0.95rem;
+    }
+    .empty[hidden] { display: none; }
+    .muted { color: var(--text-3); }
+  </style>
+</head>
+<body>
+  <!-- Centered login overlay (shown on load / after an invalid password) -->
+  <div class="overlay" id="login-overlay">
+    <div class="login-card">
+      <h1>Pending Claims</h1>
+      <p>Enter the admin password to review manual payment claims.</p>
+      <label for="admin-password">Admin password</label>
+      <input type="password" id="admin-password" autocomplete="current-password" placeholder="Password">
+      <button type="button" class="btn btn-approve btn--full" id="login-btn">Log In</button>
+      <div class="error-msg" id="login-error" role="alert"></div>
+    </div>
+  </div>
+
+  <!-- Dashboard (revealed after successful authentication) -->
+  <main class="wrap" id="dashboard" hidden>
+    <div class="page-header">
+      <h1>Pending Payment Claims</h1>
+      <div class="row-actions">
+        <button type="button" class="btn btn--secondary" id="refresh-btn">Refresh</button>
+        <button type="button" class="btn btn--secondary" id="logout-btn">Log Out</button>
+      </div>
+    </div>
+
+    <div class="banner" id="banner" role="alert" hidden></div>
+
+    <div class="card">
+      <div class="empty" id="empty-state" hidden>No pending claims right now.</div>
+      <table id="claims-table" hidden>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Reference Number</th>
+            <th>MAC Address</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="claims-body"></tbody>
+      </table>
+    </div>
+  </main>
+
+  <script src="config/config.js"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
+      var STORAGE_KEY = 'adminClaimsPassword';
+
+      var password = '';
+
+      var els = {
+        overlay:      document.getElementById('login-overlay'),
+        loginBtn:     document.getElementById('login-btn'),
+        loginError:   document.getElementById('login-error'),
+        password:     document.getElementById('admin-password'),
+        dashboard:    document.getElementById('dashboard'),
+        banner:       document.getElementById('banner'),
+        refreshBtn:   document.getElementById('refresh-btn'),
+        logoutBtn:    document.getElementById('logout-btn'),
+        emptyState:   document.getElementById('empty-state'),
+        table:        document.getElementById('claims-table'),
+        tbody:        document.getElementById('claims-body'),
+      };
+
+      // ── Small helpers ───────────────────────────────────────────────
+      function authHeaders() {
+        return { 'x-admin-password': password };
+      }
+
+      function setText(el, text) { el.textContent = text == null ? '' : String(text); }
+
+      function showBanner(message) {
+        setText(els.banner, message);
+        els.banner.hidden = false;
+      }
+      function clearBanner() {
+        setText(els.banner, '');
+        els.banner.hidden = true;
+      }
+      function setLoginError(message) { setText(els.loginError, message); }
+
+      function showOverlay() {
+        els.overlay.hidden = false;
+        els.dashboard.hidden = true;
+        els.password.value = '';
+      }
+      function showDashboard() {
+        els.overlay.hidden = true;
+        els.dashboard.hidden = false;
+      }
+
+      function formatDate(value) {
+        if (!value) return '\u2014';
+        var d = new Date(value);
+        if (isNaN(d.getTime())) return String(value);
+        return d.toLocaleString();
+      }
+
+      // ── API ─────────────────────────────────────────────────────────
+      function fetchPending() {
+        return fetch(API_BASE + '/api/admin/claims/pending', { headers: authHeaders() })
+          .then(function (r) {
+            return r.json().then(function (data) {
+              return { ok: r.ok, status: r.status, data: data || {} };
+            });
+          });
+      }
+
+      // Returns true when the list was rendered, false otherwise.
+      function loadClaims() {
+        return fetchPending().then(function (res) {
+          if (res.status === 401 || res.data.code === 'ADMIN_NOT_CONFIGURED') {
+            password = '';
+            sessionStorage.removeItem(STORAGE_KEY);
+            showOverlay();
+            setLoginError(res.data.error || 'Invalid password.');
+            return false;
+          }
+          if (!res.ok || !res.data.success) {
+            showBanner(res.data.error || ('Failed to load claims (HTTP ' + res.status + ').'));
+            return false;
+          }
+          clearBanner();
+          renderClaims(res.data.claims || []);
+          return true;
+        }).catch(function (err) {
+          showBanner('Connection error: ' + err.message);
+          return false;
+        });
+      }
+
+      // ── Rendering ───────────────────────────────────────────────────
+      function renderClaims(claims) {
+        els.tbody.innerHTML = '';
+        if (!claims.length) {
+          els.table.hidden = true;
+          els.emptyState.hidden = false;
+          return;
+        }
+        els.emptyState.hidden = true;
+        els.table.hidden = false;
+        claims.forEach(function (claim) {
+          els.tbody.appendChild(buildRow(claim));
+        });
+      }
+
+      function updateEmptyState() {
+        if (els.tbody.children.length === 0) {
+          els.table.hidden = true;
+          els.emptyState.hidden = false;
+        }
+      }
+
+      function buildRow(claim) {
+        var row = document.createElement('tr');
+        row.dataset.refNo = claim.ref_no || '';
+
+        var dateCell = document.createElement('td');
+        setText(dateCell, formatDate(claim.timestamp));
+
+        var refCell = document.createElement('td');
+        refCell.className = 'mono';
+        setText(refCell, claim.ref_no || '\u2014');
+
+        var macCell = document.createElement('td');
+        macCell.className = 'mono';
+        setText(macCell, claim.client_mac || '\u2014');
+
+        var actionsCell = document.createElement('td');
+        var actions = document.createElement('div');
+        actions.className = 'row-actions';
+
+        var approveBtn = document.createElement('button');
+        approveBtn.type = 'button';
+        approveBtn.className = 'btn btn-approve';
+        approveBtn.textContent = 'Approve';
+
+        var rejectBtn = document.createElement('button');
+        rejectBtn.type = 'button';
+        rejectBtn.className = 'btn btn-reject';
+        rejectBtn.textContent = 'Reject';
+
+        // Without a client MAC we cannot look up portal context, so the claim
+        // can only be rejected.
+        if (!claim.client_mac) {
+          approveBtn.disabled = true;
+          approveBtn.title = 'No device MAC recorded for this claim';
+        }
+
+        approveBtn.addEventListener('click', function () {
+          handleAction(row, claim, 'approve', [approveBtn, rejectBtn]);
+        });
+        rejectBtn.addEventListener('click', function () {
+          handleAction(row, claim, 'reject', [approveBtn, rejectBtn]);
+        });
+
+        actions.appendChild(approveBtn);
+        actions.appendChild(rejectBtn);
+        actionsCell.appendChild(actions);
+
+        row.appendChild(dateCell);
+        row.appendChild(refCell);
+        row.appendChild(macCell);
+        row.appendChild(actionsCell);
+        return row;
+      }
+
+      function showRowError(row, message) {
+        var cell = row.querySelector('.row-error');
+        if (!cell) {
+          cell = document.createElement('div');
+          cell.className = 'row-error';
+          var last = row.lastElementChild;
+          last.appendChild(cell);
+        }
+        setText(cell, message);
+      }
+
+      function clearRowError(row) {
+        var cell = row.querySelector('.row-error');
+        if (cell) cell.remove();
+      }
+
+      function handleAction(row, claim, action, buttons) {
+        clearRowError(row);
+        var originalLabels = buttons.map(function (b) { return b.textContent; });
+        buttons.forEach(function (b) { b.disabled = true; });
+        buttons[0].textContent = action === 'approve' ? 'Approving\u2026' : 'Rejecting\u2026';
+
+        var payload = action === 'approve'
+          ? { ref_no: claim.ref_no, client_mac: claim.client_mac }
+          : { ref_no: claim.ref_no };
+
+        fetch(API_BASE + '/api/admin/claims/' + action, {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+          body: JSON.stringify(payload)
+        }).then(function (r) {
+          return r.json().then(function (data) {
+            return { ok: r.ok, status: r.status, data: data || {} };
+          });
+        }).then(function (res) {
+          if (res.status === 401 || res.data.code === 'ADMIN_NOT_CONFIGURED') {
+            password = '';
+            sessionStorage.removeItem(STORAGE_KEY);
+            showOverlay();
+            setLoginError(res.data.error || 'Invalid password.');
+            return;
+          }
+          if (res.ok && res.data.success) {
+            row.remove();
+            updateEmptyState();
+            return;
+          }
+          // Restore the row and surface the backend's message inline.
+          buttons.forEach(function (b, i) {
+            b.disabled = false;
+            b.textContent = originalLabels[i];
+          });
+          if (!claim.client_mac && action === 'approve') buttons[0].disabled = true;
+          showRowError(row, res.data.error || ('Request failed (HTTP ' + res.status + ').'));
+        }).catch(function (err) {
+          buttons.forEach(function (b, i) {
+            b.disabled = false;
+            b.textContent = originalLabels[i];
+          });
+          if (!claim.client_mac && action === 'approve') buttons[0].disabled = true;
+          showRowError(row, 'Connection error: ' + err.message);
+        });
+      }
+
+      // ── Events ──────────────────────────────────────────────────────
+      function doLogin() {
+        var value = els.password.value;
+        if (!value) {
+          setLoginError('Please enter the admin password.');
+          return;
+        }
+        password = value;
+        els.loginBtn.disabled = true;
+        els.loginBtn.textContent = 'Checking\u2026';
+        setLoginError('');
+
+        loadClaims().then(function (ok) {
+          els.loginBtn.disabled = false;
+          els.loginBtn.textContent = 'Log In';
+          if (ok) {
+            sessionStorage.setItem(STORAGE_KEY, password);
+            els.password.value = '';
+            setLoginError('');
+            clearBanner();
+            showDashboard();
+          } else if (!els.loginError.textContent) {
+            // Non-401 failure (e.g. server unreachable) — keep the message on
+            // the login card since the dashboard is not visible yet.
+            setLoginError(els.banner.textContent || 'Could not load claims. Please try again.');
+          }
+        });
+      }
+
+      els.loginBtn.addEventListener('click', doLogin);
+      els.password.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') doLogin();
+      });
+
+      els.refreshBtn.addEventListener('click', function () {
+        els.refreshBtn.disabled = true;
+        els.refreshBtn.textContent = 'Refreshing\u2026';
+        loadClaims().then(function () {
+          els.refreshBtn.disabled = false;
+          els.refreshBtn.textContent = 'Refresh';
+        });
+      });
+
+      els.logoutBtn.addEventListener('click', function () {
+        password = '';
+        sessionStorage.removeItem(STORAGE_KEY);
+        renderClaims([]);
+        clearBanner();
+        setLoginError('');
+        showOverlay();
+        els.password.focus();
+      });
+
+      // ── Boot ────────────────────────────────────────────────────────
+      password = sessionStorage.getItem(STORAGE_KEY) || '';
+      if (password) {
+        loadClaims().then(function (ok) {
+          if (ok) showDashboard();
+          else if (!els.loginError.textContent) {
+            // A stored password that failed for a non-401 reason (e.g. the
+            // server is unreachable) still needs visible feedback.
+            setLoginError(els.banner.textContent || 'Could not load claims. Please try again.');
+          }
+        });
+      } else {
+        showOverlay();
+        els.password.focus();
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -24,7 +24,7 @@ const { v4: uuidv4 } = require('uuid');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
 const omadaService = require('../services/omada');
-const { PESOS_PER_MINUTE } = require('../config');
+const { computeMinutesFromAmount } = require('../utils/duration');
 const SITE = process.env.OMADA_SITE || 'Default';
 
 // ── Per-IP rate limiter (stricter than the global apiLimiter) ──────────
@@ -256,12 +256,6 @@ router.get('/methods', (req, res) => {
  *   3. If the same reference was already claimed, respond pending again
  *      (idempotent).
  */
-function computeMinutesFromAmount(amount) {
-  const units = Math.floor(Number(amount));
-  if (!isFinite(units) || units <= 0) return 0;
-  return Math.floor(units / PESOS_PER_MINUTE);
-}
-
 router.post('/claim', claimLimiter, async (req, res, next) => {
   try {
     const body = req.body || {};

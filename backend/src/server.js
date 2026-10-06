@@ -66,11 +66,11 @@ const corsOptions = {
       .filter(Boolean);
     if (allowed.includes(origin)) return cb(null, true);
     // Allow localhost (for admin panel dev access)
-    if (/^http\/\/localhost/.test(origin)) return cb(null, true);
+    if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return cb(null, true);
     cb(new Error('CORS: origin not allowed'));
   },
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Admin-Password'],
   credentials: true,
 };
 app.use(cors(corsOptions));
