@@ -133,7 +133,7 @@ router.post('/macrodroid', async (req, res, next) => {
     //
     // Operational note (MISSING_PORTAL_CONTEXT):
     //   - The payment is durable (webhook_events + sessions rows exist) and the
-    //     session is flagged omada_auth_failed = 1 (visible in the admin panel).
+    //     session is flagged omada_auth_failed = true (visible in the admin panel).
     //   - This route responds 422 (NOT 502) — retrying cannot succeed; the
     //     CUSTOMER-side fix is to re-open the captive portal page (which
     //     refreshes context via the landing beacon) and pay again with a new
@@ -164,7 +164,7 @@ router.post('/macrodroid', async (req, res, next) => {
     if (contextReason) {
       console.error('[webhook/macrodroid] MISSING_PORTAL_CONTEXT for ' + normalizedMac + ' ref ' + refNo + ': ' + contextReason);
       await db.run(
-        `UPDATE sessions SET omada_auth_failed = 1, updated_at = ? WHERE session_id = ?`,
+        `UPDATE sessions SET omada_auth_failed = true, updated_at = ? WHERE session_id = ?`,
         [new Date().toISOString(), sessionId]
       );
       return res.status(422).json({
@@ -190,7 +190,7 @@ router.post('/macrodroid', async (req, res, next) => {
     } catch (omadaErr) {
       console.error('[webhook/macrodroid] Omada auth failed for ref ' + refNo + ':', omadaErr.message);
       await db.run(
-        `UPDATE sessions SET omada_auth_failed = 1, updated_at = ? WHERE session_id = ?`,
+        `UPDATE sessions SET omada_auth_failed = true, updated_at = ? WHERE session_id = ?`,
         [new Date().toISOString(), sessionId]
       );
       return res.status(502).json({
