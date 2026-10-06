@@ -21,7 +21,9 @@
     primaryColor: '#2d6a4f',
     accentColor: '#e9f5db',
     textColor: '#2c1810',
-    supportEmail: 'support@goodvibesvendowifi.com',
+    // Left empty on purpose: the real address is injected at build time by
+    // inject-secrets.js (SUPPORT_EMAIL), so it is never committed here.
+    supportEmail: '',
     supportPhone: '',
 
     // ==============================================================

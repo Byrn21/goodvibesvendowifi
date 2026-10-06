@@ -69,7 +69,7 @@
       <footer class="portal-footer" role="contentinfo">
         <p class="support-info">
           Need help?
-          <a href="mailto:support@example.com" class="support-link">Contact support</a>
+          <a href="__SUPPORT_EMAIL__" class="support-link">Contact support</a>
         </p>
       </footer>
     </main>
@@ -130,6 +130,18 @@
           sidEl.textContent = sessionId;
           infoBox.classList.remove('hidden');
                     if (statusLink) statusLink.href = 'status.html?sessionId=' + encodeURIComponent(sessionId) + (params.get('voucherType') ? '&voucherType=' + encodeURIComponent(params.get('voucherType')) : '');
+        }
+      }
+
+      // Hide the "Need help?" line when no support email was injected at build
+      // time — inject-secrets.js writes href="#" in that case (and a fallback
+      // placeholder is never rendered as a broken mailto: link).
+      var supportLink = document.querySelector('.support-info .support-link');
+      if (supportLink) {
+        var supportHref = supportLink.getAttribute('href') || '';
+        if (!/^mailto:[^@\s]+@[^@\s]+$/.test(supportHref)) {
+          var supportRow = supportLink.closest ? supportLink.closest('.support-info') : supportLink.parentNode;
+          if (supportRow) supportRow.style.display = 'none';
         }
       }
     })();

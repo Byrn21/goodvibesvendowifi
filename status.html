@@ -911,10 +911,10 @@
          Contact Support modal — same code/behavior as error.html
          ============================================================ */
       var SUPPORT_CONFIG = {
-        facebookName: '[FACEBOOK_PAGE_NAME]',
-        facebookUrl:  '[FACEBOOK_URL]',
-        phone:        '[+63 9XX XXX XXXX]',
-        email:        '[support@example.com]'
+        facebookName: '__FACEBOOK_PAGE_NAME__',
+        facebookUrl:  '__FACEBOOK_URL__',
+        phone:        '__CONTACT_NUMBER__',
+        email:        '__SUPPORT_EMAIL__'
       };
 
       var supportOverlay = document.getElementById('support-modal');
@@ -923,19 +923,44 @@
       var supportCloseBtn = document.getElementById('support-modal-close-btn');
       var supportLastFocused = null;
 
-      // Populate support details from SUPPORT_CONFIG
-      var fbLink = document.getElementById('support-facebook');
-      var phoneLink = document.getElementById('support-phone');
-      var emailLink = document.getElementById('support-email');
+      // Populate the support details. The values are injected at build time by
+      // inject-secrets.js; when one was not configured its row is hidden, so the
+      // modal never shows a raw placeholder or a malformed tel:/mailto: link.
+      function fillSupportRow(id, text, href) {
+        var link = document.getElementById(id);
+        if (!link) return;
 
-      fbLink.textContent = SUPPORT_CONFIG.facebookName;
-      fbLink.href = SUPPORT_CONFIG.facebookUrl;
+        var row = link.closest ? link.closest('.support-row') : link.parentNode;
+        var value = String(text || '').trim();
 
-      phoneLink.textContent = SUPPORT_CONFIG.phone;
-      phoneLink.href = 'tel:' + SUPPORT_CONFIG.phone.replace(/[^+0-9]/g, '');
+        if (!value) {
+          if (row) row.style.display = 'none';
+          return;
+        }
 
-      emailLink.textContent = SUPPORT_CONFIG.email;
-      emailLink.href = 'mailto:' + SUPPORT_CONFIG.email;
+        link.textContent = value;
+
+        if (href && href !== '#') {
+          link.href = href;
+        } else {
+          // No usable target — remove the link behaviour instead of leaving
+          // behind an inert "#" that only reloads the page.
+          link.removeAttribute('href');
+          link.removeAttribute('target');
+        }
+      }
+
+      fillSupportRow('support-facebook', SUPPORT_CONFIG.facebookName, SUPPORT_CONFIG.facebookUrl);
+      fillSupportRow(
+        'support-phone',
+        SUPPORT_CONFIG.phone,
+        SUPPORT_CONFIG.phone ? 'tel:' + SUPPORT_CONFIG.phone.replace(/[^+0-9]/g, '') : ''
+      );
+      fillSupportRow(
+        'support-email',
+        SUPPORT_CONFIG.email,
+        SUPPORT_CONFIG.email ? 'mailto:' + SUPPORT_CONFIG.email : ''
+      );
 
       function openSupportModal() {
         supportLastFocused = document.activeElement;

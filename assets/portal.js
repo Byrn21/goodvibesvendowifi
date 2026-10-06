@@ -54,7 +54,9 @@
       authUrl:     'authUrl',
       targetUrl:   'targetUrl',
     },
-        supportEmail: 'support@example.com',
+    // Left empty on purpose: the real address is injected into the page at
+    // build time (see inject-secrets.js), so it is never committed here.
+    supportEmail: '',
     supportPhone: '',
     mockMode: false,
     mockSuccessDelay: 800,
@@ -245,11 +247,27 @@
     var tagline = $('brand-tagline');
     if (tagline && CONFIG.brandTagline) tagline.textContent = CONFIG.brandTagline;
 
-    // Support links
+    // Support link — the address is injected into the page at build time by
+    // inject-secrets.js. Prefer that injected href and only fall back to
+    // CONFIG.supportEmail; when neither is available the whole line is hidden
+    // so an empty or malformed mailto: link is never shown.
+    var supportEmail = String(CONFIG.supportEmail || '').trim();
     var supportLinks = document.querySelectorAll('[id*="support-email"]');
     for (var i = 0; i < supportLinks.length; i++) {
-      supportLinks[i].href = 'mailto:' + encodeURIComponent(CONFIG.supportEmail);
-      supportLinks[i].textContent = CONFIG.supportEmail;
+      var supportLink = supportLinks[i];
+      var injectedHref = supportLink.getAttribute('href') || '';
+
+      if (/^mailto:[^@\s]+@[^@\s]+$/.test(injectedHref)) {
+        continue; // build-time value wins; the markup is already correct
+      }
+
+      if (supportEmail) {
+        supportLink.href = 'mailto:' + encodeURIComponent(supportEmail);
+        supportLink.textContent = supportEmail;
+      } else {
+        var supportRow = supportLink.closest ? supportLink.closest('.support-info') : null;
+        if (supportRow) supportRow.style.display = 'none';
+      }
     }
 
     // Terms link
