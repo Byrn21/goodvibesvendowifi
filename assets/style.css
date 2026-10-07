@@ -2206,6 +2206,11 @@ table tbody tr:hover {
   margin: 0 0 12px;
 }
 
+/* Heading + Clear All button share one flex header row */
+.admin-transactions .admin-card--header h3 {
+  margin: 0;
+}
+
 .tx-status--claimed {
   color: var(--green, #15803d);
   font-weight: 600;

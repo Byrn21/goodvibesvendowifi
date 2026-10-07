@@ -640,3 +640,104 @@ describe('GET /api/admin/transactions — Recent Transactions', () => {
     expect(res.body.pagination).toEqual({ currentPage: 1, totalPages: 1 });
   });
 });
+
+describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
+
+  async function seedWebhookEvents(count) {
+    for (let i = 1; i <= count; i++) {
+      await getDb().run(
+        'INSERT INTO webhook_events (event_id, ref_no, amount, status, processed_at) VALUES (?, ?, ?, ?, ?)',
+        ['evt_del_' + i, 'DELREF' + i, 20 + i, 'unclaimed', '2026-10-01 00:00:' + String(i).padStart(2, '0')]
+      );
+    }
+  }
+
+  test('returns 401 without valid credentials', async () => {
+    const res = await request(app).delete('/api/admin/transactions');
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+  });
+
+  test('deletes all webhook events and reports how many were removed', async () => {
+    await seedWebhookEvents(3);
+    const res = await request(app)
+      .delete('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.deleted).toBe(3);
+
+    const remaining = await getDb().getOne('SELECT COUNT(*) AS count FROM webhook_events');
+    expect(parseInt(remaining.count, 10)).toBe(0);
+  });
+
+  test('is safe to call when the log is already empty', async () => {
+    const res = await request(app)
+      .delete('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(0);
+  });
+
+  test('leaves the GET table empty and paginated at 1 page afterwards', async () => {
+    await seedWebhookEvents(4);
+    await request(app).delete('/api/admin/transactions').set('X-API-Key', VALID_KEY);
+
+    const res = await request(app)
+      .get('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+    expect(res.body.transactions).toEqual([]);
+    expect(res.body.pagination).toEqual({ currentPage: 1, totalPages: 1 });
+  });
+});
+
+describe('GET /api/admin/stats — Dashboard statistics', () => {
+
+  async function seedSession({ sessionId, state, voucherType }) {
+    await getDb().run(
+      `INSERT INTO sessions (session_id, client_mac, voucher_type, state, duration_minutes)
+       VALUES (?, ?, ?, ?, ?)`,
+      [sessionId, 'AA:BB:CC:DD:EE:' + sessionId.slice(-2), voucherType || 'standard', state, 60]
+    );
+  }
+
+  test('counts the seeded vouchers and no sessions initially', async () => {
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.stats.totalVouchers).toBe(3);
+    expect(res.body.stats.totalSessions).toBe(0);
+  });
+
+  test('does not report a ghost total for a lone terminal (expired) session', async () => {
+    await seedSession({ sessionId: 'sess-exp-01', state: 'expired' });
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    expect(res.body.stats.totalSessions).toBe(0);
+    expect(res.body.stats.activeSessions).toBe(0);
+    expect(res.body.stats.pausedSessions).toBe(0);
+    expect(res.body.stats.premiumSessions).toBe(0);
+  });
+
+  test('total matches Active + Paused + Premium for disjoint live sessions', async () => {
+    await seedSession({ sessionId: 'sess-act-01', state: 'active', voucherType: 'standard' });
+    await seedSession({ sessionId: 'sess-pau-01', state: 'paused', voucherType: 'standard' });
+    await seedSession({ sessionId: 'sess-pre-01', state: 'expired', voucherType: 'premium' });
+
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    const s = res.body.stats;
+    expect(s.activeSessions).toBe(1);
+    expect(s.pausedSessions).toBe(1);
+    expect(s.premiumSessions).toBe(1);
+    expect(s.totalSessions).toBe(3);
+  });
+
+  test('counts a premium session that is also active only once', async () => {
+    await seedSession({ sessionId: 'sess-act-02', state: 'active', voucherType: 'premium' });
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    const s = res.body.stats;
+    expect(s.activeSessions).toBe(1);
+    expect(s.premiumSessions).toBe(1);
+    expect(s.totalSessions).toBe(1);
+  });
+});

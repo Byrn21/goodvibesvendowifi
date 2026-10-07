@@ -16,6 +16,7 @@
  *   POST   /api/admin/sessions/:id/expire — Force-expire a session
  *   GET    /api/admin/stats      — Dashboard statistics
  *   GET    /api/admin/transactions — Paginated webhook payment transactions
+ *   DELETE /api/admin/transactions — Clear all webhook payment transaction logs
  */
 
 const express = require('express');
@@ -493,7 +494,17 @@ router.get('/stats', async (req, res, next) => {
     const totalVouchers = await db.getOne('SELECT COUNT(*) as count FROM vouchers');
     const activeVouchers = await db.getOne("SELECT COUNT(*) as count FROM vouchers WHERE state = 'active'");
     const usedVouchers = await db.getOne("SELECT COUNT(*) as count FROM vouchers WHERE state = 'used'");
-    const totalSessions = await db.getOne('SELECT COUNT(*) as count FROM sessions');
+    // "Total Sessions" counts only the sessions the dashboard actually shows as
+    // live (Active, Paused or Premium). The sessions table keeps terminal rows
+    // (expired / payment_failed) and never-started rows (pending) for history,
+    // so a plain COUNT(*) reports a ghost session - e.g. Total = 1 while Active,
+    // Paused and Premium are all 0. There is no soft-delete column, so the total
+    // is the distinct union of the three live categories on the cards: OR (not a
+    // blind sum) so a Premium session that is also Active/Paused counts once.
+    const totalSessions = await db.getOne(`
+      SELECT COUNT(*) as count FROM sessions
+      WHERE state IN ('active', 'paused') OR voucher_type = 'premium'
+    `);
     const activeSessions = await db.getOne("SELECT COUNT(*) as count FROM sessions WHERE state = 'active'");
     const pausedSessions = await db.getOne("SELECT COUNT(*) as count FROM sessions WHERE state = 'paused'")
     const totalRevenueRow = await db.getOne("SELECT SUM(payment_amount) as total FROM sessions WHERE payment_amount IS NOT NULL")
@@ -550,6 +561,29 @@ router.get('/transactions', async (req, res, next) => {
     res.json({
       transactions,
       pagination: { currentPage: page, totalPages },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Clear ALL webhook payment transaction logs (one-shot cleanup endpoint).
+// webhook_events is an append-only payment log used only for the Recent
+// Transactions table; nothing references its rows by foreign key, so emptying
+// it frees space without affecting sessions or vouchers. Protected by the
+// router-level requireAuth middleware.
+router.delete('/transactions', async (req, res, next) => {
+  try {
+    const db = getDb();
+    const countRow = await db.getOne('SELECT COUNT(*) AS count FROM webhook_events');
+    const before = parseInt(countRow?.count || 0, 10);
+
+    await db.run('DELETE FROM webhook_events');
+
+    res.json({
+      success: true,
+      deleted: before,
+      message: `Deleted ${before} transaction log(s).`,
     });
   } catch (err) {
     next(err);

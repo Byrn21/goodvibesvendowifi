@@ -93,7 +93,10 @@
 
         <!-- Recent Transactions (webhook payment log) -->
         <div class="admin-transactions" id="transactions-section">
-          <h3>Recent Transactions</h3>
+          <div class="admin-card--header">
+            <h3>Recent Transactions</h3>
+            <button type="button" class="btn btn--danger" id="transactions-clear-all">Clear All</button>
+          </div>
           <div class="admin-table-container" id="transactions-table">
             <p class="muted">Loading&hellip;</p>
           </div>
@@ -166,6 +169,7 @@
         transactionsPrev:     document.getElementById('transactions-prev'),
         transactionsNext:     document.getElementById('transactions-next'),
         transactionsPageInfo: document.getElementById('transactions-page-info'),
+        transactionsClearAll: document.getElementById('transactions-clear-all'),
         tabVouchers:    document.getElementById('tab-vouchers'),
         tabSessions:    document.getElementById('tab-sessions'),
         tabImport:      document.getElementById('tab-import'),
@@ -856,6 +860,29 @@
         els.transactionsNext.addEventListener('click', function () {
           if (transactionsPage < transactionsTotalPages) loadTransactions(transactionsPage + 1);
         });
+      }
+
+      // Clear All: delete every transaction log after an explicit confirmation.
+      function clearAllTransactions() {
+        if (!confirm('Are you sure you want to delete all transaction logs?')) return;
+        if (els.transactionsClearAll) els.transactionsClearAll.disabled = true;
+        api('/api/admin/transactions', { method: 'DELETE' })
+          .then(function (res) {
+            if (res.ok) {
+              loadTransactions(1);
+            } else {
+              alert((res.data && res.data.error) || 'Failed to clear transactions');
+            }
+          })
+          .catch(function (err) {
+            alert('Failed to clear transactions: ' + err.message);
+          })
+          .finally(function () {
+            if (els.transactionsClearAll) els.transactionsClearAll.disabled = false;
+          });
+      }
+      if (els.transactionsClearAll) {
+        els.transactionsClearAll.addEventListener('click', clearAllTransactions);
       }
 
       // Sidebar navigation &mdash; event delegation on nav container
