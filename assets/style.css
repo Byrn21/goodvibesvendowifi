@@ -636,8 +636,8 @@ body {
 .btn--full { width: 100%; }
 
 .btn--small {
-  height: 24px;
-  padding: 0 4px;
+  height: 30px;
+  padding: 0 12px;
   font-size: 0.8rem;
   border-radius: var(--radius-sm);
 }
@@ -1189,9 +1189,11 @@ body {
     display: none;
   }
   .pricing-table-wrap {
+    /* Stacked layout keeps the table at full container width; on very narrow
+       screens a horizontal scroll preserves the column padding instead of
+       squishing the Duration / Price / Action cells into each other. */
     overflow-x: auto;
-    margin: -8px -8px -8px -8px;
-    padding: 0 8px;
+    -webkit-overflow-scrolling: touch;
   }
 
 .pricing-title {
@@ -1205,7 +1207,10 @@ body {
 
 .pricing-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  /* Strictly stacked at EVERY width: STANDARD on top, PREMIUM below. The old
+     tablet breakpoint switched to two columns, which halved the available
+     width and cramped/overlapped the Duration / Price / Action cells. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
 }
 
@@ -1214,6 +1219,9 @@ body {
   border-radius: var(--radius-md);
   padding: 14px;
   border: 1px solid var(--border-light);
+  /* min-width:0 lets the tier shrink inside the grid track instead of
+     overflowing its neighbours. */
+  min-width: 0;
 }
 
 .tier-header {
@@ -1253,46 +1261,55 @@ body {
 
 .pricing-table {
   width: 100%;
+  /* Floor width so the three columns keep their padding on tiny screens;
+     .pricing-table-wrap scrolls horizontally rather than letting cells
+     overlap. */
+  min-width: 320px;
   border-collapse: collapse;
   font-size: 0.85rem;
   table-layout: fixed;
 }
-.pricing-table colgroup col {
-  /* Duration: ~30%, Price: ~25%, Action: ~45% */
+/* Duration / Price / Action column widths. These were previously nested
+   inside a `.pricing-table colgroup col { ... }` block, which is invalid
+   CSS and was ignored by browsers (columns fell back to equal widths). */
+.pricing-table col:nth-child(1) { width: 32%; }
+.pricing-table col:nth-child(2) { width: 24%; }
+.pricing-table col:nth-child(3) { width: 44%; }
 
-.pricing-table col:nth-child(1) { width: 35%; }
-.pricing-table col:nth-child(2) { width: 25%; }
-.pricing-table col:nth-child(3) { width: 45%; }
-}
 .pricing-table th {
   text-align: left;
-  padding: 8px 10px;
+  padding: 10px 12px;
   font-weight: 600;
   color: var(--text);
   border-bottom: 2px solid var(--border);
   min-width: 0;
+  white-space: nowrap;
 }
 
-.pricing-table th.text-right { text-align: right; min-width: 0; }
-.pricing-table th.text-center { text-align: center; min-width: 0; }
+.pricing-table th.text-right { text-align: right; }
+.pricing-table th.text-center { text-align: center; }
 
 .pricing-table td {
-  padding: 8px 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--border-light);
   color: var(--text);
   min-width: 0;
+  vertical-align: middle;
 }
 
-.pricing-table td.text-right { text-align: right; min-width: 2; }
+/* min-width:2 was invalid (unitless non-zero) and silently ignored. */
+.pricing-table td.text-right { text-align: right; }
 .pricing-table td.text-center {
   text-align: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  /* Keep the Select + clear buttons on one line so they never spill into
+     the neighbouring Price column. */
+  white-space: nowrap;
 }
 .pricing-table td.text-center .btn {
-  flex-shrink: 1;
+  vertical-align: middle;
+}
+.pricing-table td.text-center .btn + .btn {
+  margin-left: 6px;
 }
 
 .pricing-table tbody tr:last-child td {
@@ -1440,18 +1457,9 @@ body {
   /* Marquee header - responsive */
   .marquee-text { font-size: 1.5rem; }
 
-  /* Pricing table - responsive */
-  .pricing-grid {
-    grid-template-columns: 1fr 1fr;
-  }
+  /* Pricing table - responsive. The tiers stay STACKED (see .pricing-grid):
+     no width-based two-column switch is applied here on purpose. */
   .pricing-title { font-size: 1.25rem; }
-  
-  /* Remove scroll on tablet+ since grid is 2-col */
-  .pricing-table-wrap {
-    overflow-x: visible;
-    margin: 0;
-    padding: 0;
-  }
 
   .countdown-number { font-size: 3rem; }
   .countdown-sep     { font-size: 3rem; }
