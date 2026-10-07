@@ -303,58 +303,12 @@
         var voucherVal = voucherInput ? voucherInput.value : '';
     var termsChecked = termsCheckbox ? termsCheckbox.checked : true;
 
-        // Check if we're in paid/backend mode with plan selection
-    var selectedType = getSelectedVoucherType();
-
-    // Check for pricing table selection
-    var pricingPlan = null;
-    var pricingInput = document.querySelector('input[name="selectedPlan"]');
-    if (pricingInput && pricingInput.value) {
-      try {
-        pricingPlan = JSON.parse(pricingInput.value);
-      } catch (e) {
-        pricingPlan = null;
-      }
-    }
-
-    // ---- Paid mode: redirect to payment checkout ----
-    if (CONFIG.mode === 'backend' && selectedType && selectedType.tier) {
-      var checkoutUrl = (CONFIG.apiBaseUrl || '') + '/api/payment/initiate?' + [
-        'voucherType=' + encodeURIComponent(selectedType.tier),
-        'planId=' + encodeURIComponent(selectedType.planId),
-        'plan=' + encodeURIComponent($('plan-select').value),
-        'clientMac=' + encodeURIComponent(queryParams.clientMac || ''),
-        'clientIp=' + encodeURIComponent(queryParams.clientIp || ''),
-        'apMac=' + encodeURIComponent(queryParams.apMac || ''),
-        'ssidName=' + encodeURIComponent(queryParams.ssidName || ''),
-        'radioId=' + encodeURIComponent(queryParams.radioId || '0'),
-        'redirectUrl=' + encodeURIComponent(getRedirectDestination()),
-      ].join('&');
-
-            window.location.href = checkoutUrl;
-      return;
-    }
-
-    // ---- Pricing table selection: redirect to payment checkout ----
-    if (pricingPlan && pricingPlan.tier) {
-      var pricingCheckoutUrl = (CONFIG.apiBaseUrl || '') + '/api/payment/initiate?' + [
-        'voucherType=' + encodeURIComponent(pricingPlan.tier),
-        'planId=' + encodeURIComponent(pricingPlan.planId),
-        'duration=' + encodeURIComponent(pricingPlan.duration),
-        'price=' + encodeURIComponent(pricingPlan.price),
-        'clientMac=' + encodeURIComponent(queryParams.clientMac || ''),
-        'clientIp=' + encodeURIComponent(queryParams.clientIp || ''),
-        'apMac=' + encodeURIComponent(queryParams.apMac || ''),
-        'ssidName=' + encodeURIComponent(queryParams.ssidName || ''),
-        'radioId=' + encodeURIComponent(queryParams.radioId || '0'),
-        'redirectUrl=' + encodeURIComponent(getRedirectDestination()),
-      ].join('&');
-
-      window.location.href = pricingCheckoutUrl;
-      return;
-    }
-
     // ---- Voucher validation ----
+    // The main login area is ALWAYS the voucher input + Connect Now layout,
+    // for every payment method. Paying (cash / GCash / Maya / QR Ph) yields a
+    // voucher code via the Claim Voucher flow, which is then entered here.
+    // (The old "Pay & Connect" checkout redirect targeted a non-existent
+    // /api/payment/initiate route and has been removed.)
     var vResult = validateVoucher(voucherVal);
     if (!vResult.ok) {
       setError('voucher-input', vResult.message);
@@ -667,76 +621,6 @@
     // Amount in smallest currency unit (e.g., centavos for PHP)
     var pesos = (amount / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     return '₱' + pesos;
-  }
-
-  // ===============================================================
-  // PLAN SELECTOR (paid mode)
-  // ===============================================================
-     function initPlanSelector() {
-    var typeSection = $('voucher-type-section');
-    var typeSelect = $('voucher-type-select');
-    var planSection = $('plan-section');
-    var planSelect = $('plan-select');
-    if (!typeSection || !typeSelect || !planSection || !planSelect) return;
-
-    // Paid plans only visible in backend mode with plans configured
-    if (CONFIG.mode !== 'backend' || !CONFIG.plans || (!CONFIG.plans.standard && !CONFIG.plans.premium)) {
-      return;
-    }
-
-    show(typeSection);
-    show(planSection);
-
-    // Populate the type selector with standard plans
-    populateTypeSelect('standard');
-
-    // When type changes, repopulate plan options
-    typeSelect.addEventListener('change', function () {
-      var selectedType = typeSelect.value.startsWith('premium') ? 'premium' : 'standard';
-      populateTypeSelect(selectedType);
-      var submitLabel = $('submit-label');
-      if (submitLabel) {
-        submitLabel.textContent = (planSelect.value && typeSelect.value) ? 'Pay & Connect' : 'Connect Now';
-      }
-    });
-
-    // When plan changes, update submit button label
-    planSelect.addEventListener('change', function () {
-      var submitLabel = $('submit-label');
-      if (submitLabel) {
-        submitLabel.textContent = (planSelect.value && typeSelect.value) ? 'Pay & Connect' : 'Connect Now';
-      }
-    });
-  }
-
-  function populateTypeSelect(type) {
-    var planSelect = $('plan-select');
-    if (!planSelect) return;
-
-    // Clear existing options
-    planSelect.innerHTML = '<option value="">— Choose a plan —</option>';
-
-    var plans = (CONFIG.plans[type] || []).slice();
-    plans.forEach(function (plan) {
-      var opt = document.createElement('option');
-      opt.value = plan.duration; // minutes
-      opt.textContent = plan.label + ' — ' + formatPrice(plan.price);
-      planSelect.appendChild(opt);
-    });
-  }
-
-  // Return the selected voucherType prefix (standard or premium)
-  function getSelectedVoucherType() {
-    var typeSelect = $('voucher-type-select');
-    var planSelect = $('plan-select');
-    if (!typeSelect || !planSelect) return null;
-    if (!typeSelect.value || !planSelect.value) return null;
-
-    // The typeSelect value is like "standard-1h" or "premium-5h"
-    var parts = typeSelect.value.split('-');
-    var tier = parts[0]; // "standard" or "premium"
-    var planId = typeSelect.value; // full ID like "premium-5h"
-    return { tier: tier, planId: planId };
   }
 
   // ===============================================================
@@ -1078,10 +962,10 @@
         var price = parseInt(row.getAttribute('data-price'), 10);
         var planId = row.getAttribute('data-id');
 
-        // Hide the voucher form, show payment section
-        var voucherSection = $('voucher-input') ? $('voucher-input').closest('.form-group') : null;
+        // Keep the voucher input visible — the main login area uses the
+        // single voucher layout for every payment method — and reveal the
+        // payment tiles below it.
         var paymentSection = document.querySelector('.payment-section');
-        var formError = $('form-error');
 
         // Store selected plan in hidden field on the form
         var form = document.querySelector('form.auth-form');
@@ -1104,11 +988,6 @@
           form.appendChild(hiddenInput);
         }
 
-        // Hide voucher input if present
-        if (voucherSection) {
-          voucherSection.classList.add('hidden');
-        }
-
         // Clear any form errors
         setFormError('');
         setBanner('');
@@ -1116,12 +995,6 @@
                 // Show payment tiles section
         if (paymentSection) {
           paymentSection.classList.add('payment-section--visible');
-        }
-
-        // Update submit button label
-        var submitLabel = $('submit-label');
-        if (submitLabel) {
-          submitLabel.textContent = 'Pay & Connect';
         }
 
         // Highlight the selected row (deselect across ALL pricing tables, not just same table)
@@ -1179,22 +1052,10 @@
           }
         }
 
-        // Re-enable the voucher section
-        var voucherSection = $('voucher-input') ? $('voucher-input').closest('.form-group') : null;
-        if (voucherSection) {
-          voucherSection.classList.remove('hidden');
-        }
-
-                // Hide payment section
+        // Hide payment section
         var paymentSection = document.querySelector('.payment-section');
         if (paymentSection) {
           paymentSection.classList.remove('payment-section--visible');
-        }
-
-        // Reset submit button label
-        var submitLabel = $('submit-label');
-        if (submitLabel) {
-          submitLabel.textContent = 'Connect Now';
         }
 
         var modalEl = document.getElementById("plan-modal");
@@ -1278,8 +1139,8 @@
   function qrEl(id) { return document.getElementById(id); }
 
   // Resolve the exact amount (in centavos) for the current plan selection.
-  // The pricing table stores a JSON snapshot; the plan <select> maps back
-  // to CONFIG.plans. Returns null when no plan has been chosen.
+  // The pricing table stores a JSON snapshot in the selectedPlan hidden
+  // input; returns null when no plan has been chosen yet.
   function getSelectedPlanAmountCents() {
     var pricingInput = document.querySelector('input[name="selectedPlan"]');
     if (pricingInput && pricingInput.value) {
@@ -1288,14 +1149,7 @@
         if (parsed && parsed.price !== undefined && parsed.price !== null) {
           return Number(parsed.price);
         }
-      } catch (e) { /* fall through to plan select */ }
-    }
-    var selectedType = getSelectedVoucherType();
-    if (selectedType && selectedType.tier && CONFIG.plans) {
-      var plans = CONFIG.plans[selectedType.tier] || [];
-      for (var i = 0; i < plans.length; i++) {
-        if (plans[i].id === selectedType.planId) return Number(plans[i].price);
-      }
+      } catch (e) { /* ignore malformed snapshot */ }
     }
     return null;
   }
@@ -1801,9 +1655,6 @@
 
     // Set up terms visibility
     initTermsSection();
-
-    // Set up plan selector (paid mode)
-    initPlanSelector();
 
     // Set up pricing table select buttons
     initPricingTable();
