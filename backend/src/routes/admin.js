@@ -337,8 +337,8 @@ router.get('/vouchers', async (req, res, next) => {
   try {
     const db = getDb();
     const rows = await db.query(`
-      SELECT id, code, type, duration_minutes, price, state, used_by_mac, used_at,
-             created_at, expires_at
+      SELECT id, code, type, duration_minutes, price, state, assigned_ref_no,
+             used_by_mac, used_at, created_at, expires_at
       FROM vouchers
       ORDER BY created_at DESC
     `);

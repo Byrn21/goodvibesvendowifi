@@ -2,14 +2,17 @@
  * __tests__/webhook.test.js
  * Integration tests for routes/webhook.js POST /api/webhooks/macrodroid
  *
+ * The webhook is now DECOUPLED from the Omada controller and from the client
+ * MAC address: it only records the payment as an 'unclaimed' webhook_events
+ * row that the customer reconciles later via POST /api/payment/claim.
+ *
  * Tests cover:
- *   - 400 invalid/missing amount, ref_no, mac_address
  *   - 401 missing / invalid secret (constant-time comparison path)
+ *   - 400 invalid/missing amount, ref_no
+ *   - 200 success: an 'unclaimed' webhook_events row is written
+ *   - mac_address is ignored / not required (no MAC validation)
  *   - 409 duplicate ref_no (pre-check SELECT + UNIQUE constraint backstop)
- *   - 400 amount below minimum grantable time
- *   - 200 success: session + webhook_event rows created, Omada called,
- *     session activated, minutes computed from rate constant
- *   - 502 Omada failure: payment still recorded, omada_auth_failed set
+ *   - no sessions are created and Omada is never contacted
  *
  * Patterns follow backend/__tests__/admin.test.js:
  *   - Temp SQLite database created before requiring db/client.js
@@ -45,7 +48,7 @@ const SECRET = 'test-webhook-secret-abc123';
 
 function payload(overrides = {}) {
   return Object.assign(
-    { secret_token: SECRET, amount: 50, ref_no: 'REF-' + Math.random().toString(36).slice(2, 10), mac_address: 'AA:BB:CC:DD:EE:FF' },
+    { secret_token: SECRET, amount: 50, ref_no: 'REF-' + Math.random().toString(36).slice(2, 10) },
     overrides
   );
 }
@@ -68,41 +71,15 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await getDb().exec('DELETE FROM sessions; DELETE FROM webhook_events; DELETE FROM portal_client_context;');
+  jest.restoreAllMocks();
 });
-
-/**
- * Seed a valid portal_client_context row (fresh seen_at) so the webhook's
- * context lookup succeeds. Tests for the MISSING_PORTAL_CONTEXT path
- * simply skip this helper.
- */
-async function seedContext(clientMac, overrides = {}) {
-  const now = new Date().toISOString();
-  const row = Object.assign({
-    client_mac: clientMac,
-    client_ip: '192.168.1.50',
-    ap_mac: 'AA:AA:AA:AA:AA:AA',
-    ssid_name: 'GuestWiFi',
-    radio_id: 0,
-    site: 'Default',
-    seen_at: now,
-    created_at: now,
-    updated_at: now,
-  }, overrides);
-  await getDb().run(
-    `INSERT INTO portal_client_context
-       (client_mac, client_ip, ap_mac, ssid_name, radio_id, site, seen_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [row.client_mac, row.client_ip, row.ap_mac, row.ssid_name, row.radio_id, row.site, row.seen_at, row.created_at, row.updated_at]
-  );
-  return row;
-}
 
 // --- Tests ---
 
 describe('POST /api/webhooks/macrodroid', () => {
 
   test('401 when secret_token is missing', async () => {
-    const res = await request(app).post('/api/webhooks/macrodroid').send({ amount: 50, ref_no: 'R1', mac_address: 'AA:BB:CC:DD:EE:FF' });
+    const res = await request(app).post('/api/webhooks/macrodroid').send({ amount: 50, ref_no: 'R1' });
     expect(res.status).toBe(401);
     expect(res.body.code).toBe('MISSING_SECRET');
   });
@@ -127,170 +104,67 @@ describe('POST /api/webhooks/macrodroid', () => {
     const noRef = payload(); delete noRef.ref_no;
     const res1 = await request(app).post('/api/webhooks/macrodroid').send(noRef);
     expect(res1.status).toBe(400);
+    expect(res1.body.code).toBe('INVALID_REF_NO');
 
     const longRef = payload({ ref_no: 'x'.repeat(65) });
     const res2 = await request(app).post('/api/webhooks/macrodroid').send(longRef);
     expect(res2.status).toBe(400);
+    expect(res2.body.code).toBe('INVALID_REF_NO');
   });
 
-  test('400 when mac_address is invalid', async () => {
-    const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ mac_address: 'not-a-mac' }));
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_MAC');
-  });
-
-  test('400 when amount grants zero minutes at the configured rate', async () => {
-    // Rate is 10 pesos/minute → amount 5 grants 0 minutes
-    const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ amount: 5 }));
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INSUFFICIENT_AMOUNT');
-  });
-
-  test('200 success: rows written, Omada called, session active, minutes correct', async () => {
-    await seedContext('AA:BB:CC:DD:EE:FF');
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
+  test('200 success: records an unclaimed webhook_events row (minimal body)', async () => {
     const ref = 'REF-SUCCESS-1';
+    const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ amount: 50, ref_no: ref }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true });
+
+    const event = await getDb().getOne('SELECT * FROM webhook_events WHERE ref_no = ?', [ref]);
+    expect(event).toBeDefined();
+    expect(event.status).toBe('unclaimed');
+    expect(Number(event.amount)).toBe(50);
+    expect(event.event_id).toMatch(/^evt_/);
+  });
+
+  test('does not require a mac_address and creates no session (decoupled)', async () => {
+    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
+    const ref = 'REF-NO-MAC-1';
     try {
-      const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ amount: 50, ref_no: ref }));
+      const res = await request(app).post('/api/webhooks/macrodroid').send({
+        secret_token: SECRET, amount: 100, ref_no: ref, // no mac_address at all
+      });
       expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.minutes).toBe(5); // 50 pesos / 10 per minute
-      expect(spy).toHaveBeenCalledTimes(1);
-      // Controller params must come from portal_client_context — never null
-      expect(spy.mock.calls[0][0].apMac).toBe('AA:AA:AA:AA:AA:AA');
-      expect(spy.mock.calls[0][0].ssidName).toBe('GuestWiFi');
-      expect(spy.mock.calls[0][0].radioId).toBe(0);
-      expect(spy.mock.calls[0][0].durationMinutes).toBe(5);
 
-      const event = await getDb().getOne('SELECT * FROM webhook_events WHERE ref_no = ?', [ref]);
-      expect(event).toBeDefined();
-      expect(event.status).toBe('processed');
+      const event = await getDb().getOne('SELECT status FROM webhook_events WHERE ref_no = ?', [ref]);
+      expect(event.status).toBe('unclaimed');
 
-      const session = await getDb().getOne('SELECT * FROM sessions WHERE ref_no = ?', [ref]);
-      expect(session).toBeDefined();
-      expect(session.state).toBe('active');
-      expect(session.duration_minutes).toBe(5);
+      const sessions = await getDb().query('SELECT session_id FROM sessions WHERE ref_no = ?', [ref]);
+      expect(sessions.length).toBe(0);
+      expect(spy).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
     }
+  });
+
+  test('ignores an invalid mac_address instead of rejecting it', async () => {
+    const ref = 'REF-BAD-MAC-1';
+    const res = await request(app).post('/api/webhooks/macrodroid').send(
+      payload({ ref_no: ref, mac_address: 'not-a-mac' })
+    );
+    expect(res.status).toBe(200);
+    const event = await getDb().getOne('SELECT status FROM webhook_events WHERE ref_no = ?', [ref]);
+    expect(event.status).toBe('unclaimed');
   });
 
   test('409 duplicate ref_no is rejected before any new write', async () => {
-    await seedContext('AA:BB:CC:DD:EE:FF');
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
     const ref = 'REF-DUP-1';
-    try {
-      const first = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
-      expect(first.status).toBe(200);
+    const first = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
+    expect(first.status).toBe(200);
 
-      const dup = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
-      expect(dup.status).toBe(409);
-      expect(dup.body.code).toBe('DUPLICATE_REF_NO');
+    const dup = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
+    expect(dup.status).toBe(409);
+    expect(dup.body.code).toBe('DUPLICATE_REF_NO');
 
-      // Only one webhook_event and one session exist for that ref
-      const events = await getDb().query('SELECT id FROM webhook_events WHERE ref_no = ?', [ref]);
-      const sessions = await getDb().query('SELECT session_id FROM sessions WHERE ref_no = ?', [ref]);
-      expect(events.length).toBe(1);
-      expect(sessions.length).toBe(1);
-      expect(spy).toHaveBeenCalledTimes(1); // second attempt never reached Omada
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  test('502 when Omada authorization fails: payment still recorded, flag set', async () => {
-    await seedContext('AA:BB:CC:DD:EE:FF');
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockRejectedValue(new Error('controller down'));
-    const ref = 'REF-OMADA-FAIL-1';
-    try {
-      const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
-      expect(res.status).toBe(502);
-      expect(res.body.code).toBe('OMADA_ERROR');
-
-      const session = await getDb().getOne('SELECT * FROM sessions WHERE ref_no = ?', [ref]);
-      expect(session).toBeDefined();
-      expect(session.state).toBe('pending_payment');
-      expect(session.omada_auth_failed).toBe(1);
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  test('MAC is normalized to canonical uppercase colon format on save', async () => {
-    await seedContext('AA:BB:CC:DD:EE:FF');
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
-    const ref = 'REF-MAC-1';
-    try {
-      const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref, mac_address: 'aa-bb-cc-dd-ee-ff' }));
-      expect(res.status).toBe(200);
-      const session = await getDb().getOne('SELECT client_mac FROM sessions WHERE ref_no = ?', [ref]);
-      expect(session.client_mac).toBe('AA:BB:CC:DD:EE:FF');
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  // --- MISSING_PORTAL_CONTEXT fail-loud path ---
-
-  test('422 MISSING_PORTAL_CONTEXT when no context row exists: payment durable, flag set, Omada never called', async () => {
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
-    const ref = 'REF-NO-CTX-1';
-    try {
-      const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
-      expect(res.status).toBe(422);
-      expect(res.body.code).toBe('MISSING_PORTAL_CONTEXT');
-
-      // Payment stays durable...
-      const event = await getDb().getOne('SELECT * FROM webhook_events WHERE ref_no = ?', [ref]);
-      expect(event).toBeDefined();
-      const session = await getDb().getOne('SELECT * FROM sessions WHERE ref_no = ?', [ref]);
-      expect(session).toBeDefined();
-      expect(session.state).toBe('pending_payment');
-      expect(session.omada_auth_failed).toBe(1);
-      // ...and the controller is NEVER called with missing params
-      expect(spy).not.toHaveBeenCalled();
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  test('422 MISSING_PORTAL_CONTEXT when context row is unusable: Omada never called', async () => {
-    // Seed a valid row, then remove it so the webhook sees no usable
-    // context (covers the "row missing at payment time" case; the schema
-    // declares ap_mac NOT NULL, so a NULL ap_mac cannot be materialized
-    // on SQLite — see routes/payment.js validation, which is the real
-    // guarantee that partial rows are never written in production).
-    await seedContext('AA:BB:CC:DD:EE:FF');
-    await getDb().run('DELETE FROM portal_client_context WHERE client_mac = ?', ['AA:BB:CC:DD:EE:FF']);
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
-    const ref = 'REF-PARTIAL-CTX-1';
-    try {
-      const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
-      expect(res.status).toBe(422);
-      expect(res.body.code).toBe('MISSING_PORTAL_CONTEXT');
-      expect(spy).not.toHaveBeenCalled();
-      const session = await getDb().getOne('SELECT omada_auth_failed FROM sessions WHERE ref_no = ?', [ref]);
-      expect(session.omada_auth_failed).toBe(1);
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  test('422 MISSING_PORTAL_CONTEXT when context row is stale (seen_at > 1h old): Omada never called', async () => {
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-    await seedContext('AA:BB:CC:DD:EE:FF', { seen_at: twoHoursAgo });
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
-    const ref = 'REF-STALE-CTX-1';
-    try {
-      const res = await request(app).post('/api/webhooks/macrodroid').send(payload({ ref_no: ref }));
-      expect(res.status).toBe(422);
-      expect(res.body.code).toBe('MISSING_PORTAL_CONTEXT');
-      expect(spy).not.toHaveBeenCalled();
-      const session = await getDb().getOne('SELECT omada_auth_failed FROM sessions WHERE ref_no = ?', [ref]);
-      expect(session.omada_auth_failed).toBe(1);
-    } finally {
-      spy.mockRestore();
-    }
+    const events = await getDb().query('SELECT id FROM webhook_events WHERE ref_no = ?', [ref]);
+    expect(events.length).toBe(1);
   });
 });
-

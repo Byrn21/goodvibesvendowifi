@@ -25,6 +25,7 @@ const webhookRoutes = require('./routes/webhook');
 const paymentRoutes = require('./routes/payment');
 const { startExpirationWorker } = require('./services/session');
 const { fixMissingColumns } = require('./db/migrate_fix');
+const { run: runVoucherRefMigration } = require('./db/migrate_add_voucher_ref');
 
 const app = express();
 
@@ -196,6 +197,9 @@ const startup = async () => {
   // Ensure all schema columns exist on existing production tables
   try {
     await fixMissingColumns();
+    // Add vouchers.assigned_ref_no (pre-generated voucher claim architecture).
+    // Idempotent — a no-op once the column exists.
+    await runVoucherRefMigration();
   } catch (err) {
     console.error('[startup] Column migration failed:', err.message);
   }

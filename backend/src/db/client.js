@@ -111,6 +111,43 @@ function createPgPool() {
       };
     },
 
+    /**
+     * Run `fn(tx)` inside a single database transaction. The callback
+     * receives a `{ query, getOne, run }` handle bound to ONE pooled
+     * connection, so every statement runs in the same transaction.
+     * Commits when fn resolves, rolls back if it throws.
+     * @param {(tx: {query: Function, getOne: Function, run: Function}) => Promise<any>} fn
+     * @returns {Promise<any>} whatever fn returns
+     */
+    async transaction(fn) {
+      const client = await pool.connect();
+      const tx = {
+        async query(sql, params = []) {
+          const result = await client.query(convertPlaceholders(sql), params);
+          return result.rows;
+        },
+        async getOne(sql, params = []) {
+          const rows = await tx.query(sql, params);
+          return rows[0];
+        },
+        async run(sql, params = []) {
+          const result = await client.query(convertPlaceholders(sql), params);
+          return { rowCount: result.rowCount, rows: result.rows, insertId: result.rows[0]?.id ?? null };
+        },
+      };
+      try {
+        await client.query('BEGIN');
+        const result = await fn(tx);
+        await client.query('COMMIT');
+        return result;
+      } catch (err) {
+        try { await client.query('ROLLBACK'); } catch (_) { /* connection already aborted */ }
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+
           /** @returns {Promise<void>} */
     async exec(sql) {
       await pool.query(convertSchema(sql));
@@ -171,6 +208,38 @@ function createSqliteDb() {
         rowCount: info.changes,
         insertId: info.lastInsertRowid,
       };
+    },
+
+    /**
+     * Run `fn(tx)` inside a single SQLite transaction. better-sqlite3 is
+     * synchronous and this wrapper uses one shared connection, so BEGIN /
+     * COMMIT / ROLLBACK bracket the callback on that connection. Commits when
+     * fn resolves, rolls back if it throws.
+     * @param {(tx: {query: Function, getOne: Function, run: Function}) => Promise<any>} fn
+     * @returns {Promise<any>} whatever fn returns
+     */
+    async transaction(fn) {
+      const tx = {
+        async query(sql, params = []) {
+          return sqliteDb.prepare(sql).all(...params);
+        },
+        async getOne(sql, params = []) {
+          return sqliteDb.prepare(sql).get(...params);
+        },
+        async run(sql, params = []) {
+          const info = sqliteDb.prepare(sql).run(...params);
+          return { rowCount: info.changes, insertId: info.lastInsertRowid };
+        },
+      };
+      sqliteDb.exec('BEGIN');
+      try {
+        const result = await fn(tx);
+        sqliteDb.exec('COMMIT');
+        return result;
+      } catch (err) {
+        try { sqliteDb.exec('ROLLBACK'); } catch (_) { /* no active transaction */ }
+        throw err;
+      }
     },
 
     /** @returns {Promise<void>} */

@@ -2,10 +2,9 @@
  * routes/payment.js — POST /api/payment/context
  *
  * Captures the Omada controller context (AP MAC, SSID, radio ID) when a
- * client lands on the captive portal page. The payment webhook later reads
- * this row (portal_client_context table) to authorize the client via
- * /hotspot/extPortal/auth — the client does not need to be online at
- * payment time.
+ * client lands on the captive portal page. The context row is later read by
+ * GET /api/auth (radio_id) and by the session/admin layers so a device can
+ * be authorized via /hotspot/extPortal/auth.
  *
  * This endpoint is UNAUTHENTICATED by design (the client has not paid or
  * authenticated yet), so it is protected by:
@@ -20,11 +19,8 @@
 const express = require('express');
 const router = express.Router();
 const { rateLimit } = require('express-rate-limit');
-const { v4: uuidv4 } = require('uuid');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
-const omadaService = require('../services/omada');
-const { computeMinutesFromAmount } = require('../utils/duration');
 const SITE = process.env.OMADA_SITE || 'Default';
 
 // ── Per-IP rate limiter (stricter than the global apiLimiter) ──────────
@@ -196,7 +192,7 @@ function buildPaymentMethods() {
         "Tap 'Scan QR'.",
         'Scan the code above.',
         'Pay the exact amount.',
-        "Tap 'I Already Paid'.",
+        "After paying, tap 'Claim Voucher' and enter the last 4 digits of your reference number.",
       ],
     },
     maya: {
@@ -209,7 +205,7 @@ function buildPaymentMethods() {
         "Tap 'Scan to Pay'.",
         'Scan the code above.',
         'Pay the exact amount.',
-        "Tap 'I Already Paid'.",
+        "After paying, tap 'Claim Voucher' and enter the last 4 digits of your reference number.",
       ],
     },
     qrph: {
@@ -222,7 +218,7 @@ function buildPaymentMethods() {
         "Tap 'Scan QR'.",
         'Scan the QR Ph code above.',
         'Pay the exact amount.',
-        "Tap 'I Already Paid'.",
+        "After paying, tap 'Claim Voucher' and enter the last 4 digits of your reference number.",
       ],
     },
   };
@@ -235,239 +231,114 @@ router.get('/methods', (req, res) => {
   return res.json(buildPaymentMethods());
 });
 
-// ── Manual payment claim ────────────────────────────────────────────────
+// ── Centralized voucher claim ───────────────────────────────────────────
 /**
  * POST /api/payment/claim
  *
- * Manual fallback for the payment QR flow: the customer types the reference
- * number from their e-wallet receipt when the automatic SMS detection is
- * slow or has not happened yet.
+ * The customer has paid (MacroDroid intercepted the e-wallet confirmation
+ * and POSTed it to /api/webhooks/macrodroid, creating an 'unclaimed'
+ * webhook_events row) and now claims the matching pre-imported voucher by
+ * entering the LAST 4 DIGITS of their reference number.
  *
- * Body: { ref_no, client_mac }
+ * Body: { ref_suffix }  — exactly 4 digits
  *
- * Behaviour:
- *   1. If MacroDroid already recorded a PROCESSED webhook_event for ref_no,
- *      the matching payment exists but the device may not have been
- *      authorized (e.g. the webhook hit MISSING_PORTAL_CONTEXT). Manually
- *      trigger the Omada authorization now and return success.
- *   2. If ref_no is unknown, save it as a PENDING event linked to
- *      ref_no + client_mac for later human verification and return a
- *      pending response (never an error).
- *   3. If the same reference was already claimed, respond pending again
- *      (idempotent).
+ * Behaviour (all inside ONE transaction):
+ *   1. Find the newest 'unclaimed' webhook_events row whose ref_no ends
+ *      with ref_suffix → 404 'Payment not found or already claimed'.
+ *   2. Convert the recorded amount from PESOS to CENTAVOS (webhook_events
+ *      stores Pesos; vouchers.price stores centavos — never assume they match).
+ *   3. Find one 'active', unassigned voucher whose price matches those
+ *      centavos → 404 'No voucher available for this amount'.
+ *   4. Atomically mark the voucher 'claimed' (recording the FULL ref_no in
+ *      assigned_ref_no) AND the event 'claimed'. Any failure rolls BOTH
+ *      back, so a voucher is never claimed without its event (or vice versa).
+ *
+ * Returns 200 with { success, voucherCode, ref_no }. The frontend injects
+ * voucherCode into the existing /api/auth voucher flow to connect.
  */
+
+/** Build a typed HTTP error (thrown to roll back the claim transaction). */
+function httpError(status, code, message) {
+  const err = new Error(message);
+  err.status = status;
+  err.code = code;
+  return err;
+}
+
 router.post('/claim', claimLimiter, async (req, res, next) => {
   try {
     const body = req.body || {};
+    const refSuffix = typeof body.ref_suffix === 'string' ? body.ref_suffix.trim() : '';
 
-    // Reference numbers are numeric (GCash/Maya 13-digit refs). Accept 6–64
-    // digits so real webhook references are never rejected.
-    const refNo = typeof body.ref_no === 'string' ? body.ref_no.trim() : '';
-    if (!/^\d{6,64}$/.test(refNo)) {
+    // The customer enters the last 4 digits of their payment reference.
+    if (!/^\d{4}$/.test(refSuffix)) {
       return res.status(400).json({
         success: false,
-        error: 'ref_no is required and must be 6-64 digits.',
-        code: 'INVALID_REF_NO',
-      });
-    }
-
-    const clientMac = parseMac(body.client_mac);
-    if (!clientMac) {
-      return res.status(400).json({
-        success: false,
-        error: 'client_mac is required and must be a valid MAC address.',
-        code: 'INVALID_CLIENT_MAC',
+        error: 'ref_suffix is required and must be the last 4 digits of your reference number.',
+        code: 'INVALID_REF_SUFFIX',
       });
     }
 
     const db = getDb();
-    const event = await db.getOne(
-      'SELECT * FROM webhook_events WHERE ref_no = ? LIMIT 1',
-      [refNo]
-    );
 
-    // ── Case 3: already registered as a pending manual claim ──────────
-    if (event && event.status !== 'processed') {
-      return res.json({
-        success: true,
-        pending: true,
-        code: 'PENDING_VERIFICATION',
-        sessionId: event.session_id || null,
-        message: "Thanks! We're verifying your reference number manually. This may take a few minutes.",
-      });
-    }
-
-    // ── Case 1: MacroDroid already caught the matching SMS ────────────
-    if (event && event.status === 'processed') {
-      let session = await db.getOne(
-        'SELECT * FROM sessions WHERE ref_no = ? LIMIT 1',
-        [refNo]
-      );
-
-      // Already authorized — nothing more to do.
-      if (session && session.state === 'active') {
-        return res.json({
-          success: true,
-          alreadyActive: true,
-          code: 'ALREADY_ACTIVE',
-          sessionId: session.session_id,
-          message: 'This device is already connected.',
-        });
-      }
-
-      const durationMinutes = (session && Number(session.duration_minutes)) ||
-        computeMinutesFromAmount(event.amount);
-      if (!durationMinutes || durationMinutes <= 0) {
-        return res.status(400).json({
-          success: false,
-          error: 'The recorded payment is too small to grant any time.',
-          code: 'INSUFFICIENT_AMOUNT',
-        });
-      }
-
-      // Controller context is created on the portal landing / modal open.
-      const ctx = await db.getOne(
-        'SELECT * FROM portal_client_context WHERE client_mac = ?',
-        [clientMac]
-      );
-      if (!ctx || !ctx.ap_mac || !ctx.ssid_name || ctx.radio_id === null || ctx.radio_id === undefined) {
-        return res.status(422).json({
-          success: false,
-          error: 'Portal context is missing or stale. Please re-open the portal page and try again.',
-          code: 'MISSING_PORTAL_CONTEXT',
-        });
-      }
-
-      const sessionId = (session && session.session_id) ||
-        ('sess_' + uuidv4().replace(/-/g, '').slice(0, 16));
-
-      try {
-        await omadaService.authenticateClient({
-          clientMac,
-          clientIp: ctx.client_ip || '',
-          apMac: ctx.ap_mac,
-          ssidName: ctx.ssid_name,
-          radioId: ctx.radio_id,
-          durationMinutes,
-          sessionId,
-        });
-      } catch (omadaErr) {
-        console.error('[payment/claim] Omada auth failed for ref ' + refNo + ':', omadaErr.message);
-        if (session) {
-          await db.run(
-            'UPDATE sessions SET omada_auth_failed = 1, updated_at = ? WHERE session_id = ?',
-            [new Date().toISOString(), sessionId]
-          );
-        }
-        return res.status(502).json({
-          success: false,
-          error: 'Controller authorization failed. Please try again.',
-          code: 'OMADA_ERROR',
-        });
-      }
-
-      const now = new Date().toISOString();
-      const expiresAt = new Date(Date.now() + durationMinutes * 60 * 1000).toISOString();
-      if (session) {
-        await db.run(
-          `UPDATE sessions
-             SET state = 'active', started_at = COALESCE(started_at, ?),
-                 expires_at = ?, omada_auth_failed = 0, updated_at = ?
-           WHERE session_id = ?`,
-          [now, expiresAt, now, sessionId]
-        );
-      } else {
-        await db.run(
-          `INSERT INTO sessions
-             (session_id, client_mac, ref_no, client_ip, ap_mac, ssid_name,
-              duration_minutes, voucher_type, started_at, expires_at, state, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?, ?, 'active', ?, ?)`,
-          [sessionId, clientMac, refNo, ctx.client_ip || '', ctx.ap_mac, ctx.ssid_name,
-            durationMinutes, now, expiresAt, now, now]
-        );
-        await db.run(
-          'UPDATE webhook_events SET session_id = ? WHERE ref_no = ?',
-          [sessionId, refNo]
-        );
-      }
-
-      console.log('[payment/claim] manually authorized ' + clientMac + ' for ref ' + refNo +
-        ' (' + durationMinutes + ' min)');
-      return res.json({
-        success: true,
-        code: 'AUTHORIZED',
-        sessionId,
-        minutes: durationMinutes,
-        message: 'Payment verified. You are now connected.',
-      });
-    }
-
-    // ── Case 2: unknown reference → store pending for human verification ──
-    const sessionId = 'sess_' + uuidv4().replace(/-/g, '').slice(0, 16);
-    const eventId = 'evt_' + uuidv4().replace(/-/g, '').slice(0, 16);
-    const now = new Date().toISOString();
-
+    let claim;
     try {
-      await db.run(
-        `INSERT INTO webhook_events (event_id, ref_no, session_id, provider, event_type, amount, status)
-         VALUES (?, ?, ?, 'manual_claim', 'manual_reference_submitted', NULL, 'pending')`,
-        [eventId, refNo, sessionId]
-      );
-    } catch (err) {
-      // Concurrent duplicate claim — fall back to the existing pending row.
-      if (err.code === '23505' || err.code === 'SQLITE_CONSTRAINT') {
-        const existing = await db.getOne(
-          'SELECT session_id FROM webhook_events WHERE ref_no = ? LIMIT 1',
-          [refNo]
+      claim = await db.transaction(async (tx) => {
+        const event = await tx.getOne(
+          `SELECT ref_no, amount FROM webhook_events
+            WHERE status = 'unclaimed' AND ref_no LIKE ?
+            ORDER BY id DESC LIMIT 1`,
+          ['%' + refSuffix]
         );
-        return res.json({
-          success: true,
-          pending: true,
-          code: 'PENDING_VERIFICATION',
-          sessionId: (existing && existing.session_id) || sessionId,
-          message: "Thanks! We're verifying your reference number manually. This may take a few minutes.",
-        });
+        if (!event) throw httpError(404, 'PAYMENT_NOT_FOUND', 'Payment not found or already claimed.');
+
+        // CRITICAL: webhook_events.amount is Pesos; vouchers.price is centavos.
+        const amountCentavos = Math.round(Number(event.amount) * 100);
+
+        const voucher = await tx.getOne(
+          `SELECT id, code FROM vouchers
+            WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
+            ORDER BY id ASC LIMIT 1`,
+          [amountCentavos]
+        );
+        if (!voucher) {
+          throw httpError(404, 'NO_VOUCHER_AVAILABLE', 'No voucher is available for this amount. Please contact support.');
+        }
+
+        // Conditional update guards against a concurrent claim taking the
+        // voucher between the SELECT and this UPDATE.
+        const voucherUpdate = await tx.run(
+          `UPDATE vouchers
+              SET state = 'claimed', assigned_ref_no = ?
+            WHERE id = ? AND state = 'active' AND assigned_ref_no IS NULL`,
+          [event.ref_no, voucher.id]
+        );
+        if (voucherUpdate.rowCount === 0) {
+          throw httpError(404, 'NO_VOUCHER_AVAILABLE', 'No voucher is available for this amount. Please contact support.');
+        }
+
+        const eventUpdate = await tx.run(
+          `UPDATE webhook_events
+              SET status = 'claimed', processed_at = ?
+            WHERE ref_no = ? AND status = 'unclaimed'`,
+          [new Date().toISOString(), event.ref_no]
+        );
+        if (eventUpdate.rowCount === 0) {
+          // Another request claimed this payment first — roll the voucher back.
+          throw httpError(404, 'PAYMENT_NOT_FOUND', 'Payment not found or already claimed.');
+        }
+
+        return { voucherCode: voucher.code, refNo: event.ref_no };
+      });
+    } catch (err) {
+      if (err.code === 'PAYMENT_NOT_FOUND' || err.code === 'NO_VOUCHER_AVAILABLE') {
+        return res.status(err.status || 404).json({ success: false, error: err.message, code: err.code });
       }
       throw err;
     }
 
-    try {
-      await db.run(
-        `INSERT INTO sessions
-           (session_id, client_mac, ref_no, duration_minutes, voucher_type, state, created_at, updated_at)
-         VALUES (?, ?, ?, 60, 'paid', 'pending_verification', ?, ?)`,
-        [sessionId, clientMac, refNo, now, now]
-      );
-    } catch (err) {
-      if (!(err.code === '23505' || err.code === 'SQLITE_CONSTRAINT')) throw err;
-      // sessions.ref_no already exists — reuse that session for the link.
-      const existingSession = await db.getOne(
-        'SELECT session_id FROM sessions WHERE ref_no = ? LIMIT 1',
-        [refNo]
-      );
-      if (existingSession && existingSession.session_id) {
-        await db.run(
-          'UPDATE webhook_events SET session_id = ? WHERE ref_no = ?',
-          [existingSession.session_id, refNo]
-        );
-        return res.json({
-          success: true,
-          pending: true,
-          code: 'PENDING_VERIFICATION',
-          sessionId: existingSession.session_id,
-          message: "Thanks! We're verifying your reference number manually. This may take a few minutes.",
-        });
-      }
-    }
-
-    console.log('[payment/claim] pending manual verification for ' + clientMac + ' ref ' + refNo);
-    return res.json({
-      success: true,
-      pending: true,
-      code: 'PENDING_VERIFICATION',
-      sessionId,
-      message: "Thanks! We're verifying your reference number manually. This may take a few minutes.",
-    });
+    console.log('[payment/claim] claimed voucher ' + claim.voucherCode + ' for ref ' + claim.refNo);
+    return res.json({ success: true, voucherCode: claim.voucherCode, ref_no: claim.refNo });
   } catch (err) {
     next(err);
   }

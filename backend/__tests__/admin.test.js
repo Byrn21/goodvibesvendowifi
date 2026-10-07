@@ -415,6 +415,28 @@ describe('POST /api/admin/vouchers/import — Voucher Import', () => {
     expect(byCode['404040']).toBe(7500);   // PHP 75 -> 7500 centavos
   });
 
+  test('imported vouchers are claim-compatible: assigned_ref_no NULL and price in centavos', async () => {
+    const csv = buildCsv(
+      ['ID', 'Code', 'Type', 'Duration', 'Price'],
+      [{ ID: '', Code: '909090', Type: 'standard', Duration: 60, Price: '50.00' }]
+    );
+
+    const res = await request(app)
+      .post('/api/admin/vouchers/import')
+      .set('X-API-Key', VALID_KEY)
+      .attach('file', csv, 'claim-compatible.csv');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    const row = await getDb().getOne(
+      'SELECT price, state, assigned_ref_no FROM vouchers WHERE code = ?',
+      ['909090']
+    );
+    expect(row.price).toBe(5000);           // P50.00 stored as exactly 5000 centavos
+    expect(row.state).toBe('active');
+    expect(row.assigned_ref_no).toBe(null); // free to be claimed by the new flow
+  });
+
   test('rejects negative prices with a row-level error', async () => {
     const csv = buildCsv(
       ['ID', 'Code', 'Type', 'Duration', 'Price'],

@@ -55,7 +55,11 @@ async function validateVoucher(voucher, clientMac) {
     return { valid: false, code: 'USED_VOUCHER', message: 'This voucher has already been used.' };
   }
 
-  if (row.state !== 'active') {
+  // 'active' vouchers are freely redeemable. 'claimed' vouchers were matched
+  // to a specific payment by POST /api/payment/claim (assigned_ref_no) and are
+  // now being redeemed by that customer through the normal voucher flow — so
+  // they are accepted here too. Any other state is unavailable.
+  if (row.state !== 'active' && row.state !== 'claimed') {
     return { valid: false, code: 'INVALID_VOUCHER', message: 'Voucher is not available.' };
   }
 

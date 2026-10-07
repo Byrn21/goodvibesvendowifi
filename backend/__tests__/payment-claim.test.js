@@ -30,39 +30,8 @@ process.env.LOGIN_RATE_LIMIT_MAX = '10000';
 const request = require('supertest');
 const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
-const omadaService = require('../src/services/omada');
 
 const MAC = 'AA:BB:CC:DD:EE:FF';
-
-async function seedContext(clientMac = MAC, overrides = {}) {
-  const now = new Date().toISOString();
-  const row = Object.assign({
-    client_mac: clientMac,
-    client_ip: '192.168.1.50',
-    ap_mac: 'AA:AA:AA:AA:AA:AA',
-    ssid_name: 'GuestWiFi',
-    radio_id: 0,
-    site: 'Default',
-    seen_at: now,
-    created_at: now,
-    updated_at: now,
-  }, overrides);
-  await getDb().run(
-    `INSERT INTO portal_client_context
-       (client_mac, client_ip, ap_mac, ssid_name, radio_id, site, seen_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [row.client_mac, row.client_ip, row.ap_mac, row.ssid_name, row.radio_id, row.site, row.seen_at, row.created_at, row.updated_at]
-  );
-  return row;
-}
-
-async function seedProcessedEvent(refNo, sessionId, amount = 50) {
-  await getDb().run(
-    `INSERT INTO webhook_events (event_id, ref_no, session_id, provider, event_type, amount, status)
-     VALUES (?, ?, ?, 'macrodroid', 'payment_received', ?, 'processed')`,
-    ['evt_' + sessionId, refNo, sessionId, amount]
-  );
-}
 
 async function seedSession(sessionId, refNo, state, clientMac = MAC, durationMinutes = 5) {
   const now = new Date().toISOString();
@@ -87,131 +56,128 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await getDb().exec('DELETE FROM sessions; DELETE FROM webhook_events; DELETE FROM portal_client_context;');
+  await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events; DELETE FROM portal_client_context;');
 });
 
 describe('POST /api/payment/claim', () => {
-  test('400 when ref_no is missing / non-numeric', async () => {
-    for (const bad of ['', '123', 'abcd123456'] ) {
-      const res = await request(app).post('/api/payment/claim').send({ ref_no: bad, client_mac: MAC });
+  // Seed an 'unclaimed' webhook_events row (what the MacroDroid webhook writes).
+  async function seedUnclaimed(refNo, amountPesos) {
+    await getDb().run(
+      `INSERT INTO webhook_events (event_id, ref_no, amount, status)
+       VALUES (?, ?, ?, 'unclaimed')`,
+      ['evt_' + refNo, refNo, amountPesos]
+    );
+  }
+
+  // Seed a voucher whose price is INTEGER CENTAVOS (P50.00 = 5000).
+  async function seedVoucher(code, priceCentavos, state = 'active', assignedRef = null) {
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no)
+       VALUES (?, 'standard', 60, ?, ?, ?)`,
+      [code, priceCentavos, state, assignedRef]
+    );
+  }
+
+  test('400 when ref_suffix is missing or not exactly 4 digits', async () => {
+    for (const bad of ['', '123', '12345', 'abcd', undefined]) {
+      const res = await request(app).post('/api/payment/claim').send({ ref_suffix: bad });
       expect(res.status).toBe(400);
-      expect(res.body.code).toBe('INVALID_REF_NO');
+      expect(res.body.code).toBe('INVALID_REF_SUFFIX');
     }
   });
 
-  test('400 when client_mac is invalid', async () => {
-    const res = await request(app).post('/api/payment/claim').send({ ref_no: '1234567890123', client_mac: 'nope' });
-    expect(res.status).toBe(400);
-    expect(res.body.code).toBe('INVALID_CLIENT_MAC');
+  test('404 when no unclaimed payment ends with the suffix', async () => {
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '9999' });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('PAYMENT_NOT_FOUND');
+    expect(res.body.error).toMatch(/not found or already claimed/i);
   });
 
-  test('unknown ref_no is stored pending (not an error) and returns pending', async () => {
-    const ref = '1234567890123';
-    const res = await request(app).post('/api/payment/claim').send({ ref_no: ref, client_mac: MAC });
+  test('200: converts Pesos to centavos and claims the matching voucher + event together', async () => {
+    await seedUnclaimed('REF-ABC1234', 50);                     // 50 pesos = 5000 centavos
+    await seedVoucher('111111', 5000);                          // must be chosen
+    await seedVoucher('222222', 5000, 'active', 'REF-OLD0001'); // already assigned -> skip
+
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234' });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.pending).toBe(true);
-    expect(res.body.code).toBe('PENDING_VERIFICATION');
+    expect(res.body.voucherCode).toBe('111111');
+    expect(res.body.ref_no).toBe('REF-ABC1234');
 
-    const event = await getDb().getOne('SELECT * FROM webhook_events WHERE ref_no = ?', [ref]);
-    expect(event).toBeDefined();
-    expect(event.status).toBe('pending');
-    expect(event.provider).toBe('manual_claim');
+    const voucher = await getDb().getOne('SELECT * FROM vouchers WHERE code = ?', ['111111']);
+    expect(voucher.state).toBe('claimed');
+    expect(voucher.assigned_ref_no).toBe('REF-ABC1234');
 
-    const session = await getDb().getOne('SELECT * FROM sessions WHERE ref_no = ?', [ref]);
-    expect(session).toBeDefined();
-    expect(session.state).toBe('pending_verification');
-    expect(session.client_mac).toBe(MAC);
+    const event = await getDb().getOne('SELECT * FROM webhook_events WHERE ref_no = ?', ['REF-ABC1234']);
+    expect(event.status).toBe('claimed');
   });
 
-  test('repeated claim of the same ref is idempotent (one event row)', async () => {
-    const ref = '1234567890124';
-    const first = await request(app).post('/api/payment/claim').send({ ref_no: ref, client_mac: MAC });
-    const second = await request(app).post('/api/payment/claim').send({ ref_no: ref, client_mac: MAC });
-    expect(first.body.pending).toBe(true);
-    expect(second.body.pending).toBe(true);
+  test('404 NO_VOUCHER_AVAILABLE when no active voucher has the exact centavo price', async () => {
+    await seedUnclaimed('REF-XYZ5678', 50); // -> 5000 centavos
+    await seedVoucher('333333', 50);        // a Peso/centavo mismatch must NOT match
 
-    const events = await getDb().query('SELECT id FROM webhook_events WHERE ref_no = ?', [ref]);
-    const sessions = await getDb().query('SELECT session_id FROM sessions WHERE ref_no = ?', [ref]);
-    expect(events.length).toBe(1);
-    expect(sessions.length).toBe(1);
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '5678' });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('NO_VOUCHER_AVAILABLE');
+
+    // Nothing was mutated.
+    const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['333333']);
+    expect(voucher.state).toBe('active');
+    expect(voucher.assigned_ref_no).toBe(null);
+    const event = await getDb().getOne('SELECT status FROM webhook_events WHERE ref_no = ?', ['REF-XYZ5678']);
+    expect(event.status).toBe('unclaimed');
   });
 
-  test('processed webhook_event triggers Omada authorization and activates session', async () => {
-    await seedContext();
-    await seedProcessedEvent('1234567890125', 'sess_claim1', 50);
-    await seedSession('sess_claim1', '1234567890125', 'pending_payment');
+  test('a payment can only be claimed once - the second attempt consumes no extra voucher', async () => {
+    await seedUnclaimed('REF-DBL0001', 50);
+    await seedVoucher('444444', 5000);
+    await seedVoucher('555555', 5000);
 
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
-    try {
-      const res = await request(app).post('/api/payment/claim')
-        .send({ ref_no: '1234567890125', client_mac: MAC });
+    const first = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001' });
+    expect(first.status).toBe(200);
+    expect(first.body.voucherCode).toBe('444444');
 
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body.minutes).toBe(5);
-      expect(spy).toHaveBeenCalledTimes(1);
-      expect(spy.mock.calls[0][0].apMac).toBe('AA:AA:AA:AA:AA:AA');
-      expect(spy.mock.calls[0][0].ssidName).toBe('GuestWiFi');
-      expect(spy.mock.calls[0][0].radioId).toBe(0);
+    const second = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001' });
+    expect(second.status).toBe(404);
+    expect(second.body.code).toBe('PAYMENT_NOT_FOUND');
 
-      const session = await getDb().getOne('SELECT * FROM sessions WHERE ref_no = ?', ['1234567890125']);
-      expect(session.state).toBe('active');
-      expect(session.omada_auth_failed).toBe(0);
-    } finally {
-      spy.mockRestore();
-    }
+    const active = await getDb().getOne(
+      "SELECT COUNT(*) AS c FROM vouchers WHERE state = 'active' AND assigned_ref_no IS NULL"
+    );
+    expect(Number(active.c)).toBe(1);
   });
 
-  test('processed event with an already-active session does not re-authorize', async () => {
-    await seedContext();
-    await seedProcessedEvent('1234567890126', 'sess_claim2', 50);
-    await seedSession('sess_claim2', '1234567890126', 'active');
+  test('matches the newest unclaimed payment when several share the suffix', async () => {
+    await seedUnclaimed('REF-ONE1234', 50);
+    await seedUnclaimed('REF-TWO1234', 50);
+    await seedVoucher('666666', 5000);
 
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
-    try {
-      const res = await request(app).post('/api/payment/claim')
-        .send({ ref_no: '1234567890126', client_mac: MAC });
-      expect(res.status).toBe(200);
-      expect(res.body.alreadyActive).toBe(true);
-      expect(spy).not.toHaveBeenCalled();
-    } finally {
-      spy.mockRestore();
-    }
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234' });
+    expect(res.status).toBe(200);
+    expect(res.body.ref_no).toBe('REF-TWO1234');
   });
 
-  test('422 MISSING_PORTAL_CONTEXT when context is absent — never calls Omada', async () => {
-    await seedProcessedEvent('1234567890127', 'sess_claim3', 50);
-    await seedSession('sess_claim3', '1234567890127', 'pending_payment');
+  test('a claimed voucher connects through the existing /api/auth flow (Connect Now)', async () => {
+    await seedUnclaimed('REF-CH1234', 50);
+    await seedVoucher('777777', 5000);
 
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
-    try {
-      const res = await request(app).post('/api/payment/claim')
-        .send({ ref_no: '1234567890127', client_mac: MAC });
-      expect(res.status).toBe(422);
-      expect(res.body.code).toBe('MISSING_PORTAL_CONTEXT');
-      expect(spy).not.toHaveBeenCalled();
-    } finally {
-      spy.mockRestore();
-    }
-  });
+    const claim = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234' });
+    expect(claim.status).toBe(200);
+    expect(claim.body.voucherCode).toBe('777777');
 
-  test('502 when Omada rejects: session flagged omada_auth_failed', async () => {
-    await seedContext();
-    await seedProcessedEvent('1234567890128', 'sess_claim4', 50);
-    await seedSession('sess_claim4', '1234567890128', 'pending_payment');
+    const auth = await request(app).post('/api/auth').send({
+      voucher: claim.body.voucherCode,
+      clientMac: MAC,
+      apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GuestWiFi',
+      termsAccepted: true,
+    });
+    expect(auth.status).toBe(200);
+    expect(auth.body.success).toBe(true);
 
-    const spy = jest.spyOn(omadaService, 'authenticateClient').mockRejectedValue(new Error('controller down'));
-    try {
-      const res = await request(app).post('/api/payment/claim')
-        .send({ ref_no: '1234567890128', client_mac: MAC });
-      expect(res.status).toBe(502);
-      expect(res.body.code).toBe('OMADA_ERROR');
-      const session = await getDb().getOne('SELECT omada_auth_failed FROM sessions WHERE ref_no = ?', ['1234567890128']);
-      expect(session.omada_auth_failed).toBe(1);
-    } finally {
-      spy.mockRestore();
-    }
+    const voucher = await getDb().getOne('SELECT state, used_by_mac FROM vouchers WHERE code = ?', ['777777']);
+    expect(voucher.state).toBe('used');
+    expect(voucher.used_by_mac).toBe(MAC);
   });
 });
 

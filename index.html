@@ -505,6 +505,13 @@
             By connecting, you agree to our acceptable use policy.
           </p>
           </form>
+
+          <!-- Centralized post-payment voucher claim (replaces the old
+               per-payment-tile "I Already Paid" flow). -->
+          <div class="claim-cta">
+            <button type="button" class="btn btn--secondary btn--full" id="claim-voucher-btn">Claim Voucher</button>
+            <p class="form-hint form-hint--centered">Already paid? Claim your voucher with the last 4 digits of your reference number.</p>
+          </div>
         </section>
       <!-- ================================================================
             PRICING TABLE
@@ -792,6 +799,69 @@
   </div>
 
   <!-- ================================================================
+       CLAIM VOUCHER MODAL (centralized post-payment claim)
+       Opened by the "Claim Voucher" button on the main portal screen.
+       States: input -> loading -> success (voucher code) / error (retry).
+       Wired up by assets/portal.js (initClaimModal).
+       ================================================================ -->
+  <div id="claim-modal" class="modal-overlay hidden" tabindex="-1" role="dialog" aria-labelledby="claim-modal-title" aria-modal="true">
+    <div class="modal-dialog claim-modal__dialog">
+      <div class="modal-header">
+        <h3 id="claim-modal-title">Claim Voucher</h3>
+        <button type="button" class="modal-close" id="claim-modal-close" aria-label="Close claim dialog">&times;</button>
+      </div>
+      <div class="modal-body claim-modal__body">
+
+        <!-- Input state -->
+        <div id="claim-step-input">
+          <p class="modal-instruction">Enter the last 4 digits of the reference number from your payment receipt or SMS.</p>
+          <input
+            type="text"
+            id="claim-ref-input"
+            class="qr-ref-input claim-modal__input"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="4"
+            placeholder="e.g. 1234"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Last 4 digits of your reference number"
+          >
+          <p id="claim-input-error" class="form-error hidden" role="alert"></p>
+        </div>
+
+        <!-- Loading state -->
+        <div id="claim-step-loading" class="qr-waiting hidden" role="status" aria-live="polite">
+          <div class="spinner" aria-hidden="true"></div>
+          <p class="qr-waiting__text" id="claim-loading-text">Verifying your payment...</p>
+        </div>
+
+        <!-- Success state -->
+        <div id="claim-step-success" class="hidden">
+          <p class="modal-message">Your voucher code is:</p>
+          <p class="claim-code" id="claim-voucher-code"></p>
+          <p class="modal-instruction">Tap Connect Now to use it and get online.</p>
+        </div>
+
+        <!-- Error state -->
+        <div id="claim-step-error" class="hidden">
+          <p id="claim-error-text" class="form-error" role="alert"></p>
+        </div>
+
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn--secondary" id="claim-cancel">Cancel</button>
+        <button type="button" class="btn btn--primary" id="claim-verify">
+          <span id="claim-verify-label">Verify Payment</span>
+          <span class="qr-btn-spinner hidden" id="claim-verify-spinner" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="btn btn--primary hidden" id="claim-retry">Try Again</button>
+        <button type="button" class="btn btn--primary hidden" id="claim-connect">Connect Now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
        DYNAMIC PAYMENT QR MODAL (GCash / Maya / QR Ph)
        Opened by the payment tiles in assets/portal.js. QR images and
        receiver details are loaded at runtime from GET /api/payment/methods.
@@ -814,12 +884,6 @@
       </div>
 
       <div class="qr-modal__body">
-        <!-- Device-context binding error (blocks "I Already Paid") -->
-        <div id="qr-context-error" class="qr-error-box hidden" role="alert">
-          <span id="qr-context-error-text"></span>
-          <button type="button" class="btn btn--outline qr-error-box__retry" id="qr-context-retry">Retry</button>
-        </div>
-
         <!-- QR + receiver details + instructions -->
         <div class="qr-section" id="qr-section">
           <div class="qr-panel">
@@ -828,53 +892,13 @@
           <p class="qr-detail" id="qr-account-name-row"><span class="qr-detail__label">Account Name:</span> <strong id="qr-account-name">—</strong></p>
           <p class="qr-detail" id="qr-account-number-row"><span class="qr-detail__label">Account Number:</span> <strong id="qr-account-number">—</strong></p>
           <p class="qr-amount">Amount to pay: <strong id="qr-amount-value">—</strong></p>
-          <p class="qr-context-status" id="qr-context-status" role="status" aria-live="polite"></p>
           <ol class="qr-instructions" id="qr-instructions"></ol>
-        </div>
-
-        <!-- Waiting-for-confirmation state -->
-        <div id="qr-waiting" class="qr-waiting hidden" role="status" aria-live="polite">
-          <div class="spinner" aria-hidden="true"></div>
-          <p class="qr-waiting__text" id="qr-waiting-text">Waiting for confirmation...</p>
-        </div>
-
-        <!-- Manual fallback: reference number claim -->
-        <div id="qr-manual" class="qr-manual hidden">
-          <p class="qr-manual__title">Taking too long? Enter your 13-digit Reference No.</p>
-          <div class="qr-manual__form">
-            <input
-              type="text"
-              id="qr-ref-input"
-              class="qr-ref-input"
-              inputmode="numeric"
-              pattern="[0-9]*"
-              maxlength="13"
-              placeholder="e.g. 1234567890123"
-              autocomplete="off"
-              spellcheck="false"
-              aria-label="13-digit reference number"
-            >
-            <button type="button" class="btn btn--primary qr-manual__submit" id="qr-ref-submit">
-              <span id="qr-ref-submit-label">Submit</span>
-              <span class="qr-btn-spinner hidden" id="qr-ref-submit-spinner" aria-hidden="true"></span>
-            </button>
-          </div>
-          <p class="qr-manual__message hidden" id="qr-manual-message" role="status" aria-live="polite"></p>
-        </div>
-
-        <!-- Dismissible claim error -->
-        <div id="qr-claim-error" class="qr-claim-error hidden" role="alert">
-          <span id="qr-claim-error-text"></span>
-          <button type="button" class="qr-claim-error__close" id="qr-claim-error-close" aria-label="Dismiss error">&times;</button>
+          <p class="qr-manual__title">After paying, tap <strong>Claim Voucher</strong> and enter the last 4 digits of your reference number.</p>
         </div>
       </div>
 
       <div class="qr-modal__footer">
-        <button type="button" class="btn btn--secondary qr-modal__btn" id="qr-cancel">Cancel</button>
-        <button type="button" class="btn btn--primary qr-modal__btn" id="qr-paid" disabled>
-          <span id="qr-paid-label">I Already Paid</span>
-          <span class="qr-btn-spinner hidden" id="qr-paid-spinner" aria-hidden="true"></span>
-        </button>
+        <button type="button" class="btn btn--secondary qr-modal__btn" id="qr-cancel">Close</button>
       </div>
     </div>
   </div>

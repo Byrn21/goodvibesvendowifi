@@ -13,6 +13,9 @@
  *            been added yet — so reconciliation must run first.
  *   Phase 2: schema.sql — creates any missing tables plus all indexes
  *            (safe now, because every referenced column exists).
+ *   Phase 3: migrate_add_voucher_ref — adds vouchers.assigned_ref_no to
+ *            pre-existing vouchers tables (fresh tables already get the
+ *            column from schema.sql). Idempotent.
  */
 
 require('dotenv').config();
@@ -20,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const { getDb, closeDb } = require('./client');
 const { fixMissingColumns } = require('./migrate_fix');
+const { run: runVoucherRefMigration } = require('./migrate_add_voucher_ref');
 
 const SCHEMA_PATH = path.join(__dirname, 'schema.sql');
 
@@ -29,12 +33,15 @@ async function migrate() {
 
   const db = getDb();
 
-  console.log('[migrate] Phase 1/2: reconciling columns on existing tables...');
+  console.log('[migrate] Phase 1/3: reconciling columns on existing tables...');
   await fixMissingColumns();
 
-  console.log('[migrate] Phase 2/2: applying schema.sql (missing tables + indexes)...');
+  console.log('[migrate] Phase 2/3: applying schema.sql (missing tables + indexes)...');
   const schema = fs.readFileSync(SCHEMA_PATH, 'utf8');
   await db.exec(schema);
+
+  console.log('[migrate] Phase 3/3: ensuring vouchers.assigned_ref_no exists...');
+  await runVoucherRefMigration();
 
   console.log('[migrate] Schema applied successfully.');
   console.log('[migrate] Done.');

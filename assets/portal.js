@@ -1268,16 +1268,10 @@
     });
   }
 
-  var PAYMENT_POLL_INTERVAL_MS = 5000;
-
   var qrState = {
     method: null,
     amountCents: 0,
     open: false,
-    contextBound: false,
-    polling: false,
-    pollTimer: null,
-    claimSubmitting: false,
     lastFocus: null
   };
 
@@ -1345,8 +1339,6 @@
 
     qrState.method = method;
     qrState.amountCents = amountCents;
-    qrState.contextBound = false;
-    qrState.polling = false;
     qrState.lastFocus = document.activeElement;
 
     // Header
@@ -1387,31 +1379,6 @@
       show(list);
     }
 
-    // Reset transient UI
-    hide(qrEl('qr-context-error'));
-    hide(qrEl('qr-claim-error'));
-    hide(qrEl('qr-waiting'));
-    hide(qrEl('qr-manual'));
-    hide(qrEl('qr-manual-message'));
-    var statusEl = qrEl('qr-context-status');
-    if (statusEl) { statusEl.textContent = ''; statusEl.className = 'qr-context-status'; }
-
-    // Reset buttons — "I Already Paid" stays disabled until the device binds.
-    var paidBtn = qrEl('qr-paid');
-    var paidLabel = qrEl('qr-paid-label');
-    var paidSpinner = qrEl('qr-paid-spinner');
-    if (paidBtn) { paidBtn.disabled = true; paidBtn.removeAttribute('aria-busy'); }
-    if (paidLabel) paidLabel.textContent = 'I Already Paid';
-    if (paidSpinner) hide(paidSpinner);
-
-    var refInput = qrEl('qr-ref-input');
-    if (refInput) refInput.value = '';
-    var submitLabel = qrEl('qr-ref-submit-label');
-    if (submitLabel) submitLabel.textContent = 'Submit';
-    var submitSpinner = qrEl('qr-ref-submit-spinner');
-    if (submitSpinner) hide(submitSpinner);
-    qrState.claimSubmitting = false;
-
     // Open with fade + scale, lock background scroll
     overlay.classList.add('is-open');
     document.body.classList.add('qr-modal-open');
@@ -1421,144 +1388,11 @@
       var closeBtn = qrEl('qr-modal-close');
       if (closeBtn) closeBtn.focus();
     }, 60);
-
-    // Bind this device to the upcoming payment BEFORE allowing "I Already Paid".
-    bindPaymentContext();
   }
 
-  // POST /api/payment/context — binds the device so the MacroDroid webhook
-  // knows which device to authorize once the SMS is caught. "I Already Paid"
-  // stays disabled until this succeeds.
-  function bindPaymentContext() {
+  // Close the QR modal. Returns focus to the tile that opened it.
+  function qrClose() {
     if (!qrState.open) return;
-
-    var errorBox = qrEl('qr-context-error');
-    var errorText = qrEl('qr-context-error-text');
-    var statusEl = qrEl('qr-context-status');
-    var paidBtn = qrEl('qr-paid');
-
-    var clientMac = normalizeMac(queryParams.clientMac) || queryParams.clientMac || '';
-    if (!clientMac) {
-      qrState.contextBound = false;
-      if (paidBtn) paidBtn.disabled = true;
-      if (statusEl) { statusEl.textContent = ''; statusEl.className = 'qr-context-status'; }
-      if (errorText) errorText.textContent = 'We could not identify your device. Please reconnect to the WiFi network and reopen this page.';
-      show(errorBox);
-      return;
-    }
-
-    hide(errorBox);
-    if (statusEl) { statusEl.textContent = 'Verifying your device...'; statusEl.className = 'qr-context-status'; }
-    if (paidBtn) paidBtn.disabled = true;
-
-    fetch((CONFIG.apiBaseUrl || '') + '/api/payment/context', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({
-        client_mac: clientMac,
-        client_ip:  queryParams.clientIp || '',
-        ap_mac:     normalizeMac(queryParams.apMac) || queryParams.apMac || '',
-        ssid_name:  queryParams.ssidName || '',
-        radio_id:   parseInt(queryParams.radioId, 10) || 0
-      })
-    }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (data) {
-        return { ok: r.ok, data: data };
-      });
-    }).then(function (res) {
-      if (res.ok && res.data && res.data.success) {
-        qrState.contextBound = true;
-        hide(errorBox);
-        if (statusEl) { statusEl.textContent = 'Device verified — you can pay now.'; statusEl.className = 'qr-context-status is-ok'; }
-        if (paidBtn && !qrState.polling) paidBtn.disabled = false;
-      } else {
-        qrState.contextBound = false;
-        if (paidBtn) paidBtn.disabled = true;
-        if (statusEl) { statusEl.textContent = ''; statusEl.className = 'qr-context-status'; }
-        if (errorText) errorText.textContent = (res.data && res.data.error) || 'We could not bind this device to your payment. Please try again.';
-        show(errorBox);
-      }
-    }).catch(function () {
-      qrState.contextBound = false;
-      if (paidBtn) paidBtn.disabled = true;
-      if (statusEl) { statusEl.textContent = ''; statusEl.className = 'qr-context-status'; }
-      if (errorText) errorText.textContent = 'The network could not be reached. Please check your connection and retry.';
-      show(errorBox);
-    });
-  }
-
-  // "I Already Paid" — show the spinner, reveal the manual fallback, and
-  // begin polling for the session the webhook will activate.
-  function qrHandleAlreadyPaid() {
-    if (!qrState.contextBound || qrState.polling) return;
-
-    qrState.polling = true;
-
-    hide(qrEl('qr-instructions'));
-    show(qrEl('qr-waiting'));
-    show(qrEl('qr-manual'));
-    hide(qrEl('qr-claim-error'));
-
-    var waitingText = qrEl('qr-waiting-text');
-    if (waitingText) waitingText.textContent = 'Waiting for confirmation...';
-
-    var paidBtn = qrEl('qr-paid');
-    var paidLabel = qrEl('qr-paid-label');
-    var paidSpinner = qrEl('qr-paid-spinner');
-    if (paidBtn) { paidBtn.disabled = true; paidBtn.setAttribute('aria-busy', 'true'); }
-    if (paidLabel) paidLabel.textContent = 'Waiting...';
-    if (paidSpinner) show(paidSpinner);
-
-    // Poll immediately, then every 5 seconds.
-    pollSessionStatus();
-    qrState.pollTimer = setInterval(pollSessionStatus, PAYMENT_POLL_INTERVAL_MS);
-  }
-
-  function pollSessionStatus() {
-    if (!qrState.polling) return;
-    var clientMac = normalizeMac(queryParams.clientMac) || queryParams.clientMac || '';
-    if (!clientMac) return;
-
-    var url = (CONFIG.apiBaseUrl || '') + '/api/session/status?mac=' + encodeURIComponent(clientMac);
-    fetch(url, { headers: { 'Accept': 'application/json' }, credentials: 'same-origin' })
-      .then(function (r) { return r.json().catch(function () { return {}; }); })
-      .then(function (data) {
-        if (!qrState.polling) return;
-        if (data && data.state === 'active') {
-          qrPaymentComplete(data);
-        }
-      })
-      .catch(function () { /* transient network error — keep polling */ });
-  }
-
-  function stopStatusPolling() {
-    qrState.polling = false;
-    if (qrState.pollTimer) {
-      clearInterval(qrState.pollTimer);
-      qrState.pollTimer = null;
-    }
-  }
-
-  // Payment confirmed — close and show the existing "Connected" screen.
-  function qrPaymentComplete(data) {
-    stopStatusPolling();
-    var params = new URLSearchParams();
-    if (data && data.sessionId) params.set('sessionId', data.sessionId);
-    params.set('countdown', '3');
-    qrClose(true);
-    window.location.href = CONFIG.successPage + '?' + params.toString();
-  }
-
-  // Close the modal. Once polling has started, confirm first (unless forced
-  // by the success path). Returns focus to the tile that opened it.
-  function qrClose(force) {
-    if (!qrState.open) return;
-    if (qrState.polling && !force) {
-      var proceed = window.confirm('We are still checking your payment. Close this window anyway?');
-      if (!proceed) return;
-    }
-    stopStatusPolling();
     var overlay = qrEl('payment-qr-modal');
     if (overlay) overlay.classList.remove('is-open');
     document.body.classList.remove('qr-modal-open');
@@ -1570,67 +1404,287 @@
     }
   }
 
-  function showClaimError(message) {
-    var text = qrEl('qr-claim-error-text');
-    if (text) text.textContent = message;
-    show(qrEl('qr-claim-error'));
+  // ===============================================================
+  // CLAIM VOUCHER MODAL (centralized post-payment claim)
+  // ===============================================================
+  // The customer pays via GCash / Maya / QR Ph, MacroDroid POSTs the
+  // confirmation to /api/webhooks/macrodroid (creating an 'unclaimed' event),
+  // and the customer claims the matching pre-imported voucher here by typing
+  // the last 4 digits of their reference number. No MAC/device binding is
+  // involved — the returned voucher code is fed into the existing voucher
+  // authentication form (see connectClaimVoucher).
+  var claimState = {
+    open: false,
+    submitting: false,
+    voucherCode: null,
+    lastFocus: null
+  };
+
+  function claimEl(id) { return document.getElementById(id); }
+
+  // Show exactly one of the modal's states (input / loading / success / error)
+  // and align the footer buttons with it.
+  function showClaimStep(step) {
+    var steps = {
+      input: claimEl('claim-step-input'),
+      loading: claimEl('claim-step-loading'),
+      success: claimEl('claim-step-success'),
+      error: claimEl('claim-step-error')
+    };
+    for (var name in steps) {
+      if (!steps.hasOwnProperty(name)) continue;
+      var el = steps[name];
+      if (!el) continue;
+      if (name === step) show(el); else hide(el);
+    }
+
+    var verifyBtn = claimEl('claim-verify');
+    var retryBtn = claimEl('claim-retry');
+    var connectBtn = claimEl('claim-connect');
+    if (step === 'success') {
+      if (verifyBtn) hide(verifyBtn);
+      if (retryBtn) hide(retryBtn);
+      if (connectBtn) show(connectBtn);
+    } else if (step === 'error') {
+      if (verifyBtn) hide(verifyBtn);
+      if (retryBtn) show(retryBtn);
+      if (connectBtn) hide(connectBtn);
+    } else {
+      if (verifyBtn) show(verifyBtn);
+      if (retryBtn) hide(retryBtn);
+      if (connectBtn) hide(connectBtn);
+    }
+
+    setTimeout(function () {
+      if (step === 'input') {
+        var input = claimEl('claim-ref-input');
+        if (input) input.focus();
+      } else if (step === 'success' && connectBtn) {
+        connectBtn.focus();
+      }
+    }, 60);
   }
 
-  // Manual fallback: submit the 13-digit reference number.
-  function qrSubmitReference() {
-    if (qrState.claimSubmitting) return;
+  function setClaimError(message) {
+    var errEl = claimEl('claim-input-error');
+    if (errEl) {
+      if (message) { errEl.textContent = message; show(errEl); }
+      else { errEl.textContent = ''; hide(errEl); }
+    }
+    var input = claimEl('claim-ref-input');
+    if (input) {
+      if (message) input.classList.add('is-error');
+      else input.classList.remove('is-error');
+    }
+  }
 
-    var input = qrEl('qr-ref-input');
-    var refValue = input ? String(input.value || '').replace(/\D/g, '') : '';
-    if (refValue.length !== 13) {
-      showClaimError('Enter the 13-digit reference number from your receipt or SMS.');
+  // Reset the modal to its initial input state (called every time it opens).
+  function resetClaimModal() {
+    claimState.submitting = false;
+    claimState.voucherCode = null;
+
+    var input = claimEl('claim-ref-input');
+    if (input) { input.value = ''; input.disabled = false; input.classList.remove('is-error'); }
+    setClaimError('');
+
+    var errText = claimEl('claim-error-text');
+    if (errText) errText.textContent = '';
+    var codeEl = claimEl('claim-voucher-code');
+    if (codeEl) codeEl.textContent = '';
+
+    var verifyBtn = claimEl('claim-verify');
+    var verifyLabel = claimEl('claim-verify-label');
+    var verifySpinner = claimEl('claim-verify-spinner');
+    if (verifyBtn) { verifyBtn.disabled = false; verifyBtn.removeAttribute('aria-busy'); }
+    if (verifyLabel) verifyLabel.textContent = 'Verify Payment';
+    if (verifySpinner) hide(verifySpinner);
+
+    var connectBtn = claimEl('claim-connect');
+    if (connectBtn) connectBtn.disabled = false;
+
+    showClaimStep('input');
+  }
+
+  function openClaimModal() {
+    var modal = claimEl('claim-modal');
+    if (!modal) return;
+    claimState.lastFocus = document.activeElement;
+    resetClaimModal();
+    show(modal);
+    claimState.open = true;
+    setBanner('');
+  }
+
+  function closeClaimModal() {
+    if (!claimState.open) return;
+    var modal = claimEl('claim-modal');
+    if (modal) hide(modal);
+    claimState.open = false;
+    var focusTarget = claimState.lastFocus;
+    claimState.lastFocus = null;
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+      setTimeout(function () { focusTarget.focus(); }, 60);
+    }
+  }
+
+  // POST /api/payment/claim { ref_suffix } and drive the modal states.
+  function submitClaim() {
+    if (claimState.submitting) return;
+
+    var input = claimEl('claim-ref-input');
+    var suffix = input ? String(input.value || '').replace(/\D/g, '') : '';
+
+    // Client-side rule: exactly 4 digits (mirrors the backend validation).
+    if (suffix.length !== 4) {
+      setClaimError('Enter the last 4 digits of your reference number.');
+      if (input) input.focus();
       return;
     }
-    var clientMac = normalizeMac(queryParams.clientMac) || queryParams.clientMac || '';
-    if (!clientMac) {
-      showClaimError('We could not identify your device. Please reopen the portal page.');
-      return;
-    }
 
-    qrState.claimSubmitting = true;
-    var submitBtn = qrEl('qr-ref-submit');
-    var submitLabel = qrEl('qr-ref-submit-label');
-    var submitSpinner = qrEl('qr-ref-submit-spinner');
-    if (submitBtn) { submitBtn.disabled = true; submitBtn.setAttribute('aria-busy', 'true'); }
-    if (submitLabel) submitLabel.textContent = 'Submitting...';
-    if (submitSpinner) show(submitSpinner);
-    hide(qrEl('qr-claim-error'));
-    hide(qrEl('qr-manual-message'));
+    claimState.submitting = true;
+    setClaimError('');
+    showClaimStep('loading');
+
+    var verifyBtn = claimEl('claim-verify');
+    var verifyLabel = claimEl('claim-verify-label');
+    var verifySpinner = claimEl('claim-verify-spinner');
+    if (verifyBtn) { verifyBtn.disabled = true; verifyBtn.setAttribute('aria-busy', 'true'); }
+    if (verifyLabel) verifyLabel.textContent = 'Verifying\u2026';
+    if (verifySpinner) show(verifySpinner);
 
     fetch((CONFIG.apiBaseUrl || '') + '/api/payment/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ ref_no: refValue, client_mac: clientMac })
+      body: JSON.stringify({ ref_suffix: suffix })
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         return { ok: r.ok, data: data };
       });
     }).then(function (res) {
       var data = res.data || {};
-      if (data.pending) {
-        var msg = qrEl('qr-manual-message');
-        if (msg) msg.textContent = "Thanks! We're verifying your reference number manually. This may take a few minutes.";
-        show(msg);
-        if (input) input.value = '';
-        // Keep polling — the payment may still be authorized automatically.
-      } else if (res.ok && data.success) {
-        qrPaymentComplete(data);
+      if (res.ok && data.success && data.voucherCode) {
+        showClaimSuccess(data.voucherCode);
       } else {
-        showClaimError(data.error || 'We could not submit your reference number. Please try again.');
+        showClaimFailure(data.error || 'We could not verify that payment. Please check the digits and try again.');
       }
     }).catch(function () {
-      showClaimError('The network could not be reached. Please check your connection and try again.');
-    }).then(function () {
-      qrState.claimSubmitting = false;
-      if (submitBtn) { submitBtn.disabled = false; submitBtn.removeAttribute('aria-busy'); }
-      if (submitLabel) submitLabel.textContent = 'Submit';
-      if (submitSpinner) hide(submitSpinner);
+      showClaimFailure('The network could not be reached. Please check your connection and try again.');
+    });
+  }
+
+  function claimClearBusy() {
+    var verifyBtn = claimEl('claim-verify');
+    var verifyLabel = claimEl('claim-verify-label');
+    var verifySpinner = claimEl('claim-verify-spinner');
+    if (verifyBtn) { verifyBtn.disabled = false; verifyBtn.removeAttribute('aria-busy'); }
+    if (verifyLabel) verifyLabel.textContent = 'Verify Payment';
+    if (verifySpinner) hide(verifySpinner);
+  }
+
+  function showClaimSuccess(voucherCode) {
+    claimState.submitting = false;
+    claimState.voucherCode = voucherCode;
+    var codeEl = claimEl('claim-voucher-code');
+    if (codeEl) codeEl.textContent = voucherCode;
+    claimClearBusy();
+    showClaimStep('success');
+  }
+
+  function showClaimFailure(message) {
+    claimState.submitting = false;
+    var errText = claimEl('claim-error-text');
+    if (errText) errText.textContent = message || 'Something went wrong. Please try again.';
+    claimClearBusy();
+    showClaimStep('error');
+  }
+
+  // "Connect Now" — reuse the EXISTING voucher authentication pipeline by
+  // dropping the claimed code into the main form and submitting it. This runs
+  // the same validation / terms check / Omada authorization as manual entry,
+  // so the connection logic is never duplicated here.
+  function connectClaimVoucher() {
+    if (!claimState.voucherCode) return;
+
+    var form = document.querySelector('form.auth-form');
+    var voucherInput = $('voucher-input');
+    if (!form || !voucherInput) {
+      closeClaimModal();
+      setBanner('Could not start the connection. Please enter your voucher code manually.', 'error');
+      return;
+    }
+
+    // Clear any lingering plan selection so the form authenticates the voucher
+    // instead of redirecting to a payment plan.
+    var planInput = form.querySelector('input[name="selectedPlan"]');
+    if (planInput) form.removeChild(planInput);
+    var voucherGroup = voucherInput.closest ? voucherInput.closest('.form-group') : null;
+    if (voucherGroup) voucherGroup.classList.remove('hidden');
+
+    voucherInput.value = sanitizeVoucherCode(claimState.voucherCode);
+    setError('voucher-input', '');
+    setFormError('');
+
+    closeClaimModal();
+
+    // requestSubmit() fires the submit event so the existing handleSubmit
+    // pipeline runs (it calls preventDefault, so no navigation happens here).
+    if (typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+    } else {
+      form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    }
+  }
+
+  function initClaimModal() {
+    var modal = claimEl('claim-modal');
+    if (!modal) return;
+
+    var openBtn = $('claim-voucher-btn');
+    var closeBtn = claimEl('claim-modal-close');
+    var cancelBtn = claimEl('claim-cancel');
+    var verifyBtn = claimEl('claim-verify');
+    var retryBtn = claimEl('claim-retry');
+    var connectBtn = claimEl('claim-connect');
+    var input = claimEl('claim-ref-input');
+
+    if (openBtn) openBtn.addEventListener('click', openClaimModal);
+    if (closeBtn) closeBtn.onclick = closeClaimModal;
+    if (cancelBtn) cancelBtn.onclick = closeClaimModal;
+    if (verifyBtn) verifyBtn.onclick = submitClaim;
+    if (connectBtn) connectBtn.onclick = connectClaimVoucher;
+
+    // Error state "Try Again": return to the input step with the digits
+    // preserved so the customer can correct them and resubmit.
+    if (retryBtn) retryBtn.onclick = function () {
+      var errText = claimEl('claim-error-text');
+      if (errText) errText.textContent = '';
+      setClaimError('');
+      showClaimStep('input');
+    };
+
+    // Click on the dimmed overlay (outside the dialog) closes the modal
+    modal.addEventListener('click', function (e) {
+      if (e.target === modal) closeClaimModal();
+    });
+
+    if (input) {
+      // Numeric only, exactly 4 digits.
+      input.addEventListener('input', function () {
+        input.value = input.value.replace(/\D/g, '').slice(0, 4);
+        setClaimError('');
+      });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submitClaim();
+        }
+      });
+    }
+
+    document.addEventListener('keydown', function (e) {
+      if (!claimState.open) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeClaimModal(); }
     });
   }
 
@@ -1674,36 +1728,14 @@
 
     var closeBtn = qrEl('qr-modal-close');
     var cancelBtn = qrEl('qr-cancel');
-    var paidBtn = qrEl('qr-paid');
-    var retryBtn = qrEl('qr-context-retry');
-    var submitBtn = qrEl('qr-ref-submit');
-    var refInput = qrEl('qr-ref-input');
-    var claimClose = qrEl('qr-claim-error-close');
 
     if (closeBtn) closeBtn.onclick = function () { qrClose(); };
     if (cancelBtn) cancelBtn.onclick = function () { qrClose(); };
-    if (paidBtn) paidBtn.onclick = qrHandleAlreadyPaid;
-    if (retryBtn) retryBtn.onclick = bindPaymentContext;
-    if (submitBtn) submitBtn.onclick = qrSubmitReference;
-    if (claimClose) claimClose.onclick = function () { hide(qrEl('qr-claim-error')); };
 
     // Click on the dimmed overlay (outside the dialog) closes the modal
     overlay.addEventListener('click', function (e) {
       if (e.target === overlay) qrClose();
     });
-
-    if (refInput) {
-      // Numeric only, 13 digits max
-      refInput.addEventListener('input', function () {
-        refInput.value = refInput.value.replace(/\D/g, '').slice(0, 13);
-      });
-      refInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          qrSubmitReference();
-        }
-      });
-    }
 
     document.addEventListener('keydown', qrOnKeydown);
   }
@@ -1785,6 +1817,9 @@
 
     // Set up the GCash / Maya / QR Ph payment modal
     initPaymentQrModal();
+
+    // Set up the centralized Claim Voucher modal
+    initClaimModal();
 
     // Input UX
     initInputEnhancements();

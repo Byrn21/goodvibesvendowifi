@@ -2571,15 +2571,6 @@ body.qr-modal-open { overflow: hidden; }
   color: var(--text-2);
 }
 .qr-amount strong { color: var(--green); font-size: 1.15rem; text-decoration: none; }
-.qr-context-status {
-  margin: 8px 0 0;
-  font-size: 0.8125rem;
-  color: var(--text-3);
-  min-height: 0;
-}
-.qr-context-status.is-ok { color: var(--green); }
-.qr-context-status.is-error { color: var(--error-text); }
-
 .qr-instructions {
   width: 100%;
   margin: 16px 0 0;
@@ -2615,19 +2606,13 @@ body.qr-modal-open { overflow: hidden; }
   text-align: center;
 }
 
-/* Manual fallback */
-.qr-manual {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px dashed var(--border);
-}
+/* Post-payment hint (points at the central Claim Voucher flow) */
 .qr-manual__title {
   margin: 0 0 10px;
   font-size: 0.8125rem;
   color: var(--text-3);
   text-align: center;
 }
-.qr-manual__form { display: flex; gap: 8px; }
 .qr-ref-input {
   flex: 1;
   min-width: 0;
@@ -2646,56 +2631,6 @@ body.qr-modal-open { overflow: hidden; }
   border-color: var(--border-focus);
   box-shadow: 0 0 0 3px rgba(92, 61, 17, 0.15);
 }
-.qr-manual__submit { height: 46px; padding: 0 18px; }
-.qr-manual__message {
-  margin: 10px 0 0;
-  font-size: 0.8125rem;
-  color: var(--green);
-  text-align: center;
-  line-height: 1.4;
-}
-
-/* Inline error boxes */
-.qr-error-box {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
-  margin-bottom: 14px;
-  padding: 12px 14px;
-  background: var(--error-bg);
-  border: 1px solid var(--error-border);
-  border-radius: var(--radius-sm);
-  color: var(--error-text);
-  font-size: 0.875rem;
-  line-height: 1.4;
-}
-.qr-error-box__retry { height: 38px; padding: 0 16px; font-size: 0.875rem; }
-.qr-claim-error {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 14px 0 0;
-  padding: 12px 14px;
-  background: var(--error-bg);
-  border: 1px solid var(--error-border);
-  border-radius: var(--radius-sm);
-  color: var(--error-text);
-  font-size: 0.875rem;
-  line-height: 1.4;
-}
-.qr-claim-error__close {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: var(--error-text);
-  font-size: 1.25rem;
-  line-height: 1;
-  padding: 0;
-  cursor: pointer;
-}
-
 .qr-modal__footer {
   display: flex;
   gap: 12px;
@@ -2734,5 +2669,36 @@ body.qr-modal-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .qr-modal-overlay,
   .qr-modal { transition: none; }
+}
+
+/* ================================================================
+   CLAIM VOUCHER (centralized post-payment claim)
+   ================================================================ */
+.claim-cta {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.claim-modal__body { padding: 20px 20px 4px; }
+.claim-modal__input {
+  width: 100%;
+  margin-top: 12px;
+  text-align: center;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.35em;
+}
+.claim-modal__input.is-error { border-color: var(--error-border); }
+.claim-code {
+  margin: 4px 0 14px;
+  text-align: center;
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
 }
 

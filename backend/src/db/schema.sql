@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS vouchers (
     type            VARCHAR(16) NOT NULL DEFAULT 'standard', -- 'standard' | 'premium'
     duration_minutes INTEGER NOT NULL DEFAULT 60,
     price           INTEGER, -- fixed price in centavos; NULL = use dynamic pricing
-    state           VARCHAR(16) NOT NULL DEFAULT 'active',
+    state           VARCHAR(16) NOT NULL DEFAULT 'active', -- 'active' | 'claimed' | 'used' | 'expired'
+    assigned_ref_no VARCHAR(64), -- full payment ref_no this voucher was claimed for; NULL = unclaimed (see migrate_add_voucher_ref.js)
     used_by_mac     VARCHAR(32),
     used_at         TIMESTAMP,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
