@@ -19,7 +19,6 @@ COPY success.html    /app/public/success.html
 COPY status.html     /app/public/status.html
 COPY error.html      /app/public/error.html
 COPY admin.html      /app/public/admin.html
-COPY admin-claims.html /app/public/admin-claims.html
 COPY login.html    /app/public/login.html
 COPY assets/         /app/public/assets/
 COPY config/config.js /app/public/config/config.js

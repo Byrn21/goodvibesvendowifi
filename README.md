@@ -176,9 +176,7 @@ notification in this order:
 If an SMS confirmation is slow, the portal's QR modal offers a manual reference
 number entry that calls
 [`POST /api/payment/claim`](#post-apipaymentclaim). Known references are
-authorized immediately; unknown references are stored as `pending` for human
-review in the claims dashboard (admin-claims.html). Operators review and approve
-or reject them via the `/api/admin/claims/*` routes.
+authorized immediately; unknown references are rejected.
 
 ---
 
@@ -192,7 +190,6 @@ goodvibesvendowifi/
 ├── status.html                # Session status page (countdown, pause/resume)
 ├── login.html                 # Admin login page
 ├── admin.html                 # Admin dashboard (vouchers, sessions, stats)
-├── admin-claims.html          # Pending manual-payment-claims dashboard
 ├── assets/
 │   ├── style.css              # All styles (mobile-first)
 │   ├── portal.js              # Portal logic + payment/context calls
@@ -368,7 +365,7 @@ when unset. The `*_QR_B64` values are complete data-URI strings
 |---|---|---|---|
 | `ADMIN_API_KEY` | `routes/admin.js` | *(unset)* | API key accepted via `X-API-Key` / bearer token for `/api/admin/*`. |
 | `ADMIN_USERNAME` | `routes/admin.js` | `admin` | Username for `POST /api/admin/login`. |
-| `ADMIN_PASSWORD` | `routes/admin.js` | `ADMIN_API_KEY` | Admin login password **and** the `x-admin-password` header for the claims dashboard. The claims routes **fail closed** (401) when unset. |
+| `ADMIN_PASSWORD` | `routes/admin.js` | `ADMIN_API_KEY` | Admin login password for `POST /api/admin/login`. |
 
 ### Redirects
 
@@ -487,8 +484,8 @@ not arrived.
 
 ### Admin routes
 
-`/api/admin/*` (except the password-protected claims routes) require a bearer
-token from `POST /api/admin/login` or the `ADMIN_API_KEY` via `X-API-Key`.
+`/api/admin/*` require a bearer token from `POST /api/admin/login` or the
+`ADMIN_API_KEY` via `X-API-Key`.
 
 | Method | Path | Description |
 |---|---|---|
@@ -503,15 +500,6 @@ token from `POST /api/admin/login` or the `ADMIN_API_KEY` via `X-API-Key`.
 | `GET` | `/api/admin/sessions` | List active/pending sessions. |
 | `POST` | `/api/admin/sessions/:id/expire` | Force-expire a session. |
 | `GET` | `/api/admin/stats` | Dashboard statistics. |
-
-Claims routes require the `x-admin-password` header (matched against
-`ADMIN_PASSWORD`; **fail closed** when unset):
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/admin/claims/pending` | List pending manual payment claims. |
-| `POST` | `/api/admin/claims/approve` | Authorize the device and process the claim. |
-| `POST` | `/api/admin/claims/reject` | Reject a claim. |
 
 ### Static pages
 
@@ -579,7 +567,6 @@ Run in watch mode with `npm run test:watch`.
   unless it matches `MACRODROID_WEBHOOK_SECRET`.
 - Payment reference numbers are deduplicated at the database level to prevent
   replaying a single payment.
-- The claims dashboard requires `ADMIN_PASSWORD` and fails closed when unset.
 - Redirect targets are validated against `ALLOWED_REDIRECT_DOMAINS`
   (empty allowlist permits any http/https URL — set it in production).
 - Rate limiting is applied to all API routes, with a stricter limiter on
