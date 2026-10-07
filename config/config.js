@@ -98,7 +98,7 @@
         { id: 'standard-30d',  label: '30 Days',     duration: 43200, price: 35000 },
       ],
       premium: [
-        { id: 'premium-5h',   label: '5 Hours (Pausable)',  duration: 300,  price: 2000 },
+        { id: 'premium-5h',   label: '5 Hours (Pausable)',  duration: 300,  price: 2500 },
         { id: 'premium-12h',  label: '12 Hours (Pausable)', duration: 720,  price: 4500 },
         { id: 'premium-24h',  label: '24 Hours (Pausable)', duration: 1440, price: 8000 },
       ],
