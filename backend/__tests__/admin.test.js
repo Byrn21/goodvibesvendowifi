@@ -533,3 +533,110 @@ describe('POST /api/admin/vouchers/import — Voucher Import', () => {
     expect(idsFinal.length).toBe(3);
   });
 });
+
+describe('GET /api/admin/transactions — Recent Transactions', () => {
+
+  // 17 events ordered 1..17 (chronological, second resolution); every 3rd is
+  // claimed and has a matching voucher linked by assigned_ref_no.
+  async function seedWebhookEvents() {
+    for (let i = 1; i <= 17; i++) {
+      const ref = 'REF' + String(i).padStart(3, '0');
+      const claimed = i % 3 === 0;
+      const ss = String(i).padStart(2, '0');
+      await getDb().run(
+        'INSERT INTO webhook_events (event_id, ref_no, amount, status, processed_at) VALUES (?, ?, ?, ?, ?)',
+        ['evt_' + i, ref, 20 + i, claimed ? 'claimed' : 'unclaimed', '2026-10-01 00:00:' + ss]
+      );
+      if (claimed) {
+        await getDb().run(
+          'INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no) VALUES (?, ?, ?, ?, ?, ?)',
+          [String(300000 + i), 'standard', 60, 2000, 'claimed', ref]
+        );
+      }
+    }
+  }
+
+  test('returns 401 without valid credentials', async () => {
+    const res = await request(app).get('/api/admin/transactions');
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+  });
+
+  test('returns the exact response shape with defaults (page 1, limit 15), ordered by processed_at DESC', async () => {
+    await seedWebhookEvents();
+    const res = await request(app)
+      .get('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(['pagination', 'transactions']);
+    expect(Object.keys(res.body.pagination).sort()).toEqual(['currentPage', 'totalPages']);
+    expect(res.body.pagination).toEqual({ currentPage: 1, totalPages: 2 });
+    expect(res.body.transactions).toHaveLength(15);
+    expect(res.body.transactions[0].event_id).toBe('evt_17');
+    expect(res.body.transactions[14].event_id).toBe('evt_3');
+    expect(Object.keys(res.body.transactions[0]).sort()).toEqual(
+      ['amount', 'code', 'event_id', 'processed_at', 'ref_no', 'status'].sort()
+    );
+  });
+
+  test('paginates using a separate count query (page 2 holds the remainder)', async () => {
+    await seedWebhookEvents();
+    const res = await request(app)
+      .get('/api/admin/transactions?page=2')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.body.transactions).toHaveLength(2);
+    expect(res.body.pagination).toEqual({ currentPage: 2, totalPages: 2 });
+    expect(res.body.transactions[0].event_id).toBe('evt_2');
+  });
+
+  test('honours a custom limit', async () => {
+    await seedWebhookEvents();
+    const res = await request(app)
+      .get('/api/admin/transactions?page=2&limit=5')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.body.transactions).toHaveLength(5);
+    expect(res.body.pagination.totalPages).toBe(4);
+    expect(res.body.transactions[0].event_id).toBe('evt_12');
+  });
+
+  test('LEFT JOIN exposes the voucher code for claimed refs and null for unclaimed', async () => {
+    await seedWebhookEvents();
+    const res = await request(app)
+      .get('/api/admin/transactions?limit=100')
+      .set('X-API-Key', VALID_KEY);
+
+    const byId = {};
+    res.body.transactions.forEach(t => { byId[t.event_id] = t; });
+    expect(byId['evt_15'].status).toBe('claimed');   // 15 % 3 === 0
+    expect(byId['evt_15'].code).toBe('300015');
+    expect(byId['evt_15'].amount).toBe(35);          // amount stays in Pesos
+    expect(byId['evt_16'].status).toBe('unclaimed');
+    expect(byId['evt_16'].code).toBeNull();
+  });
+
+  test('falls back to defaults on invalid page/limit and caps limit at 100', async () => {
+    await seedWebhookEvents();
+    const bad = await request(app)
+      .get('/api/admin/transactions?page=0&limit=-3')
+      .set('X-API-Key', VALID_KEY);
+    expect(bad.body.pagination.currentPage).toBe(1);
+    expect(bad.body.transactions).toHaveLength(15);
+
+    const capped = await request(app)
+      .get('/api/admin/transactions?limit=99999')
+      .set('X-API-Key', VALID_KEY);
+    expect(capped.body.transactions).toHaveLength(17);
+  });
+
+  test('returns an empty page with totalPages 1 when there are no transactions', async () => {
+    const res = await request(app)
+      .get('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.body.transactions).toEqual([]);
+    expect(res.body.pagination).toEqual({ currentPage: 1, totalPages: 1 });
+  });
+});

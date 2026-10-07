@@ -90,6 +90,20 @@
       <div class="admin-card content-section active" id="section-dashboard">
         <h2>Dashboard</h2>
         <div class="admin-grid" id="stats-grid"></div>
+
+        <!-- Recent Transactions (webhook payment log) -->
+        <div class="admin-transactions" id="transactions-section">
+          <h3>Recent Transactions</h3>
+          <div class="admin-table-container" id="transactions-table">
+            <p class="muted">Loading&hellip;</p>
+          </div>
+          <div class="admin-pagination" id="transactions-pagination">
+            <button type="button" class="btn btn--secondary" id="transactions-prev" disabled>Previous</button>
+            <span class="admin-pagination__info" id="transactions-page-info">Page 1 of 1</span>
+            <button type="button" class="btn btn--secondary" id="transactions-next" disabled>Next</button>
+          </div>
+        </div>
+
         <div id="dashboard-chart">
           <h3>Voucher Status Breakdown</h3>
           <canvas id="stats-chart" width="400" height="200"></canvas>
@@ -142,11 +156,16 @@
 
       var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
       var ADMIN_TOKEN = localStorage.getItem('adminToken') || '';
+      var TRANSACTIONS_LIMIT = 15;
 
       // Cache DOM elements
       var els = {
         statsGrid:      document.getElementById('stats-grid'),
         dashboardChart: document.getElementById('dashboard-chart'),
+        transactionsTable:    document.getElementById('transactions-table'),
+        transactionsPrev:     document.getElementById('transactions-prev'),
+        transactionsNext:     document.getElementById('transactions-next'),
+        transactionsPageInfo: document.getElementById('transactions-page-info'),
         tabVouchers:    document.getElementById('tab-vouchers'),
         tabSessions:    document.getElementById('tab-sessions'),
         tabImport:      document.getElementById('tab-import'),
@@ -760,6 +779,85 @@
         fetchStats();
       }
 
+      // ---- Recent Transactions (paginated webhook payment log) ----
+      var transactionsPage = 1;
+      var transactionsTotalPages = 1;
+
+      // webhook_events.amount is stored in Pesos already (unlike voucher
+      // prices, which are integer centavos) - so format it directly.
+      function formatTransactionAmount(amount) {
+        if (amount === null || amount === undefined || amount === '') return '&mdash;';
+        var n = Number(amount);
+        if (isNaN(n)) return '&mdash;';
+        return '\u20b1' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+
+      function renderTransactions(transactions) {
+        if (!transactions.length) {
+          return '<p class="muted">No transactions yet.</p>';
+        }
+        var rows = transactions.map(function (tx) {
+          var status = tx.status || 'unclaimed';
+          var statusClass = status === 'claimed' ? 'tx-status--claimed' : 'tx-status--unclaimed';
+          return '<tr>' +
+            '<td>' + escapeHtml(formatDate(tx.processed_at)) + '</td>' +
+            '<td>' + (tx.ref_no ? escapeHtml(tx.ref_no) : '&mdash;') + '</td>' +
+            '<td>' + formatTransactionAmount(tx.amount) + '</td>' +
+            '<td><span class="' + statusClass + '">' + escapeHtml(status) + '</span></td>' +
+            '<td>' + (tx.code ? escapeHtml(tx.code) : '<span class="muted">&mdash;</span>') + '</td>' +
+            '</tr>';
+        }).join('');
+        return '<table><thead><tr><th>Date/Time</th><th>Reference No.</th><th>Amount</th><th>Status</th><th>Voucher Code</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      }
+
+      function updateTransactionsPagination(currentPage, totalPages) {
+        if (els.transactionsPageInfo) {
+          els.transactionsPageInfo.textContent = 'Page ' + currentPage + ' of ' + totalPages;
+        }
+        if (els.transactionsPrev) {
+          els.transactionsPrev.disabled = currentPage <= 1;
+        }
+        if (els.transactionsNext) {
+          els.transactionsNext.disabled = currentPage >= totalPages;
+        }
+      }
+
+      // Uses the shared api() wrapper so an expired session still triggers the
+      // centralized 401 logout-and-redirect flow.
+      function loadTransactions(page) {
+        page = page || 1;
+        if (!els.transactionsTable) return;
+        els.transactionsTable.innerHTML = '<p class="muted">Loading\u2026</p>';
+        api('/api/admin/transactions?page=' + page + '&limit=' + TRANSACTIONS_LIMIT)
+          .then(function (res) {
+            if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load transactions');
+            var data = res.data || {};
+            var transactions = data.transactions || [];
+            var pagination = data.pagination || {};
+            transactionsPage = pagination.currentPage || page;
+            transactionsTotalPages = pagination.totalPages || 1;
+            els.transactionsTable.innerHTML = renderTransactions(transactions);
+            updateTransactionsPagination(transactionsPage, transactionsTotalPages);
+          })
+          .catch(function (err) {
+            els.transactionsTable.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
+            transactionsPage = 1;
+            transactionsTotalPages = 1;
+            updateTransactionsPagination(1, 1);
+          });
+      }
+
+      if (els.transactionsPrev) {
+        els.transactionsPrev.addEventListener('click', function () {
+          if (transactionsPage > 1) loadTransactions(transactionsPage - 1);
+        });
+      }
+      if (els.transactionsNext) {
+        els.transactionsNext.addEventListener('click', function () {
+          if (transactionsPage < transactionsTotalPages) loadTransactions(transactionsPage + 1);
+        });
+      }
+
       // Sidebar navigation &mdash; event delegation on nav container
       els.sidebarNav.addEventListener('click', function (e) {
         var link = e.target.closest('.admin-sidebar__nav-link');
@@ -875,6 +973,7 @@
       if (isAuthenticated) {
         loadDashboard();
         loadVouchers();
+        loadTransactions(1);
       }
     })();
   </script>
