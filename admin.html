@@ -244,6 +244,29 @@
         window.location.href = 'login.html';
       }
 
+      // True when the current page is the login page. Guards the
+      // logout-and-redirect flow so a rejected request can never bounce between
+      // admin.html and login.html.
+      function isOnLoginPage() {
+        return /(^|\/)login\.html$/i.test(window.location.pathname);
+      }
+
+      // Centralized handling for an invalid or expired session: clear the stale
+      // token and send the admin back to the login page. Every api() 401 and
+      // every missing-token check funnels through here. `redirectingToLogin`
+      // makes repeated calls idempotent so the redirect only happens once.
+      var redirectingToLogin = false;
+      function handleUnauthorized() {
+        if (redirectingToLogin) return;
+        redirectingToLogin = true;
+        localStorage.removeItem('adminToken');
+        localStorage.removeItem('adminUsername');
+        ADMIN_TOKEN = '';
+        if (!isOnLoginPage()) {
+          window.location.href = 'login.html';
+        }
+      }
+
       // Fixed api() &mdash; handles responses with null/empty bodies (e.g. DELETE 204 No Content)
       function api(path, opts) {
         opts = opts || {};
@@ -251,6 +274,15 @@
         if (ADMIN_TOKEN) opts.headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
         return fetch(API_BASE + path, opts)
           .then(function (r) {
+            // 401 => the stored session token is invalid or expired (e.g. the
+            // server restarted and cleared its in-memory VALID_TOKENS set).
+            // Clear it and redirect once, centrally, for every API call.
+            if (r.status === 401) {
+              handleUnauthorized();
+              // Never-settling promise: stop the calling chain (no body to
+              // parse, no downstream .then/.catch) while the page redirects.
+              return new Promise(function () {});
+            }
             var contentType = r.headers.get('content-type') || '';
             if (contentType.indexOf('application/json') !== -1) {
               return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; });
@@ -262,11 +294,15 @@
 
       function checkAuth() {
         if (!ADMIN_TOKEN) {
-          window.location.href = 'login.html';
+          // Missing token: clean up and go to login. handleUnauthorized() no-ops
+          // when the login page is already showing, so this cannot loop.
+          handleUnauthorized();
+          return false;
         }
+        return true;
       }
 
-      checkAuth();
+      var isAuthenticated = checkAuth();
 
       // Fetch admin username from API
       function fetchAdminUsername() {
@@ -287,7 +323,11 @@
           });
       }
 
-      fetchAdminUsername();
+      // Only fetch when a token exists - otherwise checkAuth() already sent us to
+      // the login page and the request would just 401.
+      if (isAuthenticated) {
+        fetchAdminUsername();
+      }
 
       function stat(label, value) {
         return '<div class="stat-card"><div class="stat-value">' + (value || 0) + '</div><div class="stat-label">' + label + '</div></div>';
@@ -829,9 +869,13 @@
       // Initialize toggle icon state (sidebar starts collapsed on mobile, expanded on desktop)
       setToggleIcon(window.innerWidth <= 768);
 
-      // Show dashboard by default, then load vouchers
-      loadDashboard();
-      loadVouchers();
+      // Show dashboard by default, then load vouchers. Guarded so a missing or
+      // expired session redirects without flashing dashboard content or firing a
+      // doomed 401 request.
+      if (isAuthenticated) {
+        loadDashboard();
+        loadVouchers();
+      }
     })();
   </script>
 </body>
