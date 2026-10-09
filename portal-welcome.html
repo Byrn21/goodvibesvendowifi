@@ -88,19 +88,6 @@
       padding: 28px 24px;
       text-align: center;
     }
-    .welcome-card__badge {
-      display: inline-block;
-      padding: 5px 14px;
-      border-radius: 999px;
-      background: var(--accent);
-      border: 1px solid var(--border-light);
-      color: var(--green);
-      font-size: 0.78rem;
-      font-weight: 700;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      margin-bottom: 14px;
-    }
     .welcome-card__title {
       font-size: 1.5rem;
       font-weight: 700;
@@ -197,7 +184,6 @@
 
   <main class="welcome-main">
     <section class="welcome-card" aria-labelledby="welcome-title">
-      <span class="welcome-card__badge">Free Guest Wi-Fi</span>
       <h1 class="welcome-card__title" id="welcome-title">Welcome! 👋</h1>
       <p class="welcome-card__subtitle">You're one tap away from fast internet at the vendo. Get connected in seconds with your voucher code.</p>
       <ul class="welcome-card__list">
@@ -207,7 +193,7 @@
         </li>
         <li>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6L9 17l-5-5"/></svg>
-          No account needed — just accept the terms and connect
+          Select your Plan
         </li>
         <li>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
@@ -233,7 +219,7 @@
         try { sessionStorage.setItem('welcomeCompleted', '1'); } catch (e) { /* storage unavailable */ }
         // Forward any existing query params (client MAC, SSID, etc.) to the hosted login.
         var params = window.location.search || '';
-        window.location.href = 'https://omada-captive-portal.onrender.com/' + params;
+        window.location.href = 'https://goodvibesvendowifi.onrender.com/' + params;
       });
     })();
   </script>
