@@ -100,6 +100,74 @@ describe('POST /api/auth — Omada context passthrough', () => {
     expect(ctx.voucherCode).toBe('123456');
   });
 
+  test('logs the Omada response and the committed local lock on success', async () => {
+    const spy = jest
+      .spyOn(omada, 'authenticateClient')
+      .mockResolvedValue({ success: true, raw: { errorCode: 0, msg: 'ok' } });
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    try {
+      const res = await request(app).post('/api/auth').send({
+        ...BASE,
+        clientMac: 'aa:bb:cc:dd:ee:ff',
+        apMac: 'aa:aa:aa:aa:aa:aa',
+        ssidName: 'GuestWiFi',
+        radioId: '0',
+      });
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      const line = logSpy.mock.calls
+        .map((c) => c.join(' '))
+        .find((l) => l.includes('authorization SUCCESS'));
+      expect(line).toBeDefined();
+      expect(line).toContain('session=' + res.body.sessionId);
+      expect(line).toContain('localState=voucher:used+session:recorded');
+      // The controller's own body is logged verbatim ...
+      expect(line).toContain('omadaResponse={"errorCode":0,"msg":"ok"}');
+      // ... and it demonstrably carries no voucher (decoupled voucher list).
+      expect(line).toContain('omadaEchoedVoucher=false');
+      // The voucher itself is masked in the log, never raw.
+      expect(line).toContain('••••56');
+      expect(line).not.toContain('123456');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  test('a local write failure does NOT burn the voucher (rolled back)', async () => {
+    jest.spyOn(omada, 'authenticateClient').mockResolvedValue({ success: true, raw: { errorCode: 0 } });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Force the session INSERT inside the transaction to fail.
+    await getDb().exec('ALTER TABLE sessions RENAME TO sessions_backup');
+    try {
+      const res = await request(app).post('/api/auth').send({
+        ...BASE,
+        clientMac: 'aa:bb:cc:dd:ee:ff',
+        apMac: 'aa:aa:aa:aa:aa:aa',
+        ssidName: 'GuestWiFi',
+        radioId: '0',
+      });
+      expect(res.status).toBe(500);
+      expect(res.body.code).toBe('SESSION_WRITE_FAILED');
+
+      // The client WAS authorized on Omada, but local state must be untouched.
+      const voucher = await getDb().getOne('SELECT state FROM vouchers WHERE code = ?', ['123456']);
+      expect(voucher.state).toBe('active');
+
+      // ... and the rollback is reported explicitly, with the voucher masked.
+      const errLines = errSpy.mock.calls.map((c) => c.join(' '));
+      const rollbackLine = errLines.find((l) => l.includes('transaction rolled back; voucher left UNCONSUMED'));
+      expect(rollbackLine).toBeDefined();
+      expect(rollbackLine).toContain('••••56');
+      expect(rollbackLine).not.toContain('123456');
+    } finally {
+      await getDb().exec('ALTER TABLE sessions_backup RENAME TO sessions');
+      errSpy.mockRestore();
+    }
+  });
+
   test('forwards the normalized voucher even when the submitter pads it', async () => {
     const spy = jest
       .spyOn(omada, 'authenticateClient')

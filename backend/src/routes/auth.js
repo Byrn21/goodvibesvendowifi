@@ -181,22 +181,53 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    // ── Consume the voucher (ONLY after definitive Omada success) ──
-    // Atomic + race-safe: consumeVoucher returns false if another request
-    // grabbed the same code in between, in which case we must not record a
-    // session for it.
+    // ── Consume the voucher + record the session ATOMICALLY ──
+    // The controller just authorized the client through its external-portal
+    // path (authType 4) — a BYPASS: Omada keeps no record of our voucher, its
+    // voucher list is decoupled from ours, and its response cannot tell us
+    // whether the code was spent. This database is therefore the only source
+    // of truth, and it must move from "voucher active" to "voucher used +
+    // session recorded" in a SINGLE transaction — if either write landed
+    // alone the guest would either lose a still-valid code (voucher burned,
+    // no session) or hold a session no row accounts for.
+    //
+    // consumeVoucher's `state IN ('active','claimed')` guard keeps this
+    // race-safe: it returns false, changing nothing, when another request
+    // already took the code.
     let voucherConsumed = false;
     try {
-      voucherConsumed = await consumeVoucher(normalizedVoucher, normalizedMac);
-    } catch (consumeErr) {
+      voucherConsumed = await getDb().transaction(async (tx) => {
+        const consumed = await consumeVoucher(normalizedVoucher, normalizedMac, tx);
+        if (!consumed) return false; // lost the race — nothing written
+        await recordSession({
+          sessionId,
+          clientMac: normalizedMac,
+          clientIp: clientIp || '',
+          apMac: apMac || '',
+          ssidName: ssidName || '',
+          duration,        // minutes
+          voucherUsed: normalizedVoucher,
+          voucherType: voucherTypeResolved,
+        }, tx);
+        return true;
+      });
+    } catch (txErr) {
+      // Rolled back, so the voucher is still redeemable — ask for a retry
+      // instead of reporting the code as spent.
       console.error(
-        '[auth] failed to mark voucher ' + normalizedVoucher +
-        ' as used after Omada success: ' + (consumeErr && consumeErr.message)
+        '[auth] local state write failed for voucher ' + maskVoucher(normalizedVoucher) +
+        ' (client ' + normalizedMac + '): ' + (txErr && txErr.message) +
+        ' — transaction rolled back; voucher left UNCONSUMED'
       );
+      return res.status(500).json({
+        success: false,
+        error: 'Could not save your session. Please try again with the same voucher.',
+        code: 'SESSION_WRITE_FAILED',
+      });
     }
     if (!voucherConsumed) {
       console.error(
-        '[auth] voucher ' + normalizedVoucher + ' was already consumed concurrently; ' +
+        '[auth] voucher ' + maskVoucher(normalizedVoucher) + ' was already consumed concurrently; ' +
         'client ' + normalizedMac + ' was authorized on Omada but no session was recorded.'
       );
       return res.status(409).json({
@@ -206,22 +237,28 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    // ── Record session in DB ───────────────────────────────
     const finalRedirectUrl = redirectUrl
       || voucherResult.redirectUrl
       || process.env.DEFAULT_REDIRECT_URL
       || 'https://www.google.com';
 
-    await recordSession({
-      sessionId,
-      clientMac: normalizedMac,
-      clientIp: clientIp || '',
-      apMac: apMac || '',
-      ssidName: ssidName || '',
-      duration,        // minutes
-      voucherUsed: normalizedVoucher,
-      voucherType: voucherTypeResolved,
-    });
+    // ── Explicit success log: the Omada response AND the local lock ──
+    // `omadaEchoedVoucher` is computed rather than assumed — the controller
+    // answers {"errorCode":0} with no voucher in it, which is the evidence
+    // that the voucher was resolved locally (bypass) and that its voucher list
+    // is decoupled from ours.
+    const omadaRawText = (omadaResult && omadaResult.raw) ? JSON.stringify(omadaResult.raw) : '';
+    console.log(
+      '[auth] authorization SUCCESS (controller bypass, voucher resolved locally) —' +
+      ' client=' + normalizedMac +
+      ' session=' + sessionId +
+      ' ssid="' + (ssidName || '') + '"' +
+      ' duration=' + duration + 'min' +
+      ' voucher=' + maskVoucher(normalizedVoucher) +
+      ' localState=voucher:used+session:recorded' +
+      ' omadaEchoedVoucher=' + (omadaRawText ? omadaRawText.includes(normalizedVoucher) : false) +
+      ' omadaResponse=' + (omadaRawText || '(empty)')
+    );
 
     return res.json({
       success: true,
@@ -244,6 +281,20 @@ router.post('/', async (req, res, next) => {
 // ── Helpers ──────────────────────────────────────────────────
 // MAC normalization uses the shared utils/device-id.js helper so the
 // saved format (uppercase, colon-separated) always matches lookups.
+
+/**
+ * Mask a voucher code for logs: `••••12` (last two digits), matching the admin
+ * UI's maskVoucherCode and services/omada.js. A code stays a live credential
+ * until the authorization is committed, so it never goes to the logs raw.
+ *
+ * @param {string} code
+ * @returns {string}
+ */
+function maskVoucher(code) {
+  const cleaned = String(code === undefined || code === null ? '' : code).replace(/\s+/g, '');
+  if (!cleaned) return '(empty)';
+  return cleaned.length < 2 ? '••••••' : '••••' + cleaned.slice(-2);
+}
 
 function isAllowedRedirect(url) {
   if (!url) return true; // No redirect is fine

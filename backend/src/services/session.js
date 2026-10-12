@@ -100,10 +100,18 @@ async function validateVoucher(voucher, clientMac) {
  *
  * @param {string} voucher   Normalized voucher code
  * @param {string} clientMac Client MAC the voucher is being bound to
+ * @param {Object} [tx]      Optional transaction handle from db.transaction(),
+ *                           so the caller can commit this write together with
+ *                           the session it records (see routes/auth.js)
  * @returns {Promise<boolean>} true only if THIS call consumed the voucher
  */
-async function consumeVoucher(voucher, clientMac) {
-  const db = getDb();
+async function consumeVoucher(voucher, clientMac, tx) {
+  // Running inside the caller's transaction when one is supplied keeps the
+  // local voucher state and the session row in ONE atomic unit: the
+  // controller does not track our vouchers, so this database is the only
+  // authority and a torn write would either burn a valid code or leave a
+  // session no voucher accounts for.
+  const db = tx || getDb();
   const result = await db.run(`
     UPDATE vouchers
     SET state = 'used', used_by_mac = ?, used_at = CURRENT_TIMESTAMP
@@ -114,12 +122,21 @@ async function consumeVoucher(voucher, clientMac) {
 
 /**
  * recordSession — Record a new active session in the database.
+ *
+ * @param {Object} data           Session fields (see the destructuring below)
+ * @param {Object} [tx]           Optional transaction handle from
+ *                                db.transaction() so the insert commits with
+ *                                the voucher consumption it belongs to.
+ *                                In tx mode this returns null: the row is not
+ *                                committed yet, and on PostgreSQL a pool-wide
+ *                                read would not see it.
+ * @returns {Promise<Object|null>} the stored session, or null in tx mode
  */
 async function recordSession({
   sessionId, clientMac, clientIp, apMac, ssidName,
   duration, voucherUsed, voucherType, totalDurationSeconds,
-}) {
-  const db = getDb();
+}, tx) {
+  const db = tx || getDb();
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + duration * 60 * 1000).toISOString();
 
@@ -145,6 +162,10 @@ async function recordSession({
     now,
   ]);
 
+  // See the JSDoc: inside a transaction the caller must not depend on the
+  // returned session (uncommitted here, invisible to a pool-wide read on
+  // PostgreSQL).
+  if (tx) return null;
   return await getSession(sessionId);
 }
 

@@ -262,3 +262,73 @@ describe('Voucher Validation', () => {
     expect(r.code).toBe('INVALID_VOUCHER');
   });
 });
+
+describe('Voucher consumption — transaction-aware locking', () => {
+  const MAC = 'aa:bb:cc:dd:ee:ff';
+
+  test('consumeVoucher honours a caller-supplied transaction handle', async () => {
+    const db = getDb();
+    const ok = await db.transaction(async (tx) =>
+      sessionService.consumeVoucher('WIFI-TEST-0001', MAC, tx)
+    );
+    expect(ok).toBe(true);
+
+    const row = await db.getOne(
+      'SELECT state, used_by_mac FROM vouchers WHERE code = ?',
+      ['WIFI-TEST-0001']
+    );
+    expect(row.state).toBe('used');
+    expect(row.used_by_mac).toBe(MAC);
+  });
+
+  test('a failure after both writes rolls BOTH back (voucher stays redeemable)', async () => {
+    const db = getDb();
+
+    await expect(
+      db.transaction(async (tx) => {
+        const consumed = await sessionService.consumeVoucher('WIFI-TEST-0001', MAC, tx);
+        expect(consumed).toBe(true);
+        await sessionService.recordSession({
+          sessionId: 'sess_tx_rollback',
+          clientMac: 'AA:BB:CC:DD:EE:FF',
+          duration: 60,
+          voucherUsed: 'WIFI-TEST-0001',
+        }, tx);
+        throw new Error('simulated failure after both writes');
+      })
+    ).rejects.toThrow('simulated failure after both writes');
+
+    // Local state must be untouched: no burned voucher, no orphan session.
+    const voucher = await db.getOne('SELECT state FROM vouchers WHERE code = ?', ['WIFI-TEST-0001']);
+    expect(voucher.state).toBe('active');
+    const sessions = await db.query('SELECT session_id FROM sessions WHERE session_id = ?', ['sess_tx_rollback']);
+    expect(sessions.length).toBe(0);
+  });
+
+  test('recordSession in tx mode commits the row and returns null (unreadable pre-commit)', async () => {
+    const db = getDb();
+    let returned = 'unset';
+    await db.transaction(async (tx) => {
+      returned = await sessionService.recordSession({
+        sessionId: 'sess_tx_commit',
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        duration: 30,
+      }, tx);
+    });
+    expect(returned).toBeNull();
+
+    const row = await db.getOne('SELECT state, duration_minutes FROM sessions WHERE session_id = ?', ['sess_tx_commit']);
+    expect(row.state).toBe('active');
+    expect(row.duration_minutes).toBe(30);
+  });
+
+  test('recordSession without a tx still returns the stored session', async () => {
+    const stored = await sessionService.recordSession({
+      sessionId: 'sess_no_tx',
+      clientMac: 'AA:BB:CC:DD:EE:FF',
+      duration: 15,
+    });
+    expect(stored).not.toBeNull();
+    expect(stored.sessionId).toBe('sess_no_tx');
+  });
+});
