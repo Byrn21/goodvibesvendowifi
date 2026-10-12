@@ -1,14 +1,16 @@
 /**
  * __tests__/auth-resume.test.js
  *
- * Covers the "login with an existing voucher" (Premium pause/resume) path of
- * POST /api/auth. Pause state lives on the SESSION row, so a re-login with an
- * already-'used' voucher must:
- *   - resume only a still-'paused' Premium session,
- *   - only from the SAME device the voucher was bound to (anti-sharing),
- *   - hand back the original sessionId + remaining time,
+ * Covers the "login with an existing voucher" re-login path of POST /api/auth.
+ * State lives on the SESSION row, so a re-login with an already-'used' voucher
+ * must:
+ *   - for a still-ACTIVE session on the SAME device: replay the Omada auth for
+ *     the remaining time and return a NORMAL success (success.html), never an
+ *     "already active" error;
+ *   - for a still-'paused' Premium session: resume it from the frozen time;
+ *   - only ever from the SAME device the voucher was bound to (anti-sharing),
  * while Standard vouchers (continuous, never paused) and fully-expired
- * Premium vouchers return clear errors.
+ * vouchers return clear errors.
  *
  * Patterns follow backend/__tests__/session-pause-authz.test.js.
  */
@@ -165,7 +167,7 @@ describe('POST /api/auth — Premium pause/resume re-login', () => {
     expect(res.body.error).toMatch(/expired/i);
   });
 
-  test('an already-active session reports ALREADY_ACTIVE', async () => {
+  test('a still-active session on the SAME device re-authorizes and returns normal success', async () => {
     await seedUsedVoucher('333333', 'premium', MAC);
     await sessionService.recordSession({
       sessionId: 'sess_prem_live',
@@ -176,10 +178,42 @@ describe('POST /api/auth — Premium pause/resume re-login', () => {
       totalDurationSeconds: 3600,
     });
 
-    const res = await authRequest({ voucher: '333333' });
+    const res = await authRequest({
+      voucher: '333333',
+      redirectUrl: 'https://example.com/welcome',
+    });
 
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('ALREADY_ACTIVE');
+    // Normal success shape (NOT an error) and NO `resumed` flag, so the portal
+    // routes to success.html exactly like a fresh voucher.
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.resumed).toBeUndefined();
+    expect(res.body.sessionId).toBe('sess_prem_live');
+    expect(res.body.redirectUrl).toBe('https://example.com/welcome');
+    expect(res.body.session.state).toBe('active');
+    // Remaining time is derived from the session's own expiry (~3600s, not 0).
+    expect(res.body.session.remainingSeconds).toBeGreaterThan(3500);
+
+    // The session kept running: not paused, not reset, still active.
+    const after = await sessionService.getSession('sess_prem_live');
+    expect(after.state).toBe('active');
+  });
+
+  test('a still-active session on a DIFFERENT device is rejected (anti-sharing)', async () => {
+    await seedUsedVoucher('333444', 'premium', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_prem_live_other',
+      clientMac: MAC,
+      duration: 60,
+      voucherUsed: '333444',
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+
+    const res = await authRequest({ voucher: '333444', clientMac: OTHER_MAC });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('VOUCHER_DEVICE_MISMATCH');
   });
 
   test('a used voucher with no session row falls back to USED_VOUCHER', async () => {

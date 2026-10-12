@@ -17,6 +17,7 @@ const {
   consumeVoucher,
   recordSession,
   resumeSession,
+  reauthorizeSession,
   expireSession,
   getSessionByVoucher,
   isPausableVoucherType,
@@ -124,7 +125,7 @@ router.post('/', async (req, res, next) => {
     );
     if (existingVoucher && existingVoucher.state === 'used') {
       const outcome = await resumeUsedVoucher(
-        normalizedVoucher, normalizedMac, existingVoucher.used_by_mac
+        normalizedVoucher, normalizedMac, existingVoucher.used_by_mac, redirectUrl
       );
       return res.status(outcome.status).json(outcome.body);
     }
@@ -346,22 +347,31 @@ function maskVoucher(code) {
  * resumeUsedVoucher — Handle POST /api/auth for a voucher that is already
  * 'used' (i.e. it was redeemed once and still has a session row).
  *
- * Pause/resume state lives on the session (sessions.state = 'paused'), so this
- * is the Premium re-login path:
- *   - Standard plans run continuously and cannot be paused → not resumable.
- *   - Premium plans resume ONLY while their session is still 'paused' AND the
- *     request comes from the same device the voucher was first bound to
- *     (MAC binding — prevents voucher sharing).
+ * Pause/resume state lives on the SESSION row, not the voucher, so re-entering
+ * a 'used' code is a re-login with two distinct cases:
+ *
+ *   1. ACTIVE (still counting down) on the SAME device — the device merely
+ *      lost its firewall authorization (captive mini-browser reopened, Wi-Fi
+ *      dropped, OS re-probe), NOT an error. We replay the Omada extPortal/auth
+ *      call for the REMAINING time and return a NORMAL success so the portal
+ *      lands on success.html and the guest regains access.
+ *   2. PAUSED (Premium only) — resume from the frozen remaining time.
+ *
+ * Standard plans run continuously and never pause, so reusing one is rejected.
+ * In every case the requesting device must match the MAC the voucher was first
+ * bound to (vouchers.used_by_mac, falling back to the session's client_mac) —
+ * this is the anti-sharing guard for BOTH the active and paused paths.
  *
  * Always resolves to { status, body }: the caller sends it as the response.
  *
- * @param {string} voucher   Normalized voucher code
- * @param {string} clientMac Normalized MAC of the requesting device
- * @param {string} [boundMac] MAC the voucher was originally bound to
- *                            (vouchers.used_by_mac); falls back to the
- *                            session's client_mac when absent on legacy rows
+ * @param {string} voucher      Normalized voucher code
+ * @param {string} clientMac    Normalized MAC of the requesting device
+ * @param {string} [boundMac]   MAC the voucher was originally bound to
+ *                              (vouchers.used_by_mac); falls back to the
+ *                              session's client_mac when absent on legacy rows
+ * @param {string} [redirectUrl] Validated post-login redirect URL from the form
  */
-async function resumeUsedVoucher(voucher, clientMac, boundMac) {
+async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
   const fail = (status, code, error) => ({ status, body: { success: false, code, error } });
 
   const session = await getSessionByVoucher(voucher);
@@ -369,27 +379,77 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac) {
     return fail(401, 'USED_VOUCHER', 'This voucher has already been used.');
   }
 
-  // Reaching this path at all requires a pausable (Premium) session —
-  // Standard vouchers never pause, so reusing one is simply an error.
+  // Standard vouchers run continuously and never pause, so there is no paused
+  // state for them to resume — reusing one is an error.
   if (!isPausableVoucherType(session.voucherType)) {
     return fail(403, 'STANDARD_CONTINUOUS',
       'Standard vouchers run continuously and cannot be paused or resumed.');
   }
 
+  // ── MAC binding: only the device the voucher was first used on may re-enter ──
+  // Checked BEFORE the state branches so a shared code can neither reopen the
+  // firewall (active) nor resume the timer (paused) on a second device.
+  if (!isSameMac(boundMac || session.clientMac, clientMac)) {
+    return fail(403, 'VOUCHER_DEVICE_MISMATCH',
+      'This voucher is already in use on another device and cannot be resumed here.');
+  }
+
+  // getSession() already flips an active-but-timed-out session to 'expired',
+  // so this covers "the time has fully elapsed".
   if (session.state === 'expired') {
     return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
   }
 
-  if (session.state !== 'paused') {
-    // Active (e.g. the guest reopened the portal in another tab): nothing to
-    // resume, and re-authorizing would needlessly restart the controller call.
-    return fail(409, 'ALREADY_ACTIVE', 'This session is already active on this device.');
+  // ── Still-active session, same device: re-open the firewall ──────────────
+  // The session is valid and belongs to this device, so this is NOT the
+  // "already active" error case — replay extPortal/auth with the time left.
+  if (session.state === 'active') {
+    let reauthed;
+    try {
+      reauthed = await reauthorizeSession(session.sessionId);
+    } catch (err) {
+      if (err && err.code === 'SESSION_EXPIRED') {
+        await expireSession(session.sessionId, 'time_expired');
+        return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
+      }
+      console.error(
+        '[auth] re-authorize failed for active voucher ' + maskVoucher(voucher) +
+        ' (client ' + clientMac + '): ' + (err && err.message ? err.message : String(err))
+      );
+      return fail(502, 'OMADA_ERROR', 'Could not get you back online. Please try again.');
+    }
+
+    console.log(
+      '[auth] ACTIVE RE-AUTH success (same device, firewall reopened) —' +
+      ' client=' + clientMac +
+      ' session=' + reauthed.session.sessionId +
+      ' remainingSeconds=' + reauthed.remainingSeconds +
+      ' voucher=' + maskVoucher(voucher)
+    );
+
+    // Standard success shape with NO `resumed` flag: the portal treats this as
+    // a normal login and lands on success.html (exactly like a fresh voucher),
+    // while the timer keeps running from the session's original expiry.
+    return {
+      status: 200,
+      body: {
+        success: true,
+        message: 'Authentication successful.',
+        sessionId: reauthed.session.sessionId,
+        redirectUrl: redirectUrl || process.env.DEFAULT_REDIRECT_URL || 'https://www.google.com',
+        session: {
+          state: 'active',
+          remainingSeconds: reauthed.remainingSeconds,
+          voucherType: reauthed.session.voucherType,
+        },
+      },
+    };
   }
 
-  // ── MAC binding: only the device the voucher was first used on may resume ──
-  if (!isSameMac(boundMac || session.clientMac, clientMac)) {
-    return fail(403, 'VOUCHER_DEVICE_MISMATCH',
-      'This voucher is already in use on another device and cannot be resumed here.');
+  // ── Paused session: resume from the frozen remaining time ────────────────
+  if (session.state !== 'paused') {
+    // Any other state (e.g. a payment stage) is not resumable.
+    return fail(409, 'ALREADY_ACTIVE', 'This session is already active on this device.');
   }
 
   const remaining = Math.max(0, Math.floor(session.remainingSeconds || 0));

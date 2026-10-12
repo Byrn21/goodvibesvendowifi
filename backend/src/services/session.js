@@ -399,6 +399,63 @@ async function resumeSession(sessionId) {
 }
 
 /**
+ * reauthorizeSession — Re-open the firewall for an ALREADY-ACTIVE session.
+ *
+ * Used when a guest re-enters a still-valid, still-active voucher on the SAME
+ * device (the captive mini-browser reopened, Wi-Fi dropped and reconnected,
+ * or the OS lost its authorization). The local session already exists and is
+ * still counting down, so we do NOT create a new one and do NOT touch its
+ * state or expiry — we simply replay the controller's extPortal/auth call for
+ * the REMAINING time so the device regains internet access.
+ *
+ * The remaining time is derived from the session's own expiry timestamp
+ * (expires_at - now), which is the authoritative source while active.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<{session: Object, remainingSeconds: number}>}
+ * @throws Error with code 'SESSION_NOT_FOUND' or 'SESSION_EXPIRED'
+ */
+async function reauthorizeSession(sessionId) {
+  const session = await getSession(sessionId);
+  if (!session) {
+    const err = new Error('Session not found');
+    err.code = 'SESSION_NOT_FOUND';
+    throw err;
+  }
+
+  const remainingSeconds = session.expiresAt
+    ? Math.max(0, Math.floor((new Date(session.expiresAt).getTime() - Date.now()) / 1000))
+    : 0;
+  if (remainingSeconds <= 0) {
+    const err = new Error('Session has expired');
+    err.code = 'SESSION_EXPIRED';
+    throw err;
+  }
+
+  // Fail-closed: if the controller rejects/throws, the caller surfaces a
+  // retryable error and the session's local state is left untouched.
+  try {
+    await omadaService.authenticateClient({
+      clientMac: session.clientMac,
+      clientIp: session.clientIp,
+      apMac: session.apMac,
+      ssidName: session.ssidName,
+      radioId: session.radioId || 0,
+      durationMinutes: Math.ceil(remainingSeconds / 60),
+      sessionId,
+      // Same voucher the session was opened with, so every extPortal/auth call
+      // carries the `code` field identically (see resumeSession).
+      voucherCode: session.voucherUsed || '',
+    });
+  } catch (err) {
+    console.error('[reauthorizeSession] Omada auth failed:', err.message);
+    throw err;
+  }
+
+  return { session, remainingSeconds };
+}
+
+/**
  * Check if a session is currently active (server-side truth).
  */
 async function isSessionActive(sessionId) {
@@ -652,6 +709,7 @@ module.exports = {
   getSession,
   pauseSession,
   resumeSession,
+  reauthorizeSession,
   expireSession,
   isSessionActive,
   startExpirationWorker,
