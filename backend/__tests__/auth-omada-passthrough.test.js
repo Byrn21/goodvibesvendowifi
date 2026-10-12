@@ -4,7 +4,7 @@
  * Verifies that POST /api/auth forwards the Omada controller context it
  * receives from the portal (client/AP/gateway MAC, client IP, SSID, radioId,
  * vid) into services/omada.authenticateClient — the exact parameters the
- * controller needs to authorize the client via the native /portal/auth.
+ * controller needs to authorize the client via /hotspot/extPortal/auth.
  *
  * The Omada service is spied on so the assertions are about the ROUTE
  * contract (what the route hands to the service), independent of the
@@ -95,9 +95,9 @@ describe('POST /api/auth — Omada context passthrough', () => {
     expect(ctx.clientIp).toBe('192.168.1.50');
     expect(ctx.ssidName).toBe('GuestWiFi');
     expect(ctx.radioId).toBe(1);                      // taken from the URL, not defaulted to 0
-    // The submitted voucher still reaches the service, and it is now
-    // forwarded to the controller as `voucherCode` on the native /portal/auth
-    // call — see authenticateClient.
+    // The submitted voucher still reaches the service (it is consumed
+    // locally); it is deliberately NOT forwarded to the controller — see
+    // authenticateClient and the documented extPortal/auth contract.
     expect(ctx.voucherCode).toBe('123456');
   });
 

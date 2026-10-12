@@ -4,7 +4,7 @@
  * Covers:
  *   - minutesToTime scaling for all OMADA_TIME_UNIT values
  *   - authenticateClient: fail-loud validation before any HTTP call,
- *     portal/auth body shape, session cookie + Csrf-Token headers
+ *     extPortal/auth body shape, session cookie + Csrf-Token headers
  *   - operator login: token/cookie capture, error paths
  *   - unauthenticateClient: unauth → verify → time=1 fallback chain
  *   - 401 session-expiry retry (one re-login then retry)
@@ -115,7 +115,7 @@ describe('mock mode preserved', () => {
 // ================================================================
 // authenticateClient — fail-loud validation + request shape
 // ================================================================
-describe('authenticateClient (portal/auth)', () => {
+describe('authenticateClient (extPortal/auth)', () => {
   test('throws OMADA_MISSING_FIELD when apMac is absent — no HTTP call', async () => {
     let httpCalled = false;
     const uninstall = mockHttpTransport(() => { httpCalled = true; });
@@ -170,7 +170,7 @@ describe('authenticateClient (portal/auth)', () => {
       expect(captured[0].path).toBe('/TESTOMADAC123/api/v2/hotspot/login');
       // Auth call: correct path + session headers
       const authOpts = captured[1];
-      expect(authOpts.path).toBe('/TESTOMADAC123/portal/auth');
+      expect(authOpts.path).toBe('/TESTOMADAC123/api/v2/hotspot/extPortal/auth');
       expect(authOpts.headers['Csrf-Token']).toBe('csrf-token-123');
       expect(authOpts.headers['Cookie']).toContain('TPOMADA_SESSION=abc123');
     } finally {
@@ -185,7 +185,7 @@ describe('authenticateClient (portal/auth)', () => {
       // NOTE: the handler runs BEFORE req.write() is invoked by
       // omadaRequest, so the body is read from the captured request
       // object AFTER the await completes, not inside the handler.
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         authReq = req;
         respondJson(req, cb, 200, { errorCode: 0 });
         return;
@@ -203,7 +203,7 @@ describe('authenticateClient (portal/auth)', () => {
       expect(authReq).not.toBeNull();
       const authBody = JSON.parse(authReq.written[0] || '{}');
       expect(authBody.time).toBe(30 * 60 * 1000); // ms (cross-verified unit)
-      expect(authBody.authType).toBe(3);
+      expect(authBody.authType).toBe(4);
       expect(authBody.clientMac).toBe('AA:BB:CC:DD:EE:FF');
       expect(authBody.apMac).toBe('AA:AA:AA:AA:AA:AA');
       expect(authBody.ssidName).toBe('GuestWiFi');
@@ -238,7 +238,7 @@ describe('authenticateClient (portal/auth)', () => {
   test('includes clientIp and the full EAP connection context in the auth body', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         authReq = req;
         respondJson(req, cb, 200, { errorCode: 0 });
         return;
@@ -268,7 +268,7 @@ describe('authenticateClient (portal/auth)', () => {
   test('builds a Gateway-shaped body (gatewayMac + vid, no apMac) for wired clients', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         authReq = req;
         respondJson(req, cb, 200, { errorCode: 0 });
         return;
@@ -286,7 +286,7 @@ describe('authenticateClient (portal/auth)', () => {
       const authBody = JSON.parse(authReq.written[0] || '{}');
       expect(authBody.gatewayMac).toBe('GG:GG:GG:GG:GG:GG');
       expect(authBody.vid).toBe(20);
-      expect(authBody.authType).toBe(3);
+      expect(authBody.authType).toBe(4);
       expect(authBody.apMac).toBeUndefined();
       expect(authBody.ssidName).toBeUndefined();
     } finally {
@@ -300,10 +300,10 @@ describe('authenticateClient (portal/auth)', () => {
     ).rejects.toMatchObject({ code: 'OMADA_MISSING_FIELD' });
   });
 
-  test('includes the native voucherCode + authType 3 in the portal/auth body (EAP)', async () => {
+  test('does NOT add a `code` field to the extPortal/auth body (EAP)', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         authReq = req;
         respondJson(req, cb, 200, { errorCode: 0 });
         return;
@@ -320,10 +320,9 @@ describe('authenticateClient (portal/auth)', () => {
         voucherCode: '654321',
       });
       const authBody = JSON.parse(authReq.written[0] || '{}');
-      expect(authBody.authType).toBe(3);
-      expect(authBody.voucherCode).toBe('654321');
-      expect(authBody.code).toBeUndefined(); // native field is `voucherCode`
-      // the connection-contract fields are still present
+      expect(authBody.code).toBeUndefined();
+      expect(authBody.authType).toBe(4);
+      // the documented contract fields are still present
       expect(authBody.clientMac).toBe('AA:BB:CC:DD:EE:FF');
       expect(authBody.apMac).toBe('AA:AA:AA:AA:AA:AA');
     } finally {
@@ -331,10 +330,10 @@ describe('authenticateClient (portal/auth)', () => {
     }
   });
 
-  test('includes the native voucherCode for Gateway clients too', async () => {
+  test('does NOT add a `code` field for Gateway clients either', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         authReq = req;
         respondJson(req, cb, 200, { errorCode: 0 });
         return;
@@ -350,8 +349,6 @@ describe('authenticateClient (portal/auth)', () => {
         voucherCode: '  654321  ',
       });
       const authBody = JSON.parse(authReq.written[0] || '{}');
-      expect(authBody.authType).toBe(3);
-      expect(authBody.voucherCode).toBe('654321'); // whitespace-padded input normalized
       expect(authBody.code).toBeUndefined();
       expect(authBody.gatewayMac).toBe('GG:GG:GG:GG:GG:GG');
     } finally {
@@ -359,10 +356,10 @@ describe('authenticateClient (portal/auth)', () => {
     }
   });
 
-  test('omits voucherCode when the submitted voucher is blank', async () => {
+  test('sends no `code` field when no voucher was supplied', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         authReq = req;
         respondJson(req, cb, 200, { errorCode: 0 });
         return;
@@ -379,8 +376,6 @@ describe('authenticateClient (portal/auth)', () => {
         voucherCode: '   ',
       });
       const authBody = JSON.parse(authReq.written[0] || '{}');
-      expect(authBody.authType).toBe(3);
-      expect(authBody.voucherCode).toBeUndefined();
       expect(authBody.code).toBeUndefined();
     } finally {
       uninstall();
@@ -607,7 +602,7 @@ describe('Omada site / OMADAC id logging', () => {
   test('authenticateClient logs the site + OMADAC id actually sent (password never logged)', async () => {
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     const uninstall = mockHttpTransport((options, req, cb) => {
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         respondJson(req, cb, 200, { errorCode: 0 });
         return;
       }
@@ -632,9 +627,9 @@ describe('Omada site / OMADAC id logging', () => {
       expect(target).toContain('omadacId=TESTOMADAC123');
       expect(target).toContain('connection=EAP');
 
-      // Per-request line for the actual portal/auth call.
+      // Per-request line for the actual extPortal/auth call.
       const authCall = lines.find(
-        (l) => l.includes('→ POST') && l.includes('/TESTOMADAC123/portal/auth')
+        (l) => l.includes('→ POST') && l.includes('/TESTOMADAC123/api/v2/hotspot/extPortal/auth')
       );
       expect(authCall).toBeDefined();
       expect(authCall).toContain('site=Default');
@@ -692,17 +687,17 @@ describe('Omada site / OMADAC id logging', () => {
       const err = new Error('connect ECONNREFUSED');
       err.code = 'ECONNREFUSED';
       _internal.logAuthFailure(
-        'portal/auth request',
+        'extPortal/auth request',
         err,
         { clientMac: 'AA:BB:CC:DD:EE:FF' },
-        '/TESTOMADAC123/portal/auth',
+        '/TESTOMADAC123/api/v2/hotspot/extPortal/auth',
         JSON.stringify({
           clientMac: 'AA:BB:CC:DD:EE:FF', apMac: 'AA:AA:AA:AA:AA:AA', ssidName: 'S',
-          radioId: 0, authType: 3, time: 1800000, site: 'Default', voucherCode: '654321',
+          radioId: 0, authType: 4, time: 1800000, site: 'Default', code: '654321',
         })
       );
       const sent = errSpy.mock.calls.map((c) => c.join(' ')).find((l) => l.includes('sent body:'));
-      expect(sent).toContain('voucherCode=••••21');
+      expect(sent).toContain('code=••••21');
       expect(sent).not.toContain('654321');
     } finally {
       errSpy.mockRestore();
@@ -764,7 +759,7 @@ describe('outgoing body logging', () => {
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
     const uninstall = mockHttpTransport((options, req, cb) => {
-      if (options.path.includes('/portal/auth')) {
+      if (options.path.includes('/extPortal/auth')) {
         // Emit asynchronously: omadaRequest attaches its error listener only
         // after the mocked https.request call returns.
         setImmediate(() => {
