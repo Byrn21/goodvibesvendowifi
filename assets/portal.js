@@ -486,6 +486,9 @@
           resolve({
             redirectUrl: data.redirectUrl || ctx.redirectUrl,
             sessionId: data.sessionId,
+            // Set when the backend resumed a paused Premium session instead of
+            // redeeming a fresh voucher (login-with-existing-voucher flow).
+            resumed: data.resumed === true,
           });
         } else {
           reject({
@@ -541,18 +544,28 @@
       }
     } catch (e) { /* storage unavailable — URL param still works */ }
 
-    // Build success URL with redirect and session info
-    var params = new URLSearchParams();
-    if (result.redirectUrl) params.set('redirectUrl', encodeURIComponent(result.redirectUrl));
-    if (result.sessionId)   params.set('sessionId', result.sessionId);
-    params.set('countdown', '3');
+    // Build the post-login destination.
+    var target;
+    if (result.resumed && result.sessionId) {
+      // Re-login that resumed a paused Premium session: go straight to the
+      // live session page. Its countdown reads the remaining time the backend
+      // just re-authorized, so the timer continues from where it left off.
+      var statusPage = CONFIG.statusPage || 'status.html';
+      target = statusPage + '?sessionId=' + encodeURIComponent(result.sessionId);
+    } else {
+      // Build success URL with redirect and session info
+      var params = new URLSearchParams();
+      if (result.redirectUrl) params.set('redirectUrl', encodeURIComponent(result.redirectUrl));
+      if (result.sessionId)   params.set('sessionId', result.sessionId);
+      params.set('countdown', '3');
 
-    // Carry Omada's originUrl (the URL the guest first tried to open) through
-    // to success.html so it can nudge the OS with a real internet request.
-    var originUrl = queryParams.raw && (queryParams.raw.originUrl || queryParams.raw.originalUrl);
-    if (originUrl) params.set('originUrl', encodeURIComponent(originUrl));
+      // Carry Omada's originUrl (the URL the guest first tried to open) through
+      // to success.html so it can nudge the OS with a real internet request.
+      var originUrl = queryParams.raw && (queryParams.raw.originUrl || queryParams.raw.originalUrl);
+      if (originUrl) params.set('originUrl', encodeURIComponent(originUrl));
 
-    var target = CONFIG.successPage + '?' + params.toString();
+      target = CONFIG.successPage + '?' + params.toString();
+    }
 
     // ---- Settle before navigating (race-condition fix) ----
     // The backend has confirmed the voucher, but the Omada controller still has
@@ -568,8 +581,8 @@
     var settleText = $('loading-text');
     var settleLabel = $('submit-label');
     if (settleOverlay) { settleOverlay.setAttribute('aria-hidden', 'false'); show(settleOverlay); }
-    if (settleText) settleText.textContent = 'Connecting…';
-    if (settleLabel) settleLabel.textContent = 'Connecting…';
+    if (settleText) settleText.textContent = result.resumed ? 'Resuming your session…' : 'Connecting…';
+    if (settleLabel) settleLabel.textContent = result.resumed ? 'Resuming…' : 'Connecting…';
 
     // Return a promise so the caller's cleanup waits for the hand-off instead
     // of resolving (and resetting the UI) during the delay.
@@ -597,6 +610,10 @@
       SERVER_ERROR:    'The authentication server is temporarily unavailable. Please try again shortly.',
       RATE_LIMITED:    'Too many attempts. Please wait a moment before trying again.',
       TERMS_REQUIRED:  'You must accept the terms before connecting.',
+      // Pause/resume (login with an existing Premium voucher)
+      STANDARD_CONTINUOUS:     'Standard vouchers run continuously and cannot be paused or resumed.',
+      VOUCHER_DEVICE_MISMATCH: 'This voucher is already in use on another device and cannot be resumed here.',
+      ALREADY_ACTIVE:          'This session is already active on this device.',
       CONFIG_ERROR:    'Portal configuration error. Please contact support.',
       AUTH_FAILED:     'Authentication failed. Please check your voucher and try again.',
     };
@@ -606,7 +623,8 @@
     setFormError(publicMsg);
 
     // If it's a voucher-specific error, highlight the field
-    if (code === 'INVALID_VOUCHER' || code === 'EXPIRED_VOUCHER' || code === 'USED_VOUCHER') {
+    if (code === 'INVALID_VOUCHER' || code === 'EXPIRED_VOUCHER' || code === 'USED_VOUCHER' ||
+        code === 'STANDARD_CONTINUOUS' || code === 'VOUCHER_DEVICE_MISMATCH') {
       setError('voucher-input', publicMsg);
     }
   }

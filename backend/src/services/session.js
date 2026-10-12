@@ -603,6 +603,30 @@ async function markEventProcessed(eventId, sessionId) {
 }
 
 /**
+ * getSessionByVoucher — the newest session that consumed a given voucher code.
+ *
+ * Pause/resume state lives on the SESSION row (sessions.state = 'paused'), not
+ * on the voucher, so this is how a re-login with an already-'used' voucher
+ * finds the session it may resume. Returns null when no session references the
+ * code (the voucher was never redeemed through this backend).
+ *
+ * NOTE: getSession() applies server-side expiry, so an active-but-timed-out
+ * session comes back with state 'expired'.
+ *
+ * @param {string} voucher Normalized voucher code
+ * @returns {Promise<Object|null>}
+ */
+async function getSessionByVoucher(voucher) {
+  if (!voucher) return null;
+  const row = await getDb().getOne(
+    `SELECT session_id FROM sessions WHERE voucher_used = ? ORDER BY id DESC LIMIT 1`,
+    [voucher]
+  );
+  if (!row) return null;
+  return await getSession(row.session_id);
+}
+
+/**
  * getPauseRemaining — Calculate seconds remaining in the pause validity window.
  * Only meaningful for premium sessions in 'paused' state.
  *
@@ -640,4 +664,5 @@ module.exports = {
   markEventProcessed,
   getPauseRemaining,
   isPausableVoucherType,
+  getSessionByVoucher,
 };

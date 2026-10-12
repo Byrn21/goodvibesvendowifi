@@ -12,9 +12,17 @@
 const express = require('express');
 const router = express.Router();
 const omadaService = require('../services/omada');
-const { validateVoucher, consumeVoucher, recordSession } = require('../services/session');
+const {
+  validateVoucher,
+  consumeVoucher,
+  recordSession,
+  resumeSession,
+  expireSession,
+  getSessionByVoucher,
+  isPausableVoucherType,
+} = require('../services/session');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
-const { normalizeMac: normalizeDeviceMac } = require('../utils/device-id');
+const { normalizeMac: normalizeDeviceMac, isSameMac } = require('../utils/device-id');
 const { getDb } = require('../db/client');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
@@ -103,6 +111,22 @@ router.post('/', async (req, res, next) => {
     // Terms check
     if (!termsAccepted) {
       return res.status(400).json({ success: false, error: 'Terms acceptance required.', code: 'TERMS_REQUIRED' });
+    }
+
+    // ── Re-login with an already-'used' voucher (Premium pause/resume) ──
+    // Pause is tracked on the SESSION row, not the voucher, so a code whose
+    // session is still 'paused' is a resume — not a fresh redemption. This
+    // runs BEFORE validateVoucher, which would otherwise reject the 'used'
+    // voucher as "already used" and never let the guest back online.
+    const existingVoucher = await getDb().getOne(
+      'SELECT state, used_by_mac FROM vouchers WHERE code = ? LIMIT 1',
+      [normalizedVoucher]
+    );
+    if (existingVoucher && existingVoucher.state === 'used') {
+      const outcome = await resumeUsedVoucher(
+        normalizedVoucher, normalizedMac, existingVoucher.used_by_mac
+      );
+      return res.status(outcome.status).json(outcome.body);
     }
 
     const sessionId = 'sess_' + uuidv4().replace(/-/g, '').slice(0, 16);
@@ -316,6 +340,103 @@ function maskVoucher(code) {
   const cleaned = String(code === undefined || code === null ? '' : code).replace(/\s+/g, '');
   if (!cleaned) return '(empty)';
   return cleaned.length < 2 ? '••••••' : '••••' + cleaned.slice(-2);
+}
+
+/**
+ * resumeUsedVoucher — Handle POST /api/auth for a voucher that is already
+ * 'used' (i.e. it was redeemed once and still has a session row).
+ *
+ * Pause/resume state lives on the session (sessions.state = 'paused'), so this
+ * is the Premium re-login path:
+ *   - Standard plans run continuously and cannot be paused → not resumable.
+ *   - Premium plans resume ONLY while their session is still 'paused' AND the
+ *     request comes from the same device the voucher was first bound to
+ *     (MAC binding — prevents voucher sharing).
+ *
+ * Always resolves to { status, body }: the caller sends it as the response.
+ *
+ * @param {string} voucher   Normalized voucher code
+ * @param {string} clientMac Normalized MAC of the requesting device
+ * @param {string} [boundMac] MAC the voucher was originally bound to
+ *                            (vouchers.used_by_mac); falls back to the
+ *                            session's client_mac when absent on legacy rows
+ */
+async function resumeUsedVoucher(voucher, clientMac, boundMac) {
+  const fail = (status, code, error) => ({ status, body: { success: false, code, error } });
+
+  const session = await getSessionByVoucher(voucher);
+  if (!session) {
+    return fail(401, 'USED_VOUCHER', 'This voucher has already been used.');
+  }
+
+  // Reaching this path at all requires a pausable (Premium) session —
+  // Standard vouchers never pause, so reusing one is simply an error.
+  if (!isPausableVoucherType(session.voucherType)) {
+    return fail(403, 'STANDARD_CONTINUOUS',
+      'Standard vouchers run continuously and cannot be paused or resumed.');
+  }
+
+  if (session.state === 'expired') {
+    return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
+  }
+
+  if (session.state !== 'paused') {
+    // Active (e.g. the guest reopened the portal in another tab): nothing to
+    // resume, and re-authorizing would needlessly restart the controller call.
+    return fail(409, 'ALREADY_ACTIVE', 'This session is already active on this device.');
+  }
+
+  // ── MAC binding: only the device the voucher was first used on may resume ──
+  if (!isSameMac(boundMac || session.clientMac, clientMac)) {
+    return fail(403, 'VOUCHER_DEVICE_MISMATCH',
+      'This voucher is already in use on another device and cannot be resumed here.');
+  }
+
+  const remaining = Math.max(0, Math.floor(session.remainingSeconds || 0));
+  if (remaining <= 0) {
+    await expireSession(session.sessionId, 'time_expired');
+    return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
+  }
+
+  // Re-authorize through Omada and flip the session back to active.
+  // resumeSession() is fail-closed: if the controller rejects or throws, the
+  // session stays paused and the guest can simply try again.
+  let resumed;
+  try {
+    resumed = await resumeSession(session.sessionId);
+  } catch (err) {
+    console.error(
+      '[auth] resume failed for voucher ' + maskVoucher(voucher) +
+      ' (client ' + clientMac + '): ' + (err && err.message ? err.message : String(err))
+    );
+    return fail(502, 'OMADA_ERROR', 'Could not get you back online. Please try again.');
+  }
+
+  console.log(
+    '[auth] RESUME SUCCESS (premium pause → active) —' +
+    ' client=' + clientMac +
+    ' session=' + resumed.sessionId +
+    ' remainingSeconds=' + remaining +
+    ' voucher=' + maskVoucher(voucher)
+  );
+
+  return {
+    status: 200,
+    body: {
+      success: true,
+      resumed: true,
+      message: 'Session resumed.',
+      sessionId: resumed.sessionId,
+      // The session page is the live view; its timer reads the remaining time
+      // straight from the re-authorized session (expires_at = now + remaining).
+      redirectUrl: 'status.html?sessionId=' + encodeURIComponent(resumed.sessionId),
+      session: {
+        state: resumed.state,
+        remainingSeconds: remaining,
+        voucherType: resumed.voucherType,
+      },
+    },
+  };
 }
 
 function isAllowedRedirect(url) {
