@@ -9,6 +9,7 @@
  *   - unauthenticateClient: unauth → verify → time=1 fallback chain
  *   - 401 session-expiry retry (one re-login then retry)
  *   - Mock mode preserved
+ *   - Resolved-config + per-request target logging (site / OMADAC id)
  */
 
 process.env.OMADA_MOCK = 'false';
@@ -446,5 +447,127 @@ describe('unauthenticateClient (unauth → verify → time=1 fallback)', () => {
     } finally {
       uninstall();
     }
+  });
+});
+
+// ================================================================
+// resolved config + per-request target logging
+// ================================================================
+describe('Omada site / OMADAC id logging', () => {
+  test('logResolvedConfig echoes base, omadacId, site and TLS mode', () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      _internal.logResolvedConfig(true);
+      const line = logSpy.mock.calls
+        .map((c) => c.join(' '))
+        .find((l) => l.includes('[omada] resolved config'));
+      expect(line).toBeDefined();
+      expect(line).toContain('base=https://omada-test.example.com');
+      expect(line).toContain('omadacId=TESTOMADAC123');
+      expect(line).toContain('site=Default');
+      expect(line).toContain('siteFromEnv=yes');
+      expect(line).toContain('tlsRejectUnauthorized=false');
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('logResolvedConfig never prints the operator password', () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      _internal.logResolvedConfig(true);
+      const everything = [...logSpy.mock.calls, ...errSpy.mock.calls]
+        .map((c) => c.join(' '))
+        .join('\n');
+      expect(everything).not.toContain('portal-secret');
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
+  test('logResolvedConfig flags an unset OMADA_SITE and a placeholder omadacId', () => {
+    const saved = {
+      site: process.env.OMADA_SITE,
+      id: process.env.OMADA_OMADAC_ID,
+    };
+    jest.resetModules();
+    delete process.env.OMADA_SITE;
+    process.env.OMADA_OMADAC_ID = 'your-omadac-id';
+    delete require.cache[require.resolve('../src/services/omada')];
+    const fresh = require('../src/services/omada');
+
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      fresh.logResolvedConfig();
+      const errText = errSpy.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(errText).toContain('CONFIG PROBLEMS');
+      expect(errText).toContain('OMADA_SITE is unset');
+      expect(errText).toContain('placeholder');
+    } finally {
+      logSpy.mockRestore();
+      errSpy.mockRestore();
+      process.env.OMADA_SITE = saved.site;
+      process.env.OMADA_OMADAC_ID = saved.id;
+      delete require.cache[require.resolve('../src/services/omada')];
+    }
+  });
+
+  test('authenticateClient logs the site + OMADAC id actually sent (password never logged)', async () => {
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/extPortal/auth')) {
+        respondJson(req, cb, 200, { errorCode: 0 });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+    });
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        apMac: 'AA:AA:AA:AA:AA:AA',
+        ssidName: 'GuestWiFi',
+        radioId: 0,
+        durationMinutes: 30,
+      });
+
+      const lines = logSpy.mock.calls.map((c) => c.join(' '));
+
+      // Explicit auth-target line: the site and controller the client is
+      // being authorized against.
+      const target = lines.find((l) => l.includes('authenticateClient target'));
+      expect(target).toBeDefined();
+      expect(target).toContain('site=Default');
+      expect(target).toContain('omadacId=TESTOMADAC123');
+      expect(target).toContain('connection=EAP');
+
+      // Per-request line for the actual extPortal/auth call.
+      const authCall = lines.find(
+        (l) => l.includes('→ POST') && l.includes('/TESTOMADAC123/api/v2/hotspot/extPortal/auth')
+      );
+      expect(authCall).toBeDefined();
+      expect(authCall).toContain('site=Default');
+
+      // Login request is logged but redacted.
+      const loginCall = lines.find((l) => l.includes('/hotspot/login'));
+      expect(loginCall).toBeDefined();
+      expect(loginCall).toContain('credentials redacted');
+      expect(lines.join('\n')).not.toContain('portal-secret');
+    } finally {
+      uninstall();
+      logSpy.mockRestore();
+    }
+  });
+
+  test('maskHost keeps scheme+host and drops credentials/path', () => {
+    expect(_internal.maskHost('https://omada-test.example.com:8443/api?x=1')).toBe(
+      'https://omada-test.example.com:8443'
+    );
+    expect(_internal.maskHost('')).toBe('(unset)');
+    expect(_internal.maskHost('not a url')).toBe('(invalid URL)');
   });
 });

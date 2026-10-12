@@ -30,7 +30,9 @@
  * Configuration (from .env):
  *   OMADA_BASE_URL                  — e.g. https://omada-tunnel.example.com
  *   OMADA_OMADAC_ID                 — controller ID (OMADAC ID)
- *   OMADA_SITE                      — site name (default "Default")
+ *   OMADA_SITE                      — site name (default "Default"); sent in
+ *                                     the body of EVERY hotspot call and
+ *                                     echoed in the [omada] startup log
  *   OMADA_PORTAL_OPERATOR_NAME      — hotspot portal operator username
  *   OMADA_PORTAL_OPERATOR_PASSWORD  — hotspot portal operator password
  *   OMADA_AUTH_TIMEOUT              — request timeout ms (default 10000)
@@ -148,6 +150,8 @@ async function ensureSession() {
  * @throws Error on controller rejection / network failure
  */
 async function authenticateClient(ctx) {
+  logResolvedConfig();
+
   if (MOCK_MODE) return mockAuthenticate(ctx);
 
   if (!OMADAC_ID) {
@@ -193,6 +197,18 @@ async function authenticateClient(ctx) {
     authBody.radioId = radioId;
   }
   const body = JSON.stringify(authBody);
+
+  // Verbose target log: what the controller is being asked to authorize,
+  // on WHICH site. Compare `site=` here with the controller's own Site name
+  // and `omadacId=` with the controller's API settings — a mismatch is the
+  // usual explanation for an accepted voucher that never unlocks the client.
+  console.log(
+    '[omada] authenticateClient target — client=' + ctx.clientMac +
+    ' connection=' + (isGateway ? 'Gateway' : 'EAP') +
+    ' site=' + SITE +
+    ' omadacId=' + OMADAC_ID +
+    ' url=' + maskHost(BASE_URL) + path
+  );
 
   let response;
   try {
@@ -251,6 +267,8 @@ async function authenticateClient(ctx) {
  * @returns {Promise<Object>} { success, verified, path }
  */
 async function unauthenticateClient(ctx) {
+  logResolvedConfig();
+
   if (MOCK_MODE) return mockUnauthenticate(ctx);
 
   if (!OMADAC_ID) {
@@ -476,6 +494,126 @@ function logAuthFailure(stage, err, ctx, path) {
 }
 
 // ================================================================
+// Diagnostics: resolved configuration + per-request target logging
+// ================================================================
+// A captive loop is almost always a config mismatch: the extPortal/auth
+// call carries the SITE name in its body and targets the OMADAC_ID in its
+// path, so if either resolves to a value the controller does not know, the
+// authorization silently does nothing. These two logs make the resolved
+// values visible in the Render logs so the operator can compare them with
+// the controller's own Site / API settings.
+
+let configLogged = false;
+
+/**
+ * Mask a URL for logging: keep the scheme + host, drop any userinfo,
+ * path, query or fragment. Never echoes credentials embedded in the URL.
+ *
+ * @param {string} url
+ * @returns {string}
+ */
+function maskHost(url) {
+  if (!url) return '(unset)';
+  try {
+    const u = new URL(url);
+    return u.protocol + '//' + u.host;
+  } catch (_) {
+    return '(invalid URL)'; // never echo an unparseable value verbatim
+  }
+}
+
+/**
+ * Log the resolved, non-secret Omada configuration once per process and
+ * warn about values that are missing or still set to the .env.example
+ * placeholders — a silent placeholder is the classic cause of a captive
+ * loop (every extPortal/auth call misses the intended controller/site).
+ *
+ * Never prints OMADA_PORTAL_OPERATOR_PASSWORD or any session token.
+ *
+ * @param {boolean} [force]  Re-log even if already logged this process
+ *                           (used by diagnostics/tests).
+ */
+function logResolvedConfig(force) {
+  if (configLogged && !force) return;
+  configLogged = true;
+
+  console.log(
+    '[omada] resolved config: mock=' + MOCK_MODE +
+    ' base=' + maskHost(BASE_URL) +
+    ' omadacId=' + (OMADAC_ID || '(unset)') +
+    ' site=' + SITE +
+    ' siteFromEnv=' + (process.env.OMADA_SITE ? 'yes' : 'NO (defaulted to "' + SITE + '")') +
+    ' timeUnit=' + OMADA_TIME_UNIT +
+    ' timeout=' + TIMEOUT + 'ms' +
+    ' tlsRejectUnauthorized=' + TLS_REJECT +
+    ' operator=' + (OPERATOR_NAME || '(unset)')
+  );
+
+  if (MOCK_MODE) {
+    console.warn(
+      '[omada] MOCK MODE — no extPortal/auth call will reach the controller' +
+      (BASE_URL ? ' (OMADA_MOCK=true)' : ' (OMADA_BASE_URL is unset)')
+    );
+    return;
+  }
+
+  const problems = [];
+  if (!OMADAC_ID) {
+    problems.push('OMADA_OMADAC_ID is unset — the request path cannot resolve a controller');
+  }
+  if (!process.env.OMADA_SITE) {
+    problems.push("OMADA_SITE is unset — defaulting to '" + SITE +
+      "'; set it to the controller's EXACT site name if the guest SSID lives on another site");
+  }
+  if (!OPERATOR_NAME || !OPERATOR_PASSWORD) {
+    problems.push('OMADA_PORTAL_OPERATOR_NAME/PASSWORD unset — hotspot login will fail');
+  }
+  if (/example\.com/i.test(BASE_URL) || /your-/i.test(OMADAC_ID)) {
+    problems.push('a value is still the .env.example placeholder (base=' +
+      maskHost(BASE_URL) + ' omadacId=' + (OMADAC_ID || '(unset)') + ')');
+  }
+  if (TLS_REJECT) {
+    problems.push('OMADA_TLS_REJECT=true — a self-signed OC200 certificate will fail the TLS handshake');
+  }
+
+  if (problems.length) {
+    console.error('[omada] CONFIG PROBLEMS (' + problems.length + ') — extPortal/auth will likely fail:');
+    problems.forEach((p) => console.error('[omada]   - ' + p));
+  } else {
+    console.log('[omada] config looks complete');
+  }
+}
+
+/**
+ * Log the exact target of an outgoing controller request — the resolved
+ * path (which embeds OMADAC_ID) and the `site` value actually placed in the
+ * request body — so a Render log line shows what the controller received.
+ *
+ * The request BODY is never printed: /hotspot/login carries a password.
+ *
+ * @param {string} method
+ * @param {string} path
+ * @param {string} body
+ * @param {Object} [opts]
+ */
+function logControllerRequest(method, path, body, opts) {
+  let site = '(none in body)';
+  try {
+    const parsed = body ? JSON.parse(body) : null;
+    if (parsed && parsed.site !== undefined && parsed.site !== null) {
+      site = String(parsed.site);
+    }
+  } catch (_) { /* non-JSON body — nothing to report */ }
+
+  console.log(
+    '[omada] → ' + method + ' ' + maskHost(BASE_URL) + path +
+    ' site=' + site +
+    ' omadacId=' + (OMADAC_ID || '(unset)') +
+    (opts && opts.skipAuth ? ' (login — credentials redacted)' : '')
+  );
+}
+
+// ================================================================
 // Internal: HTTP request to Omada controller (session-aware)
 // ================================================================
 function omadaRequest(path, method, body, opts) {
@@ -507,6 +645,10 @@ function omadaRequest(path, method, body, opts) {
       rejectUnauthorized: TLS_REJECT,
       timeout: TIMEOUT,
     };
+
+    // Echo the exact resolved target of every controller call (path + site +
+    // OMADAC_ID) into the logs, so the Render output shows what was sent.
+    logControllerRequest(method, path, body, opts);
 
     // Attach controller session (cookie) and CSRF token when present.
     // Login itself (opts.skipAuth) carries no session credentials.
@@ -593,11 +735,15 @@ module.exports = {
   authenticateClient,
   unauthenticateClient,
   queryClientStatus,
+  logResolvedConfig,
   // Exposed for testing
   _internal: {
     minutesToTime,
     operatorLogin,
     invalidateSession,
+    logResolvedConfig,
+    logControllerRequest,
+    maskHost,
     MOCK_MODE,
     BASE_URL,
     OMADAC_ID,

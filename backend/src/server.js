@@ -23,6 +23,7 @@ const sessionRoutes = require('./routes/session');
 const adminRoutes = require('./routes/admin');
 const webhookRoutes = require('./routes/webhook');
 const paymentRoutes = require('./routes/payment');
+const omadaService = require('./services/omada');
 const { startExpirationWorker } = require('./services/session');
 const { fixMissingColumns } = require('./db/migrate_fix');
 const { run: runVoucherRefMigration } = require('./db/migrate_add_voucher_ref');
@@ -202,6 +203,16 @@ const startup = async () => {
     await runVoucherRefMigration();
   } catch (err) {
     console.error('[startup] Column migration failed:', err.message);
+  }
+
+  // Echo the resolved Omada target configuration (base, OMADAC id, SITE, TLS)
+  // so the Render logs show exactly which controller + site this backend will
+  // call. A captive loop is usually a mismatch between this line and the
+  // controller's own Site / API settings.
+  try {
+    omadaService.logResolvedConfig();
+  } catch (err) {
+    console.error('[startup] Omada config logging failed:', err.message);
   }
 
   app.listen(PORT, () => {
