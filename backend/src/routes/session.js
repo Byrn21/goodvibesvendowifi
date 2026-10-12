@@ -112,7 +112,11 @@ router.get('/status', async (req, res, next) => {
   } catch (err) {
     // Log real database/processing errors server-side — never let them
     // masquerade as a "session not found" response on the client.
-    console.error('[session/status] Error while fetching session ' + sessionId + ':', err.message, err.stack);
+    console.error(
+      '[session/status] Error while fetching session ' + sessionId + ': ' +
+      String((err && err.message) || '(no message)') + ' ' +
+      String((err && err.stack) || '(no stack)')
+    );
     next(err);
   }
 });

@@ -184,8 +184,14 @@ app.use((req, res) => {
 app.use((err, req, res, _next) => {
   const status = err.status || err.statusCode || 500;
   const code = err.code || 'SERVER_ERROR';
-  // Log full error server-side; return generic message to client
-  console.error('[' + req.method + ' ' + req.path + ']', err.message, err.stack);
+  // Log full error server-side; return generic message to client.
+  // Primitive-only: coerce to strings so a non-Error throw (or an object with
+  // a circular `stack`/`message`) can never reach V8's serializer.
+  console.error(
+    '[' + req.method + ' ' + req.path + '] ' +
+    String((err && err.message) || '(no message)') + ' ' +
+    String((err && err.stack) || '(no stack)')
+  );
             res.status(status).json({
     success: false,
     error: NODE_ENV === 'production' ? 'An internal error occurred.' : err.message,

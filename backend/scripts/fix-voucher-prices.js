@@ -65,4 +65,9 @@ const { centavosToPesoString } = require('../src/utils/price');
     console.log('\nUpdated ' + targets.length + ' voucher price(s).');
   }
   await closeDb();
-})().catch(e => { console.error(e); process.exit(1); });
+})().catch(e => {
+  // Primitive-only: never hand a raw Error object to console (it can carry a
+  // large, circular graph that V8 then tries to serialize).
+  console.error('[fix-voucher-prices] FAILED: ' + (e && e.stack ? e.stack : String(e)));
+  process.exit(1);
+});
