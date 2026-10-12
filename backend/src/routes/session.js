@@ -16,6 +16,7 @@ const {
   expireSession,
   isSessionActive,
   getPauseRemaining,
+  isPausableVoucherType,
 } = require('../services/session');
 const omadaService = require('../services/omada');
 const { getDb } = require('../db/client');
@@ -102,9 +103,9 @@ router.get('/status', async (req, res, next) => {
       voucherType: session.voucherType || 'standard',
       voucherCode: maskVoucherCode(session.voucherUsed),
       totalSeconds: (session.totalDurationSeconds || (session.duration || 60) * 60),
-      canPause:  session.state === 'active' && remainingSeconds > 60 && session.voucherType === 'premium',
+      canPause:  session.state === 'active' && remainingSeconds > 60 && isPausableVoucherType(session.voucherType),
       canResume: session.state === 'paused',
-      pauseValidRemainingSeconds: session.state === 'paused' && session.voucherType === 'premium'
+      pauseValidRemainingSeconds: session.state === 'paused' && isPausableVoucherType(session.voucherType)
         ? await getPauseRemaining(sessionId)
         : null,
     });
@@ -136,7 +137,9 @@ router.post('/pause', async (req, res, next) => {
         if (session.state !== 'active') {
       return res.status(409).json({ success: false, error: 'Session is not active.', code: 'INVALID_STATE' });
     }
-    if (session.voucherType !== 'premium') {
+    // Plan-tier gate: Standard (and any other non-pausable tier) is rejected
+    // here even if the client bypasses the UI and POSTs directly.
+    if (!isPausableVoucherType(session.voucherType)) {
       return res.status(403).json({ success: false, error: 'Pause is only available for Premium sessions.', code: 'PREMIUM_ONLY' });
     }
 
@@ -170,7 +173,7 @@ router.post('/resume', async (req, res, next) => {
         if (session.state !== 'paused') {
       return res.status(409).json({ success: false, error: 'Session is not paused.', code: 'INVALID_STATE' });
     }
-    if (session.voucherType !== 'premium') {
+    if (!isPausableVoucherType(session.voucherType)) {
       return res.status(403).json({ success: false, error: 'Resume is only available for Premium sessions.', code: 'PREMIUM_ONLY' });
     }
 

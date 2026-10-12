@@ -150,6 +150,24 @@ describe('Session State Machine', () => {
     await expect(sessionService.pauseSession('nonexistent')).rejects.toThrow('Session not found');
   });
 
+  test('pause rejects a Standard plan with PREMIUM_ONLY and leaves it active', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_std_pause',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      duration: 60,
+      voucherType: 'standard',
+      totalDurationSeconds: 3600,
+    });
+
+    await expect(sessionService.pauseSession('sess_std_pause')).rejects.toMatchObject({
+      code: 'PREMIUM_ONLY',
+    });
+
+    // The rejected attempt must not mutate the session.
+    const after = await sessionService.getSession('sess_std_pause');
+    expect(after.state).toBe('active');
+  });
+
   test('resume rejects non-paused session', async () => {
     await sessionService.recordSession({
       sessionId: 'sess_notpaused',

@@ -680,6 +680,11 @@
       var POLL_INTERVAL = CONFIG.statusPollingInterval || 30000;
       var SESSION_ID = '';
 
+      // Plan tiers allowed to pause/resume. Mirrors the backend policy
+      // (services/session.js → isPausableVoucherType, which routes/session.js
+      // returns as 403 PREMIUM_ONLY for any other tier). Keep the two in sync.
+      var PAUSABLE_PLANS = ['premium'];
+
       // ---- Ring circumference for the SVG circle ----
       var RING_R = 70;
       var RING_CIRC = 2 * Math.PI * RING_R; // ~439.8
@@ -864,9 +869,13 @@
         var state = data.state || 'unknown';
         SESSION_ID = data.sessionId;
 
+        // Single source for the "Plan" value shown in the details table.
+        // Pause eligibility below is derived from the very same plan value.
+        var planLabel = data.voucherType === 'premium' ? 'Premium' : 'Standard';
+        var pausablePlan = PAUSABLE_PLANS.indexOf(data.voucherType) !== -1;
+
         if (els.detailVoucher) els.detailVoucher.textContent = data.voucherCode || '—';
-        if (els.detailPlan)    els.detailPlan.textContent =
-          data.voucherType === 'premium' ? 'Premium' : 'Standard';
+        if (els.detailPlan)    els.detailPlan.textContent    = planLabel;
         if (els.detailSid)    els.detailSid.textContent    = data.sessionId || '—';
         if (els.detailStart) els.detailStart.textContent  = formatDate(data.startedAt);
         if (els.detailExpiry) els.detailExpiry.textContent = formatDate(data.expiresAt);
@@ -878,24 +887,28 @@
           updateCountdownDisplay(localSeconds);
           startCountdownTick();
 
-          // The Pause control lives in the timer section and stays visible.
-          // Whether a session may actually be paused is the backend's call —
-          // it returns canPause and rejects non-premium sessions with a
-          // readable message, which the UI surfaces instead of hiding the
-          // button and leaving the "Tap Pause" hint unexplained.
-          // CONFIG.showPauseResume is honoured only as an explicit opt-out;
-          // when the config is missing the control stays visible (the old
-          // code required a truthy flag, which hid it whenever config.js had
-          // not been loaded on this page).
+          // Pause is a Premium-tier feature. The button AND its
+          // "Tap Pause to freeze your time" hint are shown only when the
+          // session's plan (the same value rendered under "Plan" above) is
+          // pausable. Standard plans get neither element. The backend
+          // enforces the identical rule with 403 PREMIUM_ONLY, so hiding the
+          // UI is convenience, not the security boundary.
+          // CONFIG.showPauseResume === false still force-hides the control
+          // for the whole deployment.
+          var showPause = pausablePlan && CONFIG.showPauseResume !== false;
           if (els.controls) {
-            if (CONFIG.showPauseResume === false) {
-              els.controls.classList.add('hidden');
-            } else {
-              els.controls.classList.remove('hidden');
-            }
+            if (showPause) els.controls.classList.remove('hidden');
+            else els.controls.classList.add('hidden');
           }
           if (els.btnPause) els.btnPause.disabled = false;
-          if (els.subtitle) els.subtitle.textContent = 'Tap Pause to freeze your time';
+          if (els.subtitle) {
+            if (showPause) {
+              els.subtitle.textContent = 'Tap Pause to freeze your time';
+              els.subtitle.classList.remove('hidden');
+            } else {
+              els.subtitle.classList.add('hidden');
+            }
+          }
         } else if (state === 'paused') {
           showSection('paused');
           clearInterval(countdownTimer);

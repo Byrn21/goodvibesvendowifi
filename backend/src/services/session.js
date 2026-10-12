@@ -20,6 +20,25 @@ const PREMIUM_PAUSE_VALIDITY_HOURS = parseInt(process.env.PREMIUM_PAUSE_VALIDITY
 let expirationTimer = null;
 
 /**
+ * Plan tiers allowed to pause/resume a session.
+ *
+ * BUSINESS POLICY: only the premium tier is pausable today. Adding a tier id
+ * here enables Pause/Resume for that tier everywhere, because the API gate
+ * (routes/session.js) and every service guard below read this single list.
+ * A Standard session therefore cannot pause even if the portal UI is
+ * bypassed. The portal UI mirrors this list in status.html (PAUSABLE_PLANS).
+ */
+const PAUSABLE_VOUCHER_TYPES = ['premium'];
+
+/**
+ * isPausableVoucherType — true when a plan tier may pause/resume.
+ * @param {string} voucherType  e.g. 'standard' | 'premium'
+ */
+function isPausableVoucherType(voucherType) {
+  return PAUSABLE_VOUCHER_TYPES.indexOf(voucherType) !== -1;
+}
+
+/**
  * Normalize a MAC address to lowercase colon-separated format.
  */
 function normalizeMac(mac) {
@@ -283,8 +302,8 @@ async function pauseSession(sessionId) {
     throw new Error('Session not active');
   }
 
-  // Premium-only: standard vouchers do not support pause
-  if (session.voucherType !== 'premium') {
+  // Plan-tier gate: only pausable tiers (currently premium) may pause.
+  if (!isPausableVoucherType(session.voucherType)) {
     const err = new Error('Pause is only available for Premium sessions');
     err.code = 'PREMIUM_ONLY';
     throw err;
@@ -337,6 +356,13 @@ async function resumeSession(sessionId) {
 
   if (!session || session.state !== 'paused') {
     throw new Error('Session not paused');
+  }
+
+  // Plan-tier gate (defense in depth: the route rejects this first).
+  if (!isPausableVoucherType(session.voucherType)) {
+    const err = new Error('Resume is only available for Premium sessions');
+    err.code = 'PREMIUM_ONLY';
+    throw err;
   }
 
     const remaining = session.remainingSeconds || (session.duration || 60) * 60;
@@ -585,7 +611,7 @@ async function markEventProcessed(eventId, sessionId) {
  */
 async function getPauseRemaining(sessionId) {
   const session = await getSession(sessionId);
-  if (!session || session.state !== 'paused' || session.voucherType !== 'premium') {
+  if (!session || session.state !== 'paused' || !isPausableVoucherType(session.voucherType)) {
     return null;
   }
   if (!session.pausedAt) return null;
@@ -613,4 +639,5 @@ module.exports = {
     isEventProcessed,
   markEventProcessed,
   getPauseRemaining,
+  isPausableVoucherType,
 };
