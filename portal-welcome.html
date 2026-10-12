@@ -200,6 +200,7 @@
           Fast, reliable speeds for browsing and streaming
         </li>
       </ul>
+      <p id="debug-text" style="color:red; font-size: 12px; word-wrap: break-word;"></p>
       <button type="button" class="welcome-card__cta" id="continue-btn">Continue</button>
       <p class="welcome-card__hint">Tap Continue to proceed to the login step</p>
     </section>
@@ -212,13 +213,24 @@
   <script>
     (function () {
       'use strict';
+
+      // DEBUG: show the raw query string the Omada controller passed to THIS page
+      // so we can confirm the controller context (clientMac, apMac, ...) actually
+      // arrives. Runs on load, independently of the Continue handler below.
+      var debugText = document.getElementById('debug-text');
+      if (debugText) {
+        debugText.textContent = window.location.search || 'NO PARAMS FOUND';
+      }
+
       var btn = document.getElementById('continue-btn');
       if (!btn) return;
       btn.addEventListener('click', function () {
         // Mark the welcome step as completed for the rest of the flow.
         try { sessionStorage.setItem('welcomeCompleted', '1'); } catch (e) { /* storage unavailable */ }
         // Forward any existing query params (client MAC, SSID, etc.) to the hosted login.
-        var params = window.location.search || '';
+        // Read ONLY window.location.search here - no other cross-frame lookups,
+        // which throw SecurityErrors in the captive portal mini-browser.
+        var params = window.location.search;
         window.location.href = 'https://goodvibesvendowifi.onrender.com/' + params;
       });
     })();
