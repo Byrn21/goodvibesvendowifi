@@ -333,6 +333,9 @@ async function resumeSession(sessionId) {
       radioId: session.radioId || 0,
       durationMinutes: Math.ceil(remaining / 60),
       sessionId,
+      // Re-send the same voucher the session was opened with, so every
+      // extPortal/auth call carries the `code` field identically.
+      voucherCode: session.voucherUsed || '',
     });
   } catch (err) {
     console.error('[resumeSession] Omada auth failed:', err.message);
@@ -482,6 +485,9 @@ async function activatePaidSession(sessionId, eventId, amount, webhookVoucherTyp
     radioId:   session.radioId || 0,
     durationMinutes: duration,
     sessionId: sessionId,
+    // Payment-activated sessions may have no voucher (webhook flow); the
+    // field is then omitted rather than sent empty.
+    voucherCode: session.voucherUsed || '',
   });
 
     await db.run(`

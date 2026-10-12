@@ -95,6 +95,27 @@ describe('POST /api/auth — Omada context passthrough', () => {
     expect(ctx.clientIp).toBe('192.168.1.50');
     expect(ctx.ssidName).toBe('GuestWiFi');
     expect(ctx.radioId).toBe(1);                      // taken from the URL, not defaulted to 0
+    // The submitted voucher reaches the service so it can travel with the
+    // extPortal/auth body alongside authType=4.
+    expect(ctx.voucherCode).toBe('123456');
+  });
+
+  test('forwards the normalized voucher even when the submitter pads it', async () => {
+    const spy = jest
+      .spyOn(omada, 'authenticateClient')
+      .mockResolvedValue({ success: true, raw: {} });
+
+    const res = await request(app).post('/api/auth').send({
+      ...BASE,
+      voucher: ' 123-456 ',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      apMac: 'aa:aa:aa:aa:aa:aa',
+      ssidName: 'GuestWiFi',
+      radioId: '0',
+    });
+
+    expect(res.status).toBe(200);
+    expect(spy.mock.calls[0][0].voucherCode).toBe('123456');
   });
 
   test('forwards Gateway context (gatewayMac, vid) for wired clients', async () => {

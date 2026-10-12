@@ -16,7 +16,15 @@
  *
  *   2. Client authorization (payment-triggered):
  *        POST /{OMADAC_ID}/api/v2/hotspot/extPortal/auth
- *        body: { clientMac, apMac, ssidName, radioId, authType: 4, time }
+ *        body: { clientMac, apMac, ssidName, radioId, authType: 4, time,
+ *                site, code }
+ *      `code` carries the guest's voucher. NOTE: the voucher is NOT part of
+ *      TP-Link's documented extPortal/auth contract (the Portal — this
+ *      backend — is the component that verifies the voucher; the controller
+ *      only ever authorizes/expires a MAC). It is sent deliberately, per
+ *      operator request, alongside authType=4. If a firmware rejects the
+ *      unknown field, remove it here — every authorization fails closed
+ *      (502) until then.
  *      The `time` unit depends on controller firmware. OMADA_TIME_UNIT
  *      (config/index.js) selects the scaling; default 'ms' matches the
  *      two cross-verified working implementations (FAQ 3231 prose alone
@@ -186,6 +194,13 @@ async function authenticateClient(ctx) {
     time: minutesToTime(ctx.durationMinutes),
     site: SITE,
   };
+  // The guest's voucher travels with the authorization request, next to
+  // authType=4. Sent whenever the caller supplies one (the /api/auth route
+  // and session re-auth both do); omitted only when there is genuinely no
+  // voucher — e.g. a payment webhook session that never had one.
+  if (ctx.voucherCode !== undefined && ctx.voucherCode !== null && String(ctx.voucherCode).trim() !== '') {
+    authBody.code = String(ctx.voucherCode).trim();
+  }
   if (isGateway) {
     authBody.gatewayMac = ctx.gatewayMac;
     if (ctx.vid !== undefined && ctx.vid !== null && ctx.vid !== '') {
@@ -383,7 +398,7 @@ async function queryClientStatus(ctx) {
  */
 async function timeOneFallback(ctx) {
   const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/hotspot/extPortal/auth';
-  const body = JSON.stringify({
+  const fallbackBody = {
     clientMac: ctx.clientMac,
     apMac: ctx.apMac || '',
     ssidName: ctx.ssidName || '',
@@ -391,7 +406,13 @@ async function timeOneFallback(ctx) {
     authType: 4,
     time: 1,
     site: SITE,
-  });
+  };
+  // Mirror authenticateClient: the same voucher field travels with the
+  // fallback re-authorization, so both extPortal/auth calls look alike.
+  if (ctx.voucherCode !== undefined && ctx.voucherCode !== null && String(ctx.voucherCode).trim() !== '') {
+    fallbackBody.code = String(ctx.voucherCode).trim();
+  }
+  const body = JSON.stringify(fallbackBody);
 
   try {
     const response = await withSession(() => omadaRequest(path, 'POST', body));
@@ -476,8 +497,24 @@ const NETWORK_ERROR_HINTS = {
  */
 const LOGGABLE_BODY_FIELDS = [
   'clientMac', 'clientIp', 'apMac', 'ssidName', 'radioId',
-  'gatewayMac', 'vid', 'authType', 'time', 'site',
+  'gatewayMac', 'vid', 'authType', 'time', 'site', 'code',
 ];
+
+/**
+ * Mask a voucher code for logging: `••••12` (last two characters, matching
+ * the admin UI's maskVoucherCode). The sent-body line still proves the field
+ * was present, without writing a still-usable code into the Render logs —
+ * on a FAILED authorization the voucher has deliberately NOT been consumed.
+ *
+ * @param {string|number} code
+ * @returns {string}
+ */
+function maskCode(code) {
+  const cleaned = String(code === undefined || code === null ? '' : code).replace(/\s+/g, '');
+  if (!cleaned) return '(empty)';
+  if (cleaned.length < 2) return '••••••';
+  return '••••' + cleaned.slice(-2);
+}
 
 /**
  * Summarize an outgoing Omada request body for the logs: the connection type
@@ -507,9 +544,10 @@ function summarizeBody(body) {
   for (const field of LOGGABLE_BODY_FIELDS) {
     // `site` is returned separately so callers can print `site=…` once.
     if (field === 'site') continue;
-    if (Object.prototype.hasOwnProperty.call(parsed, field)) {
-      parts.push(field + '=' + parsed[field]);
-    }
+    if (!Object.prototype.hasOwnProperty.call(parsed, field)) continue;
+    // The voucher is a live credential until the authorization succeeds —
+    // log only its masked form.
+    parts.push(field + '=' + (field === 'code' ? maskCode(parsed[field]) : parsed[field]));
   }
   const redacted = Object.keys(parsed).filter((k) => !LOGGABLE_BODY_FIELDS.includes(k));
   const connection = parsed.gatewayMac
@@ -812,6 +850,7 @@ module.exports = {
     logControllerRequest,
     logAuthFailure,
     summarizeBody,
+    maskCode,
     maskHost,
     MOCK_MODE,
     BASE_URL,

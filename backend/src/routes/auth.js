@@ -141,6 +141,9 @@ router.post('/', async (req, res, next) => {
         radioId,
         durationMinutes: duration,
         sessionId,
+        // The guest's voucher travels with the authorization request so the
+        // controller receives it alongside authType=4 (see services/omada.js).
+        voucherCode: normalizedVoucher,
       });
     } catch (omadaErr) {
       console.error(

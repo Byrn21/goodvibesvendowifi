@@ -299,6 +299,88 @@ describe('authenticateClient (extPortal/auth)', () => {
       omada.authenticateClient({ clientMac: 'AA:BB:CC:DD:EE:FF', durationMinutes: 15 })
     ).rejects.toMatchObject({ code: 'OMADA_MISSING_FIELD' });
   });
+
+  test('sends the voucher as `code` alongside authType=4 (EAP)', async () => {
+    let authReq = null;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/extPortal/auth')) {
+        authReq = req;
+        respondJson(req, cb, 200, { errorCode: 0 });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+    });
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        apMac: 'AA:AA:AA:AA:AA:AA',
+        ssidName: 'GuestWiFi',
+        radioId: 0,
+        durationMinutes: 30,
+        voucherCode: '654321',
+      });
+      const authBody = JSON.parse(authReq.written[0] || '{}');
+      expect(authBody.code).toBe('654321');
+      expect(authBody.authType).toBe(4);
+      // unchanged contract fields survive alongside the added one
+      expect(authBody.clientMac).toBe('AA:BB:CC:DD:EE:FF');
+      expect(authBody.apMac).toBe('AA:AA:AA:AA:AA:AA');
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('sends the voucher as `code` for Gateway clients too', async () => {
+    let authReq = null;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/extPortal/auth')) {
+        authReq = req;
+        respondJson(req, cb, 200, { errorCode: 0 });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+    });
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        gatewayMac: 'GG:GG:GG:GG:GG:GG',
+        vid: 20,
+        durationMinutes: 15,
+        voucherCode: '  654321  ',
+      });
+      const authBody = JSON.parse(authReq.written[0] || '{}');
+      expect(authBody.code).toBe('654321'); // trimmed
+      expect(authBody.gatewayMac).toBe('GG:GG:GG:GG:GG:GG');
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('omits `code` only when no voucher was supplied', async () => {
+    let authReq = null;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/extPortal/auth')) {
+        authReq = req;
+        respondJson(req, cb, 200, { errorCode: 0 });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+    });
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        apMac: 'AA:AA:AA:AA:AA:AA',
+        ssidName: 'GuestWiFi',
+        radioId: 0,
+        durationMinutes: 30,
+        voucherCode: '   ',
+      });
+      const authBody = JSON.parse(authReq.written[0] || '{}');
+      expect(authBody.code).toBeUndefined();
+    } finally {
+      uninstall();
+    }
+  });
 });
 
 // ================================================================
@@ -560,6 +642,65 @@ describe('Omada site / OMADAC id logging', () => {
     } finally {
       uninstall();
       logSpy.mockRestore();
+    }
+  });
+
+  test('time=1 fallback re-sends the voucher alongside authType=4', async () => {
+    // The handler runs BEFORE req.write(), so the body is parsed after the
+    // await completes (same pattern as the other body-shape tests).
+    let fallbackReq = null;
+    let i = 0;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      i += 1;
+      if (i === 1) {
+        respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+      } else if (i === 2) {
+        respondJson(req, cb, 200, { errorCode: 0 });       // unauth accepted
+      } else if (i === 3) {
+        respondJson(req, cb, 200, { errorCode: 0, result: { authorized: true } }); // still authorized
+      } else if (i === 4) {
+        fallbackReq = req;                                  // time=1 fallback
+        respondJson(req, cb, 200, { errorCode: 0 });
+      } else {
+        respondJson(req, cb, 200, { errorCode: 0, result: { authorized: false } });
+      }
+    });
+    try {
+      const result = await omada.unauthenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF', apMac: 'AA:AA:AA:AA:AA:AA', ssidName: 'S', radioId: 0,
+        voucherCode: '654321',
+      });
+      expect(result).toMatchObject({ success: true, verified: true, path: 'time=1' });
+      expect(fallbackReq).not.toBeNull();
+      const fallbackBody = JSON.parse(fallbackReq.written[0] || '{}');
+      expect(fallbackBody.time).toBe(1);
+      expect(fallbackBody.authType).toBe(4);
+      expect(fallbackBody.code).toBe('654321');
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('the sent-body log masks the voucher instead of printing it raw', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const err = new Error('connect ECONNREFUSED');
+      err.code = 'ECONNREFUSED';
+      _internal.logAuthFailure(
+        'extPortal/auth request',
+        err,
+        { clientMac: 'AA:BB:CC:DD:EE:FF' },
+        '/TESTOMADAC123/api/v2/hotspot/extPortal/auth',
+        JSON.stringify({
+          clientMac: 'AA:BB:CC:DD:EE:FF', apMac: 'AA:AA:AA:AA:AA:AA', ssidName: 'S',
+          radioId: 0, authType: 4, time: 1800000, site: 'Default', code: '654321',
+        })
+      );
+      const sent = errSpy.mock.calls.map((c) => c.join(' ')).find((l) => l.includes('sent body:'));
+      expect(sent).toContain('code=••••21');
+      expect(sent).not.toContain('654321');
+    } finally {
+      errSpy.mockRestore();
     }
   });
 
