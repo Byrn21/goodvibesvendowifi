@@ -15,22 +15,26 @@
  *      attached to every subsequent request.
  *
  *   2. Client authorization (payment-triggered):
- *        POST /{OMADAC_ID}/api/v2/hotspot/extPortal/auth
- *        body: { clientMac, clientIp, apMac, ssidName, radioId, authType: 4,
- *                time, site }
- *      The body carries EXACTLY the fields TP-Link documents for the
- *      external portal server (FAQ 2907 for v4.1.5–4.4.6, FAQ 3231 for
- *      v5.0.15–6.2.0, and the v6.2.10+ guide): authType is 4. The guest's
- *      voucher is deliberately NOT sent to the controller — in external
- *      portal mode the controller never consults its own voucher database;
- *      this backend (the Portal) is the component that verifies the
- *      voucher, and the controller only authorizes the MAC. Adding a `code`
- *      field is outside the documented contract and has been observed to
- *      make some firmware reject the authorization (silent MAC-auth
- *      failure → redirect loop, while the local voucher stays valid).
+ *        POST /{OMADAC_ID}/portal/auth
+ *        body: { clientMac, clientIp, apMac, ssidName, radioId,
+ *                authType: 3, voucherCode, time, site }
+ *      This is the controller's OWN guest-portal authentication endpoint
+ *      (TP-Link FAQ 2950 documents /portal/auth), NOT the external-portal
+ *      management API. The guest SSID is configured for native Voucher
+ *      authorization, which the Hotspot engine owns: only a native
+ *      /portal/auth submission makes it consume the voucher (marking it
+ *      "Used" in the dashboard) and provision the client's MAC firewall
+ *      rule on the EAP/Gateway. The external-portal
+ *      /api/v2/hotspot/extPortal/auth (authType 4) is silently dropped by
+ *      the hardware because it bypasses the Hotspot Manager entirely.
+ *      Per FAQ 2950 the Voucher method is authType 3 and the code travels
+ *      in `voucherCode`; authType 11 is only the "Hotspot" container value
+ *      returned by /portal/getPortalPageSetting, not a /portal/auth submit
+ *      type. `time` is retained for firmware compatibility — a native
+ *      voucher auth derives the client's expiry from the voucher itself.
  *      The `time` unit depends on controller firmware. OMADA_TIME_UNIT
  *      (config/index.js) selects the scaling; default 'ms' matches the
- *      v6.2.10+ guide and the cross-verified working implementations.
+ *      cross-verified working implementations.
  *
  *   3. Client de-authorization (pause / expiration):
  *      try POST /{OMADAC_ID}/api/v2/hotspot/extPortal/unauth first
@@ -79,8 +83,8 @@ let sessionCookie = null;
 let csrfToken = null;
 
 /**
- * Convert a duration in minutes to the `time` value expected by
- * /hotspot/extPortal/auth, scaled per OMADA_TIME_UNIT.
+ * Convert a duration in minutes to the `time` value sent with the
+ * guest-portal voucher authorization, scaled per OMADA_TIME_UNIT.
  *
  * @param {number} minutes
  * @returns {number} time value in the configured unit
@@ -143,8 +147,8 @@ async function ensureSession() {
 }
 
 /**
- * Authenticate a client on the Omada controller via the hotspot
- * external portal API (payment-triggered authorization).
+ * Authenticate a client on the Omada controller via its native guest
+ * portal API (payment-triggered voucher authorization).
  *
  * @param {Object} ctx
  * @param {string} ctx.clientMac        Client MAC (normalized, required)
@@ -168,11 +172,10 @@ async function authenticateClient(ctx) {
     throw configError('OMADA_OMADAC_ID is not configured');
   }
 
-  // Fail loud BEFORE contacting the controller. Omada's extPortal/auth
-  // contract is connection-type specific (TP-Link "API and Code Samples
-  // for External Portal Server", Controller v6.2.10):
-  //   EAP     (wireless): clientMac, clientIp, apMac, ssidName, radioId, time, authType
-  //   Gateway (wired)   : clientMac, clientIp, gatewayMac, vid, time, authType
+  // Fail loud BEFORE contacting the controller. The guest-portal auth
+  // contract is connection-type specific (TP-Link FAQ 2950):
+  //   EAP     (wireless): clientMac, clientIp, apMac, ssidName, radioId, authType, voucherCode
+  //   Gateway (wired)   : clientMac, clientIp, gatewayMac, vid, authType, voucherCode
   // Callers must never send an incomplete context — the voucher route reads
   // it from the portal URL and the webhook guarantees it via MISSING_PORTAL_CONTEXT.
   if (!ctx || !ctx.clientMac) {
@@ -184,24 +187,27 @@ async function authenticateClient(ctx) {
   }
 
   const radioId = Number.isInteger(ctx.radioId) ? ctx.radioId : parseInt(ctx.radioId, 10) || 0;
-  const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/hotspot/extPortal/auth';
+  const path = '/' + encodeURIComponent(OMADAC_ID) + '/portal/auth';
 
   // Forward the SAME connection parameters the controller put in the redirect
   // URL. clientIp is required in BOTH shapes; EAP adds apMac/ssidName/radioId,
-  // Gateway adds gatewayMac/vid. `time` is milliseconds and authType is 4.
+  // Gateway adds gatewayMac/vid. `time` is retained for firmware compat.
   const authBody = {
     clientMac: ctx.clientMac,
     clientIp: ctx.clientIp || '',
-    authType: 4, // hotspot auth type (cross-verified across implementations)
+    authType: 3, // native guest-portal Voucher method (TP-Link FAQ 2950)
     time: minutesToTime(ctx.durationMinutes),
     site: SITE,
   };
-  // NOTE: ctx.voucherCode is intentionally NOT placed in this body. In
-  // external-portal mode the controller only authorizes a MAC and never
-  // validates vouchers, and `code` is not part of TP-Link's documented
-  // extPortal/auth contract — an unknown field can make some firmware
-  // reject the whole authorization. The voucher is still consumed locally
-  // (routes/auth.js); it simply never reaches the controller.
+  // Native Voucher authorization: the code MUST reach the controller so its
+  // Hotspot engine can consume the voucher (mark it "Used") and provision the
+  // client's MAC firewall rule. `voucherCode` is the field /portal/auth
+  // documents for authType 3. Whitespace is stripped so a padded submission
+  // cannot miss the controller's own voucher lookup.
+  const voucherCode = String(
+    ctx.voucherCode === undefined || ctx.voucherCode === null ? '' : ctx.voucherCode
+  ).replace(/\s+/g, '');
+  if (voucherCode) authBody.voucherCode = voucherCode;
   if (isGateway) {
     authBody.gatewayMac = ctx.gatewayMac;
     if (ctx.vid !== undefined && ctx.vid !== null && ctx.vid !== '') {
@@ -233,7 +239,7 @@ async function authenticateClient(ctx) {
     // Network / TLS / timeout — log the EXACT reason for the Render logs,
     // including the body that was sent (connection type / site / time), then
     // rethrow so the route fails closed without consuming the voucher.
-    logAuthFailure('extPortal/auth request', netErr, ctx, path, body);
+    logAuthFailure('portal/auth request', netErr, ctx, path, body);
     throw netErr;
   }
 
@@ -253,7 +259,7 @@ async function authenticateClient(ctx) {
       '[omada]   sent body: connection=' + rejectedSummary.connection +
       ' site=' + rejectedSummary.site + ' ' + rejectedSummary.text
     );
-    const err = new Error('Omada extPortal/auth rejected: ' + reason);
+    const err = new Error('Omada portal/auth rejected: ' + reason);
     err.code = 'OMADA_AUTH_REJECTED';
     err.omadaResponse = response.body;
     throw err;
@@ -394,6 +400,12 @@ async function queryClientStatus(ctx) {
  * time=1 fallback: re-authorize the client for one unit of time so the
  * controller's own expiry effectively revokes it shortly after.
  *
+ * NOTE: this is part of the DE-AUTHORIZATION path, not the payment voucher
+ * flow, so it deliberately keeps the management API's extPortal/auth
+ * (authType 4) — it is a MAC re-auth for revocation, not a voucher
+ * submission, and a native /portal/auth voucher call could not express the
+ * time=1 trick. Best-effort only; see unauthenticateClient.
+ *
  * @param {Object} ctx
  * @returns {Promise<boolean>} true if the re-auth was accepted
  */
@@ -408,8 +420,9 @@ async function timeOneFallback(ctx) {
     time: 1,
     site: SITE,
   };
-  // Mirror authenticateClient: the documented body only — no `code` field,
-  // so both extPortal/auth calls look alike (see authenticateClient).
+  // De-auth fallback body: the documented extPortal/auth shape (authType 4),
+  // no voucher — intentionally distinct from the native /portal/auth voucher
+  // authorization in authenticateClient.
   const body = JSON.stringify(fallbackBody);
 
   try {
@@ -495,7 +508,7 @@ const NETWORK_ERROR_HINTS = {
  */
 const LOGGABLE_BODY_FIELDS = [
   'clientMac', 'clientIp', 'apMac', 'ssidName', 'radioId',
-  'gatewayMac', 'vid', 'authType', 'time', 'site', 'code',
+  'gatewayMac', 'vid', 'authType', 'time', 'site', 'code', 'voucherCode',
 ];
 
 /**
@@ -518,7 +531,7 @@ function maskCode(code) {
  * Summarize an outgoing Omada request body for the logs: the connection type
  * the body describes, the site it targets, and the whitelisted field values
  * (clientMac/clientIp/apMac/ssidName/radioId/gatewayMac/vid/authType/time/
- * site). Non-whitelisted keys are replaced by a count, so a login body's
+ * site/code/voucherCode). Non-whitelisted keys are replaced by a count, so a login body's
  * credentials can never be printed.
  *
  * @param {string} body  The JSON string passed to omadaRequest
@@ -545,7 +558,7 @@ function summarizeBody(body) {
     if (!Object.prototype.hasOwnProperty.call(parsed, field)) continue;
     // The voucher is a live credential until the authorization succeeds —
     // log only its masked form.
-    parts.push(field + '=' + (field === 'code' ? maskCode(parsed[field]) : parsed[field]));
+    parts.push(field + '=' + ((field === 'code' || field === 'voucherCode') ? maskCode(parsed[field]) : parsed[field]));
   }
   const redacted = Object.keys(parsed).filter((k) => !LOGGABLE_BODY_FIELDS.includes(k));
   const connection = parsed.gatewayMac
@@ -564,12 +577,12 @@ function summarizeBody(body) {
 }
 
 /**
- * Log the exact failure reason for an extPortal/auth call so it is visible
+ * Log the exact failure reason for a portal/auth call so it is visible
  * in the Render logs: transport code, a mapped cause hint, the body that was
  * SENT (connection type / site / time / extra fields), the controller's
  * response JSON, and the stack.
  *
- * @param {string} stage  Which step failed (e.g. 'extPortal/auth request')
+ * @param {string} stage  Which step failed (e.g. 'portal/auth request')
  * @param {Error}  err    The error thrown by omadaRequest/withSession
  * @param {Object} ctx    The authenticateClient context (for clientMac)
  * @param {string} path   The controller path that was called
@@ -603,7 +616,7 @@ function logAuthFailure(stage, err, ctx, path, body) {
 // ================================================================
 // Diagnostics: resolved configuration + per-request target logging
 // ================================================================
-// A captive loop is almost always a config mismatch: the extPortal/auth
+// A captive loop is almost always a config mismatch: the portal/auth
 // call carries the SITE name in its body and targets the OMADAC_ID in its
 // path, so if either resolves to a value the controller does not know, the
 // authorization silently does nothing. These two logs make the resolved
@@ -633,7 +646,7 @@ function maskHost(url) {
  * Log the resolved, non-secret Omada configuration once per process and
  * warn about values that are missing or still set to the .env.example
  * placeholders — a silent placeholder is the classic cause of a captive
- * loop (every extPortal/auth call misses the intended controller/site).
+ * loop (every portal/auth call misses the intended controller/site).
  *
  * Never prints OMADA_PORTAL_OPERATOR_PASSWORD or any session token.
  *
@@ -658,7 +671,7 @@ function logResolvedConfig(force) {
 
   if (MOCK_MODE) {
     console.warn(
-      '[omada] MOCK MODE — no extPortal/auth call will reach the controller' +
+      '[omada] MOCK MODE — no portal/auth call will reach the controller' +
       (BASE_URL ? ' (OMADA_MOCK=true)' : ' (OMADA_BASE_URL is unset)')
     );
     return;
@@ -684,7 +697,7 @@ function logResolvedConfig(force) {
   }
 
   if (problems.length) {
-    console.error('[omada] CONFIG PROBLEMS (' + problems.length + ') — extPortal/auth will likely fail:');
+    console.error('[omada] CONFIG PROBLEMS (' + problems.length + ') — portal/auth will likely fail:');
     problems.forEach((p) => console.error('[omada]   - ' + p));
   } else {
     console.log('[omada] config looks complete');

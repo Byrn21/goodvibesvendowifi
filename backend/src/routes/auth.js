@@ -156,12 +156,13 @@ router.post('/', async (req, res, next) => {
         durationMinutes: duration,
         sessionId,
         // The guest's voucher travels with the authorization request so the
-        // controller receives it alongside authType=4 (see services/omada.js).
+        // controller's Hotspot engine receives it as voucherCode on the native
+        // /portal/auth submission (authType 3, see services/omada.js).
         voucherCode: normalizedVoucher,
       });
     } catch (omadaErr) {
       console.error(
-        '[auth] Omada extPortal/auth threw for client ' + normalizedMac +
+        '[auth] Omada portal/auth threw for client ' + normalizedMac +
         ' (voucher ' + normalizedVoucher + '): ' +
         (omadaErr && omadaErr.code ? omadaErr.code : 'NO_CODE') +
         ' — ' + (omadaErr && omadaErr.message ? omadaErr.message : String(omadaErr))
@@ -196,11 +197,10 @@ router.post('/', async (req, res, next) => {
     }
 
     // ── Consume the voucher + record the session ATOMICALLY ──
-    // The controller just authorized the client through its external-portal
-    // path (authType 4) — a BYPASS: Omada keeps no record of our voucher, its
-    // voucher list is decoupled from ours, and its response cannot tell us
-    // whether the code was spent. This database is therefore the only source
-    // of truth, and it must move from "voucher active" to "voucher used +
+    // The controller just authorized the client through its native guest
+    // portal (authType 3 + voucherCode), so its Hotspot engine consumes the
+    // voucher and marks it "Used". This database still tracks OUR session
+    // bookkeeping, and it must move from "voucher active" to "voucher used +
     // session recorded" in a SINGLE transaction — if either write landed
     // alone the guest would either lose a still-valid code (voucher burned,
     // no session) or hold a session no row accounts for.
@@ -258,12 +258,11 @@ router.post('/', async (req, res, next) => {
 
     // ── Explicit success log: the Omada response AND the local lock ──
     // `omadaEchoedVoucher` is computed rather than assumed — the controller
-    // answers {"errorCode":0} with no voucher in it, which is the evidence
-    // that the voucher was resolved locally (bypass) and that its voucher list
-    // is decoupled from ours.
+    // answers {"errorCode":0} with no voucher echoed, so this stays false even
+    // though the controller's Hotspot engine now consumes the code natively.
     const omadaRawText = (omadaResult && omadaResult.raw) ? JSON.stringify(omadaResult.raw) : '';
     console.log(
-      '[auth] authorization SUCCESS (controller bypass, voucher resolved locally) —' +
+      '[auth] authorization SUCCESS (native voucher consumed by controller) —' +
       ' client=' + normalizedMac +
       ' session=' + sessionId +
       ' ssid="' + (ssidName || '') + '"' +
