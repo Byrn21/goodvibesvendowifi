@@ -532,6 +532,48 @@ describe('POST /api/admin/vouchers/import — Voucher Import', () => {
     expect(idsFinal).toContain(Math.max(...idsBefore) + 1);
     expect(idsFinal.length).toBe(3);
   });
+
+  test('preserves a leading zero in a CSV Code cell (text "012345" stays "012345")', async () => {
+    const csv = buildCsv(
+      ['ID', 'Code', 'Type', 'Duration', 'Price'],
+      [{ ID: '', Code: '012345', Type: 'standard', Duration: 60, Price: '50.00' }]
+    );
+
+    const res = await request(app)
+      .post('/api/admin/vouchers/import')
+      .set('X-API-Key', VALID_KEY)
+      .attach('file', csv, 'leading-zero.csv');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    const row = await getDb().getOne('SELECT code FROM vouchers WHERE code = ?', ['012345']);
+    expect(row).toBeTruthy();
+    expect(row.code).toBe('012345');
+  });
+
+  test('rebuilds an XLSX Code cell whose leading zero was dropped by numeric storage (12345 -> "012345")', async () => {
+    // A real spreadsheet stores "012345" as the NUMBER 12345, so by the time
+    // the file reaches us the zero is already gone; the padStart failsafe must
+    // restore exactly 6 digits instead of rejecting the import as invalid.
+    const xlsxBuf = buildXlsx(
+      ['ID', 'Code', 'Type', 'Duration', 'Price'],
+      [{ ID: '', Code: 12345, Type: 'standard', Duration: 60, Price: '50.00' }]
+    );
+
+    const res = await request(app)
+      .post('/api/admin/vouchers/import')
+      .set('X-API-Key', VALID_KEY)
+      .attach('file', xlsxBuf, 'numeric-code.xlsx');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.summary.inserted).toBe(1);
+
+    const row = await getDb().getOne('SELECT code FROM vouchers WHERE code = ?', ['012345']);
+    expect(row).toBeTruthy();
+    expect(row.code).toBe('012345');
+  });
 });
 
 describe('GET /api/admin/transactions — Recent Transactions', () => {

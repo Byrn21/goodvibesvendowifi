@@ -285,7 +285,7 @@
         </div>
 
         <div id="retry-notice" class="retry-notice">
-          <p>Redirecting back to the login in <span id="retry-countdown" aria-live="polite">10</span> seconds…</p>
+          <p>Tap the button below to return to the login.</p>
           <a href="index.html" id="retry-btn" class="retry-btn" role="button">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
@@ -405,7 +405,6 @@
       var params = new URLSearchParams(window.location.search);
       var message = params.get('message');
       var code = params.get('code');
-      var retrySecs = parseInt(params.get('retry') || '10', 10);
 
       // Public error messages only — no raw controller responses
       var PUBLIC_MESSAGES = {
@@ -433,21 +432,8 @@
         codeValue.textContent = code;
       }
 
-      /* ---- Auto-redirect countdown (pauses while modal is open) ---- */
-      var count = retrySecs;
-      var paused = false;
-      var display = document.getElementById('retry-countdown');
-      if (display) display.textContent = count;
-
-      var tid = setInterval(function () {
-        if (paused) return; // modal open — hold the countdown
-        count--;
-        if (display) display.textContent = count;
-        if (count <= 0) {
-          clearInterval(tid);
-          window.location.href = 'index.html';
-        }
-      }, 1000);
+      // No automatic redirect: the captive-network mini-browser rejects pages
+      // that navigate themselves. "Try Again" is an ordinary link the user taps.
 
       /* ---- Contact Support modal ---- */
       var overlay = document.getElementById('support-modal');
@@ -500,7 +486,6 @@
         overlay.classList.add('is-open');
         overlay.setAttribute('aria-hidden', 'false');
         document.body.classList.add('modal-open');
-        paused = true; // hold the redirect countdown while reading
         closeX.focus();
       }
 
@@ -508,7 +493,6 @@
         overlay.classList.remove('is-open');
         overlay.setAttribute('aria-hidden', 'true');
         document.body.classList.remove('modal-open');
-        paused = false; // resume the redirect countdown
         if (lastFocused && typeof lastFocused.focus === 'function') {
           lastFocused.focus();
         }

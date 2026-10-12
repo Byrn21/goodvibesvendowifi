@@ -346,7 +346,25 @@ router.post('/vouchers/import', upload.single('file'), async (req, res, next) =>
     const worksheet = workbook.Sheets[sheetName];
     // defval keeps blank cells as '' so every data row has all columns present;
     // sheet_to_json treats the first sheet row as the header, so the header row is skipped automatically.
-    const parsedRows = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+    //
+    // raw: false reads every cell as TEXT (its formatted display string) instead
+    // of a JS number, so spreadsheet values keep their original form and the
+    // "Code" column is never coerced into a Number (e.g. text "012345" stays
+    // "012345" rather than becoming 12345).
+    const parsedRows = XLSX.utils.sheet_to_json(worksheet, { defval: '', raw: false });
+
+    // FAILSAFE: if Excel stored a code as a NUMBER, the leading zero was already
+    // dropped before we ever saw the file (012345 -> 12345). Rebuild any
+    // digit-only code shorter than 6 characters back to exactly 6 digits.
+    // The rows are mutated in place so xlsx's non-enumerable __rowNum__ survives.
+    parsedRows.forEach((row) => {
+      const raw = row.Code;
+      if (raw === undefined || raw === null) return;
+      const str = String(raw).trim();
+      if (/^\d+$/.test(str)) {
+        row.Code = str.padStart(6, '0');
+      }
+    });
 
     // Skip any completely empty rows (all cells blank).
     // Preserve the real spreadsheet row number (__rowNum__, 0-based incl. header) for error messages.
@@ -398,6 +416,7 @@ router.post('/vouchers/import', upload.single('file'), async (req, res, next) =>
       }
 
       // --- Code: exactly 6 numeric digits ---
+      // Already normalized to text + zero-padded to 6 digits above (raw: false).
       const rawCode = row.Code;
       const codeStr = rawCode === undefined || rawCode === null ? '' : String(rawCode).trim();
       if (!/^\d{6}$/.test(codeStr)) {

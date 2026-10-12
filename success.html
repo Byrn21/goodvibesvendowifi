@@ -50,7 +50,7 @@
         </div>
 
         <div id="redirect-notice" class="redirect-notice">
-          <p>Redirecting to your destination in <span id="countdown-display" aria-live="polite">5</span> seconds…</p>
+          <p>You&rsquo;re connected. Tap the button below to open your destination.</p>
           <a href="#" id="redirect-btn" class="btn btn--outline btn--full" role="button">
             Continue to website
             <svg class="btn-icon btn-icon--right" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -75,14 +75,15 @@
     </main>
   </div>
 
-  <!-- Auto-redirect logic: reads URL params for destination and session ID -->
+  <!-- Redirect logic: reads URL params for destination and session ID.
+       Navigation is click-only (below) — the captive-network mini-browser
+       rejects pages that navigate themselves on load. -->
   <script>
     (function () {
       'use strict';
       var params = new URLSearchParams(window.location.search);
       var destination = decodeURIComponent(params.get('redirectUrl') || params.get('targetUrl') || '');
       var sessionId = params.get('sessionId') || '';
-      var autoRedirectSeconds = parseInt(params.get('countdown') || '5', 10);
       var DEFAULT_DEST = 'https://www.example.com/welcome';
 
       // Validation: only allow http/https URLs on the allowlist
@@ -101,23 +102,15 @@
 
       var dest = isAllowed(destination) ? destination : DEFAULT_DEST;
 
-      document.getElementById('redirect-btn').href = dest;
-
-      var count = autoRedirectSeconds;
-      var display = document.getElementById('countdown-display');
-      var tid = setInterval(function () {
-        count--;
-        if (display) display.textContent = count;
-        if (count <= 0) {
-          clearInterval(tid);
-          window.location.href = dest;
-        }
-      }, 1000);
+      // Click-only navigation: the external destination is opened ONLY when the
+      // user taps "Continue to website". No timer and no load-time redirect.
+      var redirectBtn = document.getElementById('redirect-btn');
+      if (redirectBtn) redirectBtn.href = dest;
 
       // Populate session info if sessionId provided
       if (sessionId) {
         // Persist the session ID so status.html can recover it later,
-        // even after the auto-redirect takes the user off this page.
+        // even after the user leaves this page for their destination.
         try {
           window.localStorage.setItem('portalSessionId', sessionId);
           window.sessionStorage.setItem('portalSessionId', sessionId);
