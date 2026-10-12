@@ -5,12 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#2d6a4f">
   <title>Session Status — WiFi Portal</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <link rel="stylesheet" href="assets/style.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232d6a4f'/><path d='M6 22 Q16 10 26 22' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/><path d='M11 26 Q16 18 21 26' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/><circle cx='16' cy='29' r='1.5' fill='white'/></svg>">
   <style>
     /* ============================================================
        status.html scoped styles — theme inherited from assets/style.css
        (cream card, green/brown theme, light green grid background kept).
        ============================================================ */
+
+    /* ---- Pause control, kept inside the countdown/timer section ---- */
+    .countdown-widget .controls-section {
+      width: 100%;
+      max-width: 340px;
+      margin-top: 18px;
+    }
 
     /* ---- Centered not-found / error state ---- */
     .notfound-icon {
@@ -260,23 +269,119 @@
   </style>
 </head>
 <body>
+  <!-- Skip to main content -->
+  <a href="#main-status" class="skip-link">Skip to session status</a>
+
   <div class="page-wrapper">
-    <header class="portal-header" role="banner">
-      <div class="logo-container">
-        <svg class="logo-svg" width="52" height="52" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-          <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-          <circle cx="26" cy="43" r="2.5" fill="white"/>
-        </svg>
-      </div>
-      <div class="brand-text">
-        <h1 class="brand-name">Bukuhan WiFi</h1>
-        <p class="brand-tagline">Your Session</p>
+    <header class="portal-header portal-header--marquee" role="banner" aria-label="GoodVibesVendoWifi - Connect to our Guest Network">
+      <div class="marquee-track">
+        <div class="marquee-content">
+          <!-- First sequence -->
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <!-- Second sequence (duplicate for seamless loop) -->
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+        </div>
       </div>
     </header>
 
-    <main class="portal-main" role="main">
+    <main id="main-status" class="portal-main" role="main">
 
       <!-- Loading state -->
       <div id="loading-state" class="status-card" aria-busy="true" aria-label="Loading session information">
@@ -315,6 +420,26 @@
           <p class="countdown-subtitle" id="countdown-subtitle">
             Tap Pause to freeze your time
           </p>
+
+          <!-- Pause control — sits directly under the timer so it is clearly
+               visible next to the "Tap Pause" hint. -->
+          <div id="controls-section" class="controls-section">
+            <button
+              type="button"
+              id="btn-pause"
+              class="btn btn--primary btn--full"
+              aria-describedby="pause-hint"
+            >
+              <svg class="btn-icon btn-icon--left" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="6" y="4" width="4" height="16"/>
+                <rect x="14" y="4" width="4" height="16"/>
+              </svg>
+              <span id="pause-label">Pause</span>
+            </button>
+            <p id="pause-hint" class="form-hint form-hint--centered">
+              Freezes your remaining time. Useful during meals or when stepping away.
+            </p>
+          </div>
         </div>
 
         <!-- Session details -->
@@ -340,25 +465,6 @@
             <dd id="detail-expires">—</dd>
           </div>
         </dl>
-
-        <!-- Pause / Resume controls -->
-        <div id="controls-section" class="controls-section">
-          <button
-            type="button"
-            id="btn-pause"
-            class="btn btn--secondary btn--full"
-            aria-describedby="pause-hint"
-          >
-            <svg class="btn-icon btn-icon--left" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="6" y="4" width="4" height="16"/>
-              <rect x="14" y="4" width="4" height="16"/>
-            </svg>
-            <span id="pause-label">Pause Session</span>
-          </button>
-          <p id="pause-hint" class="form-hint form-hint--centered">
-            Freezes your remaining time. Useful during meals or when stepping away.
-          </p>
-        </div>
 
         <!-- Pause confirmation dialog -->
         <div id="pause-confirm" class="confirm-dialog hidden" role="dialog" aria-labelledby="pause-confirm-heading">
@@ -485,11 +591,16 @@
         </p>
       </section>
 
-      <!-- Status refresh footer -->
-      <div class="status-footer">
+      <!-- Footer — mirrors the main index page's footer. -->
+      <footer class="portal-footer" role="contentinfo">
+        <p class="support-info" id="support-info">
+          Need help?
+          <button type="button" class="support-trigger" aria-haspopup="dialog">Contact support</button>
+        </p>
         <p id="last-updated" class="last-updated">Loading…</p>
         <p id="polling-status" class="polling-status" aria-live="polite"></p>
-      </div>
+        <p class="powered-by">Powered by Bukuhan WiFi Vendo</p>
+      </footer>
     </main>
   </div>
 
@@ -554,6 +665,7 @@
     </div>
   </div>
 
+  <script src="config/config.js"></script>
   <script>
     /* ============================================================
        status.html — Session status polling and countdown
@@ -711,29 +823,32 @@
           });
       }
 
-      function doPause() {
-        var url = API_BASE + '/api/session/pause';
+      // POST to a session action endpoint. The JSON body is always parsed so
+      // the caller can surface the backend's own error message (for example
+      // PREMIUM_ONLY when a standard session tries to pause).
+      function postSessionAction(action) {
+        var url = API_BASE + '/api/session/' + action;
         return fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sessionId: SESSION_ID }),
         }).then(function (r) {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return r.json();
+          return r.json()
+            .catch(function () { return {}; })
+            .then(function (body) {
+              if (!r.ok) {
+                var err = new Error(body.error || ('HTTP ' + r.status));
+                err.body = body;
+                err.status = r.status;
+                throw err;
+              }
+              return body;
+            });
         });
       }
 
-      function doResume() {
-        var url = API_BASE + '/api/session/resume';
-        return fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId: SESSION_ID }),
-        }).then(function (r) {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return r.json();
-        });
-      }
+      function doPause()  { return postSessionAction('pause'); }
+      function doResume() { return postSessionAction('resume'); }
 
       // ---- Render ----
       function renderStatus(data) {
@@ -763,16 +878,24 @@
           updateCountdownDisplay(localSeconds);
           startCountdownTick();
 
-          // Pause only for Premium sessions
-          var isPremium = data.voucherType === 'premium';
+          // The Pause control lives in the timer section and stays visible.
+          // Whether a session may actually be paused is the backend's call —
+          // it returns canPause and rejects non-premium sessions with a
+          // readable message, which the UI surfaces instead of hiding the
+          // button and leaving the "Tap Pause" hint unexplained.
+          // CONFIG.showPauseResume is honoured only as an explicit opt-out;
+          // when the config is missing the control stays visible (the old
+          // code required a truthy flag, which hid it whenever config.js had
+          // not been loaded on this page).
           if (els.controls) {
-            if (CONFIG.showPauseResume && data.canPause !== false && isPremium) {
-              els.controls.classList.remove('hidden');
-              if (els.btnPause) els.btnPause.disabled = false;
-            } else {
+            if (CONFIG.showPauseResume === false) {
               els.controls.classList.add('hidden');
+            } else {
+              els.controls.classList.remove('hidden');
             }
           }
+          if (els.btnPause) els.btnPause.disabled = false;
+          if (els.subtitle) els.subtitle.textContent = 'Tap Pause to freeze your time';
         } else if (state === 'paused') {
           showSection('paused');
           clearInterval(countdownTimer);
@@ -805,12 +928,19 @@
           els.btnPauseCancel.disabled = true;
           if (els.pollingStatus) els.pollingStatus.textContent = 'Pausing session…';
           doPause()
-            .then(function (data) {
+            .then(function () {
               if (els.pollingStatus) els.pollingStatus.textContent = '';
-              renderStatus(data);
+              if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
+              // Stop the local ticker at once, then re-read the authoritative
+              // state (the /pause response carries no sessionId to render).
+              clearInterval(countdownTimer);
+              fetchStatus();
             })
             .catch(function (err) {
-              if (els.pollingStatus) els.pollingStatus.textContent = 'Failed to pause. Please try again.';
+              var msg = (err && err.body && err.body.error)
+                ? err.body.error
+                : 'Failed to pause. Please try again.';
+              if (els.pollingStatus) els.pollingStatus.textContent = msg;
               if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
               if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
               if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
@@ -831,12 +961,16 @@
           els.btnResume.disabled = true;
           if (els.pollingStatus) els.pollingStatus.textContent = 'Resuming session…';
           doResume()
-            .then(function (data) {
+            .then(function () {
               if (els.pollingStatus) els.pollingStatus.textContent = '';
-              renderStatus(data);
+              // Re-read authoritative state (the /resume response has no sessionId).
+              fetchStatus();
             })
             .catch(function (err) {
-              if (els.pollingStatus) els.pollingStatus.textContent = 'Failed to resume. Please try again.';
+              var msg = (err && err.body && err.body.error)
+                ? err.body.error
+                : 'Failed to resume. Please try again.';
+              if (els.pollingStatus) els.pollingStatus.textContent = msg;
               els.btnResume.disabled = false;
             });
         });
