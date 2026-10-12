@@ -17,9 +17,23 @@ const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/vo
 const { normalizeMac: normalizeDeviceMac } = require('../utils/device-id');
 const { getDb } = require('../db/client');
 const { v4: uuidv4 } = require('uuid');
+const logger = require('../utils/logger');
 
 // POST /api/auth
 router.post('/', async (req, res, next) => {
+  // First statement in the handler: proves the browser actually reached the
+  // backend when the guest taps Submit. If the portal fails before the
+  // request is sent (blocked fetch, captive mini-browser navigation, a JS
+  // error), this line never appears in the Render logs — which is itself the
+  // signal. The voucher itself is NEVER logged (still a live credential).
+  logger.info(
+    '[auth] POST /api/auth HIT — ip=' + (req.ip || '(unknown)') +
+    ' clientMac=' + ((req.body && req.body.clientMac) || '(none)') +
+    ' voucherPresent=' + Boolean(req.body && req.body.voucher) +
+    ' contentType=' + ((req.headers && req.headers['content-type']) || '(none)') +
+    ' origin=' + ((req.headers && req.headers.origin) || '(none)')
+  );
+
   try {
         const {
       voucher,
