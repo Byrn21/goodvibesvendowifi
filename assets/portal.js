@@ -43,12 +43,19 @@
     successPage: 'success.html',
     errorPage: 'error.html',
     statusPage: 'status.html',
+    // Omada controller context appended to the portal URL. Both the wireless
+    // (EAP: clientMac/clientIp/apMac/ssidName/radioId) and wired (Gateway:
+    // clientMac/clientIp/gatewayMac/vid) shapes are captured so the backend
+    // can forward the exact set the controller expects for extPortal/auth.
     paramMap: {
       clientMac:   'clientMac',
       clientIp:    'clientIp',
       apMac:       'apMac',
+      gatewayMac:  'gatewayMac',
+      vid:         'vid',
       ssidName:    'ssidName',
       radioId:     'radioId',
+      site:        'site',
       redirectUrl: 'redirectUrl',
       originalUrl: 'originalUrl',
       authUrl:     'authUrl',
@@ -366,13 +373,17 @@
 
   function buildClientContext() {
     return {
-      clientMac: normalizeMac(queryParams.clientMac) || queryParams.clientMac || '',
-      clientIp:  queryParams.clientIp  || '',
-      apMac:     normalizeMac(queryParams.apMac) || queryParams.apMac || '',
-      ssidName:  queryParams.ssidName  || '',
+      clientMac:  normalizeMac(queryParams.clientMac) || queryParams.clientMac || '',
+      clientIp:   queryParams.clientIp  || '',
+      apMac:      normalizeMac(queryParams.apMac) || queryParams.apMac || '',
+      gatewayMac: normalizeMac(queryParams.gatewayMac) || queryParams.gatewayMac || '',
+      vid:        queryParams.vid        || '',
+      ssidName:   queryParams.ssidName   || '',
+      radioId:    queryParams.radioId,
+      site:       queryParams.site       || '',
       redirectUrl: getRedirectDestination(),
-      authUrl:   queryParams.authUrl   || '',
-      raw:       queryParams.raw       || {},
+      authUrl:    queryParams.authUrl   || '',
+      raw:        queryParams.raw       || {},
     };
   }
 
@@ -436,12 +447,20 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
+        // Forward the full Omada connection context (extracted from the portal
+        // URL with URLSearchParams) together with the voucher so the backend can
+        // rebuild the controller's extPortal/auth request without losing any of
+        // the parameters Omada itself generated.
         body: JSON.stringify({
-          voucher: ctx.voucher,
-          clientMac: ctx.clientMac,
-          clientIp:  ctx.clientIp,
-          apMac:     ctx.apMac,
-          ssidName:  ctx.ssidName,
+          voucher:    ctx.voucher,
+          clientMac:  ctx.clientMac,
+          clientIp:   ctx.clientIp,
+          apMac:      ctx.apMac,
+          gatewayMac: ctx.gatewayMac,
+          vid:        ctx.vid,
+          ssidName:   ctx.ssidName,
+          radioId:    ctx.radioId,
+          site:       ctx.site,
           redirectUrl: ctx.redirectUrl,
           termsAccepted: ctx.termsAccepted,
         }),

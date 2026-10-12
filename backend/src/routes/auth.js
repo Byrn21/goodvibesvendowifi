@@ -26,7 +26,10 @@ router.post('/', async (req, res, next) => {
       clientMac,
       clientIp,
       apMac,
+      gatewayMac,
       ssidName,
+      vid,
+      radioId: rawRadioId,
       redirectUrl,
       termsAccepted,
       voucherType,
@@ -57,6 +60,13 @@ router.post('/', async (req, res, next) => {
     if (clientMac && !normalizedMac) {
       return res.status(400).json({ success: false, error: 'Invalid client MAC address.', code: 'INVALID_MAC' });
     }
+
+    // AP / gateway MACs are the identifiers Omada put in the portal URL and
+    // expects back in the extPortal/auth body, so send them in the same
+    // canonical form (uppercase, colon-separated). Invalid values are passed
+    // through unchanged (Omada rejects them) rather than 400'ing here.
+    const normalizedApMac = apMac ? (normalizeDeviceMac(apMac) || String(apMac).trim()) : '';
+    const normalizedGatewayMac = gatewayMac ? (normalizeDeviceMac(gatewayMac) || String(gatewayMac).trim()) : '';
 
     // Validate client IP format (basic)
     if (clientIp && !/^\d+\.\d+\.\d+\.\d+$/.test(clientIp)) {
@@ -89,25 +99,38 @@ router.post('/', async (req, res, next) => {
     const voucherTypeResolved = voucherResult.type || voucherType || 'standard';
 
     // ── Call Omada extPortal/auth ──────────────────────────
-    // radioId is not sent by the voucher form; pull it from the
-    // portal_client_context captured at portal landing (defaults to 0).
-    let radioId = 0;
-    try {
-      const ctxRow = await getDb().getOne(
-        'SELECT radio_id FROM portal_client_context WHERE client_mac = ?',
-        [normalizedMac]
-      );
-      if (ctxRow && ctxRow.radio_id !== null && ctxRow.radio_id !== undefined) {
-        radioId = ctxRow.radio_id;
+    // The portal URL already carries the controller's connection context
+    // (radioId, gatewayMac, vid, ...). Prefer the radioId submitted by the
+    // form; fall back to the portal_client_context captured at landing, then 0.
+    let radioId = null;
+    if (rawRadioId !== undefined && rawRadioId !== null && String(rawRadioId).trim() !== '') {
+      const parsedRadioId = parseInt(rawRadioId, 10);
+      if (!Number.isInteger(parsedRadioId) || parsedRadioId < 0 || parsedRadioId > 255) {
+        return res.status(400).json({ success: false, error: 'Invalid radioId.', code: 'INVALID_INPUT' });
       }
-    } catch (_) { /* context table may not exist yet in legacy DBs — default 0 */ }
+      radioId = parsedRadioId;
+    }
+    if (radioId === null) {
+      try {
+        const ctxRow = await getDb().getOne(
+          'SELECT radio_id FROM portal_client_context WHERE client_mac = ?',
+          [normalizedMac]
+        );
+        if (ctxRow && ctxRow.radio_id !== null && ctxRow.radio_id !== undefined) {
+          radioId = ctxRow.radio_id;
+        }
+      } catch (_) { /* context table may not exist yet in legacy DBs — default 0 */ }
+    }
+    if (radioId === null) radioId = 0;
 
     let omadaResult;
     try {
       omadaResult = await omadaService.authenticateClient({
         clientMac: normalizedMac,
         clientIp: clientIp || '',
-        apMac: apMac || '',
+        apMac: normalizedApMac,
+        gatewayMac: normalizedGatewayMac,
+        vid: vid !== undefined && vid !== null ? String(vid).trim() : '',
         ssidName: ssidName || '',
         radioId,
         durationMinutes: duration,

@@ -128,10 +128,13 @@ async function ensureSession() {
  * external portal API (payment-triggered authorization).
  *
  * @param {Object} ctx
- * @param {string} ctx.clientMac   Client MAC (normalized, required)
- * @param {string} ctx.apMac       AP MAC (required by controller)
- * @param {string} ctx.ssidName    SSID name (required by controller)
- * @param {number} ctx.radioId     Radio ID, typically 0 (required)
+ * @param {string} ctx.clientMac        Client MAC (normalized, required)
+ * @param {string} [ctx.clientIp]       Client IP (forwarded to the controller)
+ * @param {string} [ctx.apMac]          AP MAC (required for wireless/EAP clients)
+ * @param {string} [ctx.ssidName]       SSID name (required for wireless/EAP clients)
+ * @param {number} [ctx.radioId]        Radio ID: 0 = 2.4G, 1 = 5G (wireless/EAP)
+ * @param {string} [ctx.gatewayMac]     Gateway MAC (required for wired/Gateway clients)
+ * @param {string|number} [ctx.vid]     VLAN ID (wired/Gateway clients)
  * @param {number} ctx.durationMinutes  Paid duration in minutes
  * @param {string} [ctx.sessionId] Internal session ID (logging only)
  * @returns {Promise<Object>}  { success: true, raw }
@@ -144,28 +147,45 @@ async function authenticateClient(ctx) {
     throw configError('OMADA_OMADAC_ID is not configured');
   }
 
-  // Fail loud BEFORE contacting the controller: the extPortal/auth
-  // contract requires apMac / ssidName / radioId; callers must never
-  // send nulls (webhook guarantees this via MISSING_PORTAL_CONTEXT).
-  for (const field of ['clientMac', 'apMac', 'ssidName']) {
-    if (!ctx || !ctx[field]) {
-      const err = new Error('authenticateClient: missing required field ' + field);
-      err.code = 'OMADA_MISSING_FIELD';
-      throw err;
-    }
+  // Fail loud BEFORE contacting the controller. Omada's extPortal/auth
+  // contract is connection-type specific (TP-Link "API and Code Samples
+  // for External Portal Server", Controller v6.2.10):
+  //   EAP     (wireless): clientMac, clientIp, apMac, ssidName, radioId, time, authType
+  //   Gateway (wired)   : clientMac, clientIp, gatewayMac, vid, time, authType
+  // Callers must never send an incomplete context — the voucher route reads
+  // it from the portal URL and the webhook guarantees it via MISSING_PORTAL_CONTEXT.
+  if (!ctx || !ctx.clientMac) {
+    throw missingField('clientMac');
+  }
+  const isGateway = Boolean(ctx.gatewayMac);
+  for (const field of (isGateway ? ['gatewayMac'] : ['apMac', 'ssidName'])) {
+    if (!ctx[field]) throw missingField(field);
   }
 
   const radioId = Number.isInteger(ctx.radioId) ? ctx.radioId : parseInt(ctx.radioId, 10) || 0;
   const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/hotspot/extPortal/auth';
-  const body = JSON.stringify({
+
+  // Forward the SAME connection parameters the controller put in the redirect
+  // URL. clientIp is required in BOTH shapes; EAP adds apMac/ssidName/radioId,
+  // Gateway adds gatewayMac/vid. `time` is milliseconds and authType is 4.
+  const authBody = {
     clientMac: ctx.clientMac,
-    apMac: ctx.apMac,
-    ssidName: ctx.ssidName,
-    radioId,
+    clientIp: ctx.clientIp || '',
     authType: 4, // hotspot auth type (cross-verified across implementations)
     time: minutesToTime(ctx.durationMinutes),
     site: SITE,
-  });
+  };
+  if (isGateway) {
+    authBody.gatewayMac = ctx.gatewayMac;
+    if (ctx.vid !== undefined && ctx.vid !== null && ctx.vid !== '') {
+      authBody.vid = ctx.vid;
+    }
+  } else {
+    authBody.apMac = ctx.apMac;
+    authBody.ssidName = ctx.ssidName;
+    authBody.radioId = radioId;
+  }
+  const body = JSON.stringify(authBody);
 
   const response = await withSession(() => omadaRequest(path, 'POST', body));
 
@@ -365,6 +385,17 @@ async function withSession(fn) {
 function configError(message) {
   const err = new Error(message);
   err.code = 'OMADA_CONFIG_ERROR';
+  return err;
+}
+
+/**
+ * Missing-required-field error helper (fail loud before any HTTP call).
+ * @param {string} field
+ * @returns {Error} with code OMADA_MISSING_FIELD
+ */
+function missingField(field) {
+  const err = new Error('authenticateClient: missing required field ' + field);
+  err.code = 'OMADA_MISSING_FIELD';
   return err;
 }
 // ================================================================

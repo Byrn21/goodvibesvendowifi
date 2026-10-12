@@ -125,6 +125,8 @@
       display: block;
       width: 100%;
       padding: 14px 20px;
+      text-align: center;
+      text-decoration: none;
       background: var(--green);
       color: #fff;
       border: 2px solid var(--green);
@@ -200,8 +202,7 @@
           Fast, reliable speeds for browsing and streaming
         </li>
       </ul>
-      <p id="debug-text" style="color:red; font-size: 12px; word-wrap: break-word;"></p>
-      <button type="button" class="welcome-card__cta" id="continue-btn">Continue</button>
+      <a id="continue-btn" class="welcome-card__cta" href="https://goodvibesvendowifi.onrender.com/">Continue</a>
       <p class="welcome-card__hint">Tap Continue to proceed to the login step</p>
     </section>
   </main>
@@ -211,29 +212,13 @@
   </footer>
 
   <script>
-    (function () {
-      'use strict';
-
-      // DEBUG: show the raw query string the Omada controller passed to THIS page
-      // so we can confirm the controller context (clientMac, apMac, ...) actually
-      // arrives. Runs on load, independently of the Continue handler below.
-      var debugText = document.getElementById('debug-text');
-      if (debugText) {
-        debugText.textContent = window.location.search || 'NO PARAMS FOUND';
-      }
-
-      var btn = document.getElementById('continue-btn');
-      if (!btn) return;
-      btn.addEventListener('click', function () {
-        // Mark the welcome step as completed for the rest of the flow.
-        try { sessionStorage.setItem('welcomeCompleted', '1'); } catch (e) { /* storage unavailable */ }
-        // Forward any existing query params (client MAC, SSID, etc.) to the hosted login.
-        // Read ONLY window.location.search here - no other cross-frame lookups,
-        // which throw SecurityErrors in the captive portal mini-browser.
-        var params = window.location.search;
-        window.location.href = 'https://goodvibesvendowifi.onrender.com/' + params;
-      });
-    })();
+    // Build the Continue link's destination so it carries the Omada query params
+    // (clientMac, apMac, ssidName, ...). This is a plain inline assignment that
+    // runs on page load: no click handler and no browser storage, so strict
+    // captive-portal mini-browsers that block those still navigate on a normal
+    // tap of the link.
+    document.getElementById('continue-btn').href =
+      'https://goodvibesvendowifi.onrender.com/' + window.location.search;
   </script>
 </body>
 </html>

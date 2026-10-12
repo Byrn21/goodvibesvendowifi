@@ -233,6 +233,71 @@ describe('authenticateClient (extPortal/auth)', () => {
       uninstall();
     }
   });
+
+  test('includes clientIp and the full EAP connection context in the auth body', async () => {
+    let authReq = null;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/extPortal/auth')) {
+        authReq = req;
+        respondJson(req, cb, 200, { errorCode: 0 });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+    });
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        clientIp: '192.168.1.50',
+        apMac: 'AA:AA:AA:AA:AA:AA',
+        ssidName: 'GuestWiFi',
+        radioId: 1,
+        durationMinutes: 30,
+      });
+      const authBody = JSON.parse(authReq.written[0] || '{}');
+      expect(authBody.clientIp).toBe('192.168.1.50');
+      expect(authBody.radioId).toBe(1); // 5 GHz preserved, not defaulted to 0
+      expect(authBody.apMac).toBe('AA:AA:AA:AA:AA:AA');
+      expect(authBody.ssidName).toBe('GuestWiFi');
+      expect(authBody.gatewayMac).toBeUndefined();
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('builds a Gateway-shaped body (gatewayMac + vid, no apMac) for wired clients', async () => {
+    let authReq = null;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/extPortal/auth')) {
+        authReq = req;
+        respondJson(req, cb, 200, { errorCode: 0 });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+    });
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        clientIp: '10.0.0.7',
+        gatewayMac: 'GG:GG:GG:GG:GG:GG',
+        vid: 20,
+        durationMinutes: 15,
+      });
+      const authBody = JSON.parse(authReq.written[0] || '{}');
+      expect(authBody.gatewayMac).toBe('GG:GG:GG:GG:GG:GG');
+      expect(authBody.vid).toBe(20);
+      expect(authBody.authType).toBe(4);
+      expect(authBody.apMac).toBeUndefined();
+      expect(authBody.ssidName).toBeUndefined();
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('throws OMADA_MISSING_FIELD for a wired client with neither apMac nor gatewayMac', async () => {
+    await expect(
+      omada.authenticateClient({ clientMac: 'AA:BB:CC:DD:EE:FF', durationMinutes: 15 })
+    ).rejects.toMatchObject({ code: 'OMADA_MISSING_FIELD' });
+  });
 });
 
 // ================================================================
