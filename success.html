@@ -76,9 +76,12 @@
     </main>
   </div>
 
-  <!-- Redirect logic: reads URL params for destination and session ID.
-       Navigation is click-only (below) — the captive-network mini-browser
-       rejects pages that navigate themselves on load. -->
+  <!-- Redirect logic: reads URL params for destination and session ID, wires
+       the "Continue to website" button, and after a short settling delay
+       performs one connectivity probe so the captive mini-browser can close.
+       The probe is delayed on purpose: Omada reprograms its firewall rules
+       asynchronously after auth, and navigating into that window drops the
+       TLS handshake (net::ERR_CONNECTION_CLOSED). -->
   <script>
     (function () {
       'use strict';
@@ -115,12 +118,26 @@
       // when it next checks internet access. Making a real internet request
       // prompts that check, so the OS marks the network as connected and
       // dismisses the captive mini-browser instead of asking the user to sign
-      // in again. Prefer the URL the guest originally tried to open (Omada's
-      // originUrl); otherwise fall back to a known endpoint.
+      // in again.
+      //
+      // Destination order (Omada URL params first):
+      //   1. originUrl / originalUrl — the URL the guest first tried to open.
+      //   2. redirectUrl / targetUrl  — the controller's explicit destination.
+      //   3. A plain-HTTP fallback.
+      //
+      // The fallback is deliberately HTTP: redirecting to a strict-HTTPS host
+      // right while Omada is still reprogramming its firewall rules drops the
+      // TLS handshake and the mini-browser reports net::ERR_CONNECTION_CLOSED.
+      // A plain-HTTP site has no TLS handshake to lose, so it survives the
+      // window in which the network is only half-open.
       var originUrl = decodeURIComponent(params.get('originUrl') || params.get('originalUrl') || '');
-      var PROBE_FALLBACK = 'https://www.google.com/';
-      var PROBE_DELAY_MS = 2500;
-      var probeUrl = /^https?:\/\//i.test(originUrl) ? originUrl : PROBE_FALLBACK;
+      var PROBE_FALLBACK = 'http://neverssl.com/';
+      // 6-8s: give Omada's hardware time to finish opening the network before
+      // the phone (or the captive mini-browser) attempts a real connection.
+      var PROBE_DELAY_MS = 7000;
+      var probeUrl = /^https?:\/\//i.test(originUrl) ? originUrl
+                   : isAllowed(destination) ? destination
+                   : PROBE_FALLBACK;
 
       var notice = document.getElementById('connect-notice');
       if (notice) notice.textContent = 'Finalizing your connection\u2026';
