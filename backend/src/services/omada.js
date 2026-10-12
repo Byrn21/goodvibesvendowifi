@@ -34,7 +34,9 @@
  *   OMADA_PORTAL_OPERATOR_NAME      — hotspot portal operator username
  *   OMADA_PORTAL_OPERATOR_PASSWORD  — hotspot portal operator password
  *   OMADA_AUTH_TIMEOUT              — request timeout ms (default 10000)
- *   OMADA_TLS_REJECT                — "true" (default) or "false" (dev only)
+ *   OMADA_TLS_REJECT                — "true" enforces full cert validation;
+ *                                     default "false" accepts the controller's
+ *                                     self-signed certificate
  *   OMADA_MOCK                      — "true" to bypass the controller
  */
 
@@ -48,7 +50,12 @@ const SITE       = process.env.OMADA_SITE     || 'Default';
 const OPERATOR_NAME = process.env.OMADA_PORTAL_OPERATOR_NAME || '';
 const OPERATOR_PASSWORD = process.env.OMADA_PORTAL_OPERATOR_PASSWORD || '';
 const TIMEOUT    = parseInt(process.env.OMADA_AUTH_TIMEOUT || '10000', 10);
-const TLS_REJECT = process.env.OMADA_TLS_REJECT !== 'false';
+// OC200/ER605 controllers present a SELF-SIGNED certificate. From a cloud
+// backend (Render) the default Node TLS behavior rejects it during the
+// handshake, surfacing as an opaque ECONNRESET/EPROTO and failing every
+// authorization. Default to accepting it (rejectUnauthorized: false); set
+// OMADA_TLS_REJECT=true only when the controller has a publicly-trusted cert.
+const TLS_REJECT = process.env.OMADA_TLS_REJECT === 'true';
 
 // In mock/test mode, simulate controller responses
 const MOCK_MODE = process.env.OMADA_MOCK === 'true' || !BASE_URL;
@@ -187,13 +194,28 @@ async function authenticateClient(ctx) {
   }
   const body = JSON.stringify(authBody);
 
-  const response = await withSession(() => omadaRequest(path, 'POST', body));
+  let response;
+  try {
+    response = await withSession(() => omadaRequest(path, 'POST', body));
+  } catch (netErr) {
+    // Network / TLS / timeout — log the EXACT reason for the Render logs,
+    // then rethrow so the route fails closed without consuming the voucher.
+    logAuthFailure('extPortal/auth request', netErr, ctx, path);
+    throw netErr;
+  }
 
   if (response.statusCode !== 200 || !response.body || response.body.errorCode !== 0) {
-    const err = new Error(
-      'Omada extPortal/auth rejected: ' +
-      (response.body && (response.body.msg || response.body.message) || ('HTTP ' + response.statusCode))
+    const reason =
+      (response.body && (response.body.msg || response.body.message)) ||
+      ('HTTP ' + response.statusCode);
+    console.error(
+      '[omada] authenticateClient REJECTED by controller — client=' + ctx.clientMac +
+      ' http=' + response.statusCode +
+      ' errorCode=' + (response.body && response.body.errorCode) +
+      ' reason=' + reason
     );
+    console.error('[omada]   full controller response: ' + JSON.stringify(response.body));
+    const err = new Error('Omada extPortal/auth rejected: ' + reason);
     err.code = 'OMADA_AUTH_REJECTED';
     err.omadaResponse = response.body;
     throw err;
@@ -398,6 +420,61 @@ function missingField(field) {
   err.code = 'OMADA_MISSING_FIELD';
   return err;
 }
+
+// ================================================================
+// Diagnostics: verbose Omada auth-failure logging
+// ================================================================
+// Maps the transport-level error codes Node emits to the most likely cause
+// for THIS topology (cloud backend → Cloudflare tunnel → OC200), so a single
+// Render log line is actionable without reproducing the failure locally.
+const NETWORK_ERROR_HINTS = {
+  ECONNREFUSED: 'controller refused the TCP connection (wrong host/port, or the tunnel is down)',
+  ECONNRESET: 'connection reset mid-request — usually a dropped TLS handshake; verify OMADA_TLS_REJECT is not true and the tunnel forwards TLS',
+  ETIMEDOUT: 'no response before the socket timeout — controller/tunnel unreachable',
+  ESOCKETTIMEDOUT: 'socket timed out — controller/tunnel unreachable',
+  ENOTFOUND: 'DNS lookup failed for the OMADA_BASE_URL host',
+  EAI_AGAIN: 'DNS lookup temporarily failed for the OMADA_BASE_URL host',
+  EHOSTUNREACH: 'host unreachable from the backend',
+  ENETUNREACH: 'network unreachable from the backend',
+  EPROTO: 'TLS protocol error — the self-signed controller cert was likely rejected (set OMADA_TLS_REJECT=false)',
+  DEPTH_ZERO_SELF_SIGNED_CERT: 'controller uses a self-signed cert (set OMADA_TLS_REJECT=false)',
+  SELF_SIGNED_CERT_IN_CHAIN: 'self-signed cert in the controller chain (set OMADA_TLS_REJECT=false)',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'controller certificate is untrusted (set OMADA_TLS_REJECT=false)',
+  CERT_HAS_EXPIRED: 'controller certificate has expired',
+  ERR_TLS_CERT_ALTNAME_INVALID: 'controller cert hostname does not match OMADA_BASE_URL',
+  OMADA_TIMEOUT: 'controller did not answer within OMADA_AUTH_TIMEOUT ms',
+};
+
+/**
+ * Log the exact failure reason for an extPortal/auth call so it is visible
+ * in the Render logs: transport code, a mapped cause hint, the controller's
+ * response JSON, and the stack.
+ *
+ * @param {string} stage  Which step failed (e.g. 'extPortal/auth request')
+ * @param {Error}  err    The error thrown by omadaRequest/withSession
+ * @param {Object} ctx    The authenticateClient context (for clientMac)
+ * @param {string} path   The controller path that was called
+ */
+function logAuthFailure(stage, err, ctx, path) {
+  const code = (err && err.code) || 'NO_CODE';
+  const message = (err && err.message) ? err.message : String(err);
+  const clientMac = (ctx && ctx.clientMac) || 'unknown';
+  console.error(
+    '[omada] authenticateClient FAILED — stage=' + stage +
+    ' client=' + clientMac +
+    ' path=' + path +
+    ' base=' + BASE_URL +
+    ' code=' + code +
+    ' message=' + message
+  );
+  const hint = NETWORK_ERROR_HINTS[code];
+  if (hint) console.error('[omada]   cause: ' + code + ' -> ' + hint);
+  if (err && err.omadaResponse) {
+    console.error('[omada]   controller response: ' + JSON.stringify(err.omadaResponse));
+  }
+  if (err && err.stack) console.error('[omada]   stack: ' + err.stack);
+}
+
 // ================================================================
 // Internal: HTTP request to Omada controller (session-aware)
 // ================================================================
@@ -466,13 +543,16 @@ function omadaRequest(path, method, body, opts) {
     });
 
     req.on('error', (err) => {
+      // Preserve the ORIGINAL code (ECONNREFUSED / ETIMEDOUT / EPROTO / …) so
+      // authenticateClient can log the exact failure reason. ECONNRESET is
+      // only annotated — it is the signature of a TLS handshake dropped by
+      // the controller or the tunnel.
       if (err.code === 'ECONNRESET' && !req.destroyed) {
-        const e = new Error('Omada connection reset');
-        e.code = 'OMADA_CONNECTION_ERROR';
-        reject(e);
-      } else {
-        reject(err);
+        err.omadaConnectionReset = true;
+        err.message = 'Omada connection reset (possible dropped TLS handshake) — ' + err.message;
       }
+      err.omadaRequestPath = path;
+      reject(err);
     });
 
     if (body) req.write(body);

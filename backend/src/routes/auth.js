@@ -12,7 +12,7 @@
 const express = require('express');
 const router = express.Router();
 const omadaService = require('../services/omada');
-const { validateVoucher, recordSession } = require('../services/session');
+const { validateVoucher, consumeVoucher, recordSession } = require('../services/session');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 const { normalizeMac: normalizeDeviceMac } = require('../utils/device-id');
 const { getDb } = require('../db/client');
@@ -123,6 +123,12 @@ router.post('/', async (req, res, next) => {
     }
     if (radioId === null) radioId = 0;
 
+    // ── Call Omada extPortal/auth (strict, fail-closed) ────
+    // The controller is the ONLY authority on whether this client is really
+    // authorized. If the call throws, OR resolves without an explicit
+    // success flag, we abort WITHOUT consuming the voucher and WITHOUT
+    // recording a session — otherwise the guest loses their code while the
+    // portal reports success and the network stays locked (the captive loop).
     let omadaResult;
     try {
       omadaResult = await omadaService.authenticateClient({
@@ -137,12 +143,63 @@ router.post('/', async (req, res, next) => {
         sessionId,
       });
     } catch (omadaErr) {
-      console.error('[Omada auth error]', omadaErr.message);
-      // Return a generic error — don't leak Omada details
+      console.error(
+        '[auth] Omada extPortal/auth threw for client ' + normalizedMac +
+        ' (voucher ' + normalizedVoucher + '): ' +
+        (omadaErr && omadaErr.code ? omadaErr.code : 'NO_CODE') +
+        ' — ' + (omadaErr && omadaErr.message ? omadaErr.message : String(omadaErr))
+      );
+      if (omadaErr && omadaErr.omadaResponse) {
+        console.error('[auth] Omada response body: ' + JSON.stringify(omadaErr.omadaResponse));
+      }
+      if (omadaErr && omadaErr.stack) {
+        console.error('[auth] Omada stack: ' + omadaErr.stack);
+      }
+      // Voucher deliberately left UNCONSUMED — the client was never authorized.
       return res.status(502).json({
         success: false,
         error: 'Authentication server did not accept the request.',
         code: 'OMADA_ERROR',
+      });
+    }
+
+    // A resolved call is trusted ONLY when it reports success === true. A
+    // falsy/missing flag means the controller did not definitively authorize
+    // the client, so treat it exactly like a thrown error (fail closed).
+    if (!omadaResult || omadaResult.success !== true) {
+      console.error(
+        '[auth] Omada returned a non-success result for client ' + normalizedMac +
+        ' (voucher ' + normalizedVoucher + '): ' + JSON.stringify(omadaResult)
+      );
+      return res.status(502).json({
+        success: false,
+        error: 'Authentication server did not accept the request.',
+        code: 'OMADA_ERROR',
+      });
+    }
+
+    // ── Consume the voucher (ONLY after definitive Omada success) ──
+    // Atomic + race-safe: consumeVoucher returns false if another request
+    // grabbed the same code in between, in which case we must not record a
+    // session for it.
+    let voucherConsumed = false;
+    try {
+      voucherConsumed = await consumeVoucher(normalizedVoucher, normalizedMac);
+    } catch (consumeErr) {
+      console.error(
+        '[auth] failed to mark voucher ' + normalizedVoucher +
+        ' as used after Omada success: ' + (consumeErr && consumeErr.message)
+      );
+    }
+    if (!voucherConsumed) {
+      console.error(
+        '[auth] voucher ' + normalizedVoucher + ' was already consumed concurrently; ' +
+        'client ' + normalizedMac + ' was authorized on Omada but no session was recorded.'
+      );
+      return res.status(409).json({
+        success: false,
+        error: 'This voucher is no longer available.',
+        code: 'VOUCHER_NOT_AVAILABLE',
       });
     }
 

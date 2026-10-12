@@ -31,7 +31,14 @@ function normalizeMac(mac) {
 
 /**
  * validateVoucher — Validate a voucher code against the database.
- * Returns { valid, code, duration, message }
+ *
+ * SIDE-EFFECT FREE: this performs the state/expiry checks only and NEVER
+ * marks the voucher as used. Consumption is a separate step (consumeVoucher)
+ * that callers must run ONLY after the Omada controller confirms the client
+ * was authorized — otherwise a failed extPortal/auth call would burn the
+ * guest's voucher while the network stays locked.
+ *
+ * Returns { valid, code, duration, type, message, id? }
  */
 async function validateVoucher(voucher, clientMac) {
   const db = getDb();
@@ -72,14 +79,37 @@ async function validateVoucher(voucher, clientMac) {
     }
   }
 
-  // Mark voucher as used
-  await db.run(`
+  // Validation is intentionally read-only. The voucher is marked 'used' by
+  // consumeVoucher() and only AFTER Omada confirms authorization.
+  return {
+    valid: true,
+    id: row.id,
+    duration: row.duration_minutes,
+    type: row.type || 'standard',
+    message: 'Voucher accepted.',
+  };
+}
+
+/**
+ * consumeVoucher — Atomically mark a previously validated voucher as used.
+ *
+ * MUST be called only after Omada confirms the client is authorized. The
+ * state guard (`state IN active/claimed`) makes the update race-safe and
+ * idempotent: if another request consumed the voucher in between, rowCount
+ * is 0 and this returns false — the caller must then NOT record a session.
+ *
+ * @param {string} voucher   Normalized voucher code
+ * @param {string} clientMac Client MAC the voucher is being bound to
+ * @returns {Promise<boolean>} true only if THIS call consumed the voucher
+ */
+async function consumeVoucher(voucher, clientMac) {
+  const db = getDb();
+  const result = await db.run(`
     UPDATE vouchers
     SET state = 'used', used_by_mac = ?, used_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `, [clientMac || '', row.id]);
-
-    return { valid: true, duration: row.duration_minutes, type: row.type || 'standard', message: 'Voucher accepted.' };
+    WHERE code = ? AND state IN ('active', 'claimed')
+  `, [clientMac || '', voucher]);
+  return Boolean(result && result.rowCount > 0);
 }
 
 /**
@@ -540,6 +570,7 @@ async function getPauseRemaining(sessionId) {
 
 module.exports = {
   validateVoucher,
+  consumeVoucher,
   recordSession,
   getSession,
   pauseSession,
