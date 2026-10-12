@@ -79,71 +79,83 @@
   <!-- Redirect logic: reads URL params for destination and session ID, wires
        the "Continue to website" button, and after a short settling delay
        performs one connectivity probe so the captive mini-browser can close.
-       The probe is delayed on purpose: Omada reprograms its firewall rules
-       asynchronously after auth, and navigating into that window drops the
-       TLS handshake (net::ERR_CONNECTION_CLOSED). -->
+       Both the button and the probe exit to a NON-whitelisted external host
+       (never the Render portal URL), because the OS only detects that the
+       firewall opened when a request reaches a host outside Omada's
+       Pre-Authentication Access list. The probe is delayed on purpose: Omada
+       reprograms its firewall rules asynchronously after auth. -->
   <script>
     (function () {
       'use strict';
       var params = new URLSearchParams(window.location.search);
       var destination = decodeURIComponent(params.get('redirectUrl') || params.get('targetUrl') || '');
+      var originUrl = decodeURIComponent(params.get('originUrl') || params.get('originalUrl') || '');
       var sessionId = params.get('sessionId') || '';
-      var DEFAULT_DEST = 'https://www.example.com/welcome';
 
-      // Validation: only allow http/https URLs on the allowlist
-      var ALLOWED_PATTERNS = [
-        /^https?:\/\/([a-z0-9-]+\.)*example\.com\//i,
-        /^https?:\/\/([a-z0-9-]+\.)*google\.com\//i,
-      ];
-      function isAllowed(url) {
+      // ---- Final exit destination -----------------------------------------
+      // The mobile OS only marks the network as open when a request reaches a
+      // host Omada has NOT whitelisted in "Pre-Authentication Access". This
+      // portal runs on Render and Render is whitelisted, so bouncing the guest
+      // back to (or off) Render produces no network-state change and the
+      // captive mini-browser never closes.
+      //
+      // Plain-HTTP fallback on purpose: an HTTPS exit can drop its TLS
+      // handshake while Omada is still reprogramming firewall rules and surface
+      // as net::ERR_CONNECTION_CLOSED.
+      //   Alternative OS-probe endpoint:
+      //     'http://connectivitycheck.gstatic.com/generate_204'
+      var EXTERNAL_FALLBACK = 'http://neverssl.com/';
+
+      // Hosts that must never be used as the exit: the whole *.onrender.com
+      // estate (pre-auth whitelisted) and whatever origin served this page.
+      var RENDER_HOST = 'onrender.com';
+      var PAGE_ORIGIN = (function () {
+        try { return new URL(window.location.href).origin.toLowerCase(); } catch (e) { return ''; }
+      })();
+
+      function isUsableExternalUrl(url) {
         if (!url) return false;
-        try {
-          var u = new URL(url);
-          // In production: expand ALLOWED_PATTERNS with operator-configured domains
-          return u.protocol === 'https:' || u.protocol === 'http:';
-        } catch (e) { return false; }
+        var u;
+        try { u = new URL(url); } catch (e) { return false; }
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false; // http(s) only
+        var host = u.hostname.toLowerCase();
+        if (host === RENDER_HOST) return false;
+        if (host.length > RENDER_HOST.length && host.slice(-(RENDER_HOST.length + 1)) === '.' + RENDER_HOST) return false;
+        if (PAGE_ORIGIN && u.origin.toLowerCase() === PAGE_ORIGIN) return false;
+        return true;
       }
 
-      var dest = isAllowed(destination) ? destination : DEFAULT_DEST;
+      // Try the guest's original URL first, then the controller's redirectUrl,
+      // but accept a value ONLY when it is a genuine external host. A Render
+      // URL (or an empty / non-http value) is rejected and forced to the HTTP
+      // fallback.
+      var candidates = [originUrl, destination];
+      var exitUrl = EXTERNAL_FALLBACK;
+      for (var i = 0; i < candidates.length; i++) {
+        if (isUsableExternalUrl(candidates[i])) { exitUrl = candidates[i]; break; }
+      }
 
-      // The external destination is opened when the user taps "Continue to
-      // website". The connectivity probe below is separate: it only nudges the
-      // phone's OS to re-check internet access once Omada has authorized this
-      // client, so the captive mini-browser closes cleanly.
+      // The "Continue to website" button drives the same non-whitelisted exit
+      // so the OS sees one consistent, verifiable destination.
       var redirectBtn = document.getElementById('redirect-btn');
-      if (redirectBtn) redirectBtn.href = dest;
+      if (redirectBtn) redirectBtn.href = exitUrl;
 
       // ---- Connectivity probe (graceful captive-browser close) ------------
       // Omada has authorized this client, but the phone's OS only learns that
-      // when it next checks internet access. Making a real internet request
-      // prompts that check, so the OS marks the network as connected and
-      // dismisses the captive mini-browser instead of asking the user to sign
-      // in again.
+      // when it next checks internet access. Hitting the non-whitelisted exit
+      // computed above prompts that check, so the OS marks the network as
+      // connected and dismisses the captive mini-browser instead of asking the
+      // user to sign in again.
       //
-      // Destination order (Omada URL params first):
-      //   1. originUrl / originalUrl — the URL the guest first tried to open.
-      //   2. redirectUrl / targetUrl  — the controller's explicit destination.
-      //   3. A plain-HTTP fallback.
-      //
-      // The fallback is deliberately HTTP: redirecting to a strict-HTTPS host
-      // right while Omada is still reprogramming its firewall rules drops the
-      // TLS handshake and the mini-browser reports net::ERR_CONNECTION_CLOSED.
-      // A plain-HTTP site has no TLS handshake to lose, so it survives the
-      // window in which the network is only half-open.
-      var originUrl = decodeURIComponent(params.get('originUrl') || params.get('originalUrl') || '');
-      var PROBE_FALLBACK = 'http://neverssl.com/';
       // 6-8s: give Omada's hardware time to finish opening the network before
       // the phone (or the captive mini-browser) attempts a real connection.
       var PROBE_DELAY_MS = 7000;
-      var probeUrl = /^https?:\/\//i.test(originUrl) ? originUrl
-                   : isAllowed(destination) ? destination
-                   : PROBE_FALLBACK;
 
       var notice = document.getElementById('connect-notice');
       if (notice) notice.textContent = 'Finalizing your connection\u2026';
 
       var probeTimer = window.setTimeout(function () {
-        window.location.href = probeUrl;
+        window.location.href = exitUrl;
       }, PROBE_DELAY_MS);
 
       // If the user taps the destination button first, cancel the automatic
