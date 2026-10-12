@@ -571,3 +571,132 @@ describe('Omada site / OMADAC id logging', () => {
     expect(_internal.maskHost('not a url')).toBe('(invalid URL)');
   });
 });
+
+// ================================================================
+// outgoing request body logging (failure lines)
+// ================================================================
+describe('outgoing body logging', () => {
+  test('summarizeBody reports connection type, site, time and extra fields', () => {
+    const eap = _internal.summarizeBody(JSON.stringify({
+      clientMac: 'AA:BB:CC:DD:EE:FF', clientIp: '192.168.1.50', apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GuestWiFi', radioId: 1, authType: 4, time: 1800000, site: 'Default',
+    }));
+    expect(eap.connection).toBe('EAP');
+    expect(eap.site).toBe('Default');
+    expect(eap.text).toContain('time=1800000');
+    expect(eap.text).toContain('radioId=1');
+    expect(eap.text).toContain('apMac=AA:AA:AA:AA:AA:AA');
+    // site is reported once, via the dedicated field — not duplicated in text
+    expect(eap.text).not.toContain('site=');
+
+    const gw = _internal.summarizeBody(JSON.stringify({
+      clientMac: 'AA:BB:CC:DD:EE:FF', gatewayMac: 'GG:GG:GG:GG:GG:GG', vid: 20,
+      authType: 4, time: 60000, site: 'Branch',
+    }));
+    expect(gw.connection).toBe('Gateway');
+    expect(gw.site).toBe('Branch');
+    expect(gw.text).toContain('gatewayMac=GG:GG:GG:GG:GG:GG');
+    expect(gw.text).toContain('vid=20');
+  });
+
+  test('summarizeBody never prints login credentials (only a redacted count)', () => {
+    const login = _internal.summarizeBody(
+      JSON.stringify({ name: 'portal-operator', password: 'portal-secret' })
+    );
+    expect(login.text).not.toContain('portal-secret');
+    expect(login.text).not.toContain('portal-operator');
+    expect(login.text).toContain('redacted field(s)');
+  });
+
+  test('summarizeBody degrades safely for missing / non-JSON bodies', () => {
+    expect(_internal.summarizeBody(undefined).text).toBe('(body not captured)');
+    expect(_internal.summarizeBody('').text).toBe('(body not captured)');
+    expect(_internal.summarizeBody('not json').text).toBe('(non-JSON body)');
+  });
+
+  test('authenticateClient network failure logs the body that was sent', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/extPortal/auth')) {
+        // Emit asynchronously: omadaRequest attaches its error listener only
+        // after the mocked https.request call returns.
+        setImmediate(() => {
+          const e = new Error('connect ECONNREFUSED 127.0.0.1:443');
+          e.code = 'ECONNREFUSED';
+          req.emit('error', e);
+        });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+    });
+    try {
+      await expect(
+        omada.authenticateClient({
+          clientMac: 'AA:BB:CC:DD:EE:FF',
+          clientIp: '192.168.1.50',
+          apMac: 'AA:AA:AA:AA:AA:AA',
+          ssidName: 'GuestWiFi',
+          radioId: 1,
+          durationMinutes: 30,
+        })
+      ).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+
+      const lines = errSpy.mock.calls.map((c) => c.join(' '));
+      const failed = lines.find((l) => l.includes('authenticateClient FAILED'));
+      expect(failed).toBeDefined();
+      expect(failed).toContain('code=ECONNREFUSED');
+
+      const sent = lines.find((l) => l.includes('sent body:'));
+      expect(sent).toBeDefined();
+      expect(sent).toContain('connection=EAP');
+      expect(sent).toContain('site=Default');
+      expect(sent).toContain('time=' + (30 * 60 * 1000));
+      expect(sent).toContain('apMac=AA:AA:AA:AA:AA:AA');
+      expect(sent).toContain('ssidName=GuestWiFi');
+    } finally {
+      uninstall();
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+
+  test('controller rejection logs the body that was sent', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    let callIndex = 0;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      callIndex += 1;
+      if (callIndex === 1) {
+        respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+      } else {
+        respondJson(req, cb, 200, { errorCode: 12, msg: 'client not found' });
+      }
+    });
+    try {
+      await expect(
+        omada.authenticateClient({
+          clientMac: 'AA:BB:CC:DD:EE:FF',
+          gatewayMac: 'GG:GG:GG:GG:GG:GG',
+          vid: 20,
+          durationMinutes: 15,
+        })
+      ).rejects.toMatchObject({ code: 'OMADA_AUTH_REJECTED' });
+
+      const lines = errSpy.mock.calls.map((c) => c.join(' '));
+      const rejected = lines.find((l) => l.includes('REJECTED by controller'));
+      expect(rejected).toContain('errorCode=12');
+
+      const sent = lines.find((l) => l.includes('sent body:'));
+      expect(sent).toBeDefined();
+      expect(sent).toContain('connection=Gateway');
+      expect(sent).toContain('gatewayMac=GG:GG:GG:GG:GG:GG');
+      expect(sent).toContain('vid=20');
+      expect(sent).toContain('time=' + (15 * 60 * 1000));
+    } finally {
+      uninstall();
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+  });
+});

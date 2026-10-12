@@ -215,8 +215,9 @@ async function authenticateClient(ctx) {
     response = await withSession(() => omadaRequest(path, 'POST', body));
   } catch (netErr) {
     // Network / TLS / timeout — log the EXACT reason for the Render logs,
-    // then rethrow so the route fails closed without consuming the voucher.
-    logAuthFailure('extPortal/auth request', netErr, ctx, path);
+    // including the body that was sent (connection type / site / time), then
+    // rethrow so the route fails closed without consuming the voucher.
+    logAuthFailure('extPortal/auth request', netErr, ctx, path, body);
     throw netErr;
   }
 
@@ -231,6 +232,11 @@ async function authenticateClient(ctx) {
       ' reason=' + reason
     );
     console.error('[omada]   full controller response: ' + JSON.stringify(response.body));
+    const rejectedSummary = summarizeBody(body);
+    console.error(
+      '[omada]   sent body: connection=' + rejectedSummary.connection +
+      ' site=' + rejectedSummary.site + ' ' + rejectedSummary.text
+    );
     const err = new Error('Omada extPortal/auth rejected: ' + reason);
     err.code = 'OMADA_AUTH_REJECTED';
     err.omadaResponse = response.body;
@@ -464,16 +470,76 @@ const NETWORK_ERROR_HINTS = {
 };
 
 /**
+ * Body fields that are safe to echo into the logs. Anything NOT in this list
+ * is reported as a count only — /hotspot/login carries an operator password
+ * and must never leak it into the Render logs.
+ */
+const LOGGABLE_BODY_FIELDS = [
+  'clientMac', 'clientIp', 'apMac', 'ssidName', 'radioId',
+  'gatewayMac', 'vid', 'authType', 'time', 'site',
+];
+
+/**
+ * Summarize an outgoing Omada request body for the logs: the connection type
+ * the body describes, the site it targets, and the whitelisted field values
+ * (clientMac/clientIp/apMac/ssidName/radioId/gatewayMac/vid/authType/time/
+ * site). Non-whitelisted keys are replaced by a count, so a login body's
+ * credentials can never be printed.
+ *
+ * @param {string} body  The JSON string passed to omadaRequest
+ * @returns {{connection: string, site: string, text: string}}
+ */
+function summarizeBody(body) {
+  if (body === undefined || body === null || body === '') {
+    return { connection: 'unknown', site: '(unknown)', text: '(body not captured)' };
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch (_) { /* non-JSON body below */ }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return { connection: 'unknown', site: '(unknown)', text: '(non-JSON body)' };
+  }
+
+  const parts = [];
+  for (const field of LOGGABLE_BODY_FIELDS) {
+    // `site` is returned separately so callers can print `site=…` once.
+    if (field === 'site') continue;
+    if (Object.prototype.hasOwnProperty.call(parsed, field)) {
+      parts.push(field + '=' + parsed[field]);
+    }
+  }
+  const redacted = Object.keys(parsed).filter((k) => !LOGGABLE_BODY_FIELDS.includes(k));
+  const connection = parsed.gatewayMac
+    ? 'Gateway'
+    : ((parsed.apMac || parsed.ssidName) ? 'EAP' : 'unknown');
+  const site = (parsed.site !== undefined && parsed.site !== null)
+    ? String(parsed.site)
+    : '(none in body)';
+
+  return {
+    connection,
+    site,
+    text: (parts.length ? parts.join(' ') : '(no loggable fields)') +
+      (redacted.length ? ' [+' + redacted.length + ' redacted field(s)]' : ''),
+  };
+}
+
+/**
  * Log the exact failure reason for an extPortal/auth call so it is visible
- * in the Render logs: transport code, a mapped cause hint, the controller's
+ * in the Render logs: transport code, a mapped cause hint, the body that was
+ * SENT (connection type / site / time / extra fields), the controller's
  * response JSON, and the stack.
  *
  * @param {string} stage  Which step failed (e.g. 'extPortal/auth request')
  * @param {Error}  err    The error thrown by omadaRequest/withSession
  * @param {Object} ctx    The authenticateClient context (for clientMac)
  * @param {string} path   The controller path that was called
+ * @param {string} [body] The JSON body that was sent (for the sent-body line)
  */
-function logAuthFailure(stage, err, ctx, path) {
+function logAuthFailure(stage, err, ctx, path, body) {
   const code = (err && err.code) || 'NO_CODE';
   const message = (err && err.message) ? err.message : String(err);
   const clientMac = (ctx && ctx.clientMac) || 'unknown';
@@ -484,6 +550,11 @@ function logAuthFailure(stage, err, ctx, path) {
     ' base=' + BASE_URL +
     ' code=' + code +
     ' message=' + message
+  );
+  const sent = summarizeBody(body);
+  console.error(
+    '[omada]   sent body: connection=' + sent.connection +
+    ' site=' + sent.site + ' ' + sent.text
   );
   const hint = NETWORK_ERROR_HINTS[code];
   if (hint) console.error('[omada]   cause: ' + code + ' -> ' + hint);
@@ -597,18 +668,14 @@ function logResolvedConfig(force) {
  * @param {Object} [opts]
  */
 function logControllerRequest(method, path, body, opts) {
-  let site = '(none in body)';
-  try {
-    const parsed = body ? JSON.parse(body) : null;
-    if (parsed && parsed.site !== undefined && parsed.site !== null) {
-      site = String(parsed.site);
-    }
-  } catch (_) { /* non-JSON body — nothing to report */ }
+  const summary = summarizeBody(body);
 
   console.log(
     '[omada] → ' + method + ' ' + maskHost(BASE_URL) + path +
-    ' site=' + site +
+    ' site=' + summary.site +
     ' omadacId=' + (OMADAC_ID || '(unset)') +
+    ' connection=' + summary.connection +
+    ' body: ' + summary.text +
     (opts && opts.skipAuth ? ' (login — credentials redacted)' : '')
   );
 }
@@ -743,6 +810,8 @@ module.exports = {
     invalidateSession,
     logResolvedConfig,
     logControllerRequest,
+    logAuthFailure,
+    summarizeBody,
     maskHost,
     MOCK_MODE,
     BASE_URL,
