@@ -95,8 +95,9 @@ describe('POST /api/auth — Omada context passthrough', () => {
     expect(ctx.clientIp).toBe('192.168.1.50');
     expect(ctx.ssidName).toBe('GuestWiFi');
     expect(ctx.radioId).toBe(1);                      // taken from the URL, not defaulted to 0
-    // The submitted voucher reaches the service so it can travel with the
-    // extPortal/auth body alongside authType=4.
+    // The submitted voucher still reaches the service (it is consumed
+    // locally); it is deliberately NOT forwarded to the controller — see
+    // authenticateClient and the documented extPortal/auth contract.
     expect(ctx.voucherCode).toBe('123456');
   });
 

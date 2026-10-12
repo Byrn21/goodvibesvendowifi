@@ -16,19 +16,21 @@
  *
  *   2. Client authorization (payment-triggered):
  *        POST /{OMADAC_ID}/api/v2/hotspot/extPortal/auth
- *        body: { clientMac, apMac, ssidName, radioId, authType: 4, time,
- *                site, code }
- *      `code` carries the guest's voucher. NOTE: the voucher is NOT part of
- *      TP-Link's documented extPortal/auth contract (the Portal — this
- *      backend — is the component that verifies the voucher; the controller
- *      only ever authorizes/expires a MAC). It is sent deliberately, per
- *      operator request, alongside authType=4. If a firmware rejects the
- *      unknown field, remove it here — every authorization fails closed
- *      (502) until then.
+ *        body: { clientMac, clientIp, apMac, ssidName, radioId, authType: 4,
+ *                time, site }
+ *      The body carries EXACTLY the fields TP-Link documents for the
+ *      external portal server (FAQ 2907 for v4.1.5–4.4.6, FAQ 3231 for
+ *      v5.0.15–6.2.0, and the v6.2.10+ guide): authType is 4. The guest's
+ *      voucher is deliberately NOT sent to the controller — in external
+ *      portal mode the controller never consults its own voucher database;
+ *      this backend (the Portal) is the component that verifies the
+ *      voucher, and the controller only authorizes the MAC. Adding a `code`
+ *      field is outside the documented contract and has been observed to
+ *      make some firmware reject the authorization (silent MAC-auth
+ *      failure → redirect loop, while the local voucher stays valid).
  *      The `time` unit depends on controller firmware. OMADA_TIME_UNIT
  *      (config/index.js) selects the scaling; default 'ms' matches the
- *      two cross-verified working implementations (FAQ 3231 prose alone
- *      claims microseconds — do not trust the prose over working code).
+ *      v6.2.10+ guide and the cross-verified working implementations.
  *
  *   3. Client de-authorization (pause / expiration):
  *      try POST /{OMADAC_ID}/api/v2/hotspot/extPortal/unauth first
@@ -194,13 +196,12 @@ async function authenticateClient(ctx) {
     time: minutesToTime(ctx.durationMinutes),
     site: SITE,
   };
-  // The guest's voucher travels with the authorization request, next to
-  // authType=4. Sent whenever the caller supplies one (the /api/auth route
-  // and session re-auth both do); omitted only when there is genuinely no
-  // voucher — e.g. a payment webhook session that never had one.
-  if (ctx.voucherCode !== undefined && ctx.voucherCode !== null && String(ctx.voucherCode).trim() !== '') {
-    authBody.code = String(ctx.voucherCode).trim();
-  }
+  // NOTE: ctx.voucherCode is intentionally NOT placed in this body. In
+  // external-portal mode the controller only authorizes a MAC and never
+  // validates vouchers, and `code` is not part of TP-Link's documented
+  // extPortal/auth contract — an unknown field can make some firmware
+  // reject the whole authorization. The voucher is still consumed locally
+  // (routes/auth.js); it simply never reaches the controller.
   if (isGateway) {
     authBody.gatewayMac = ctx.gatewayMac;
     if (ctx.vid !== undefined && ctx.vid !== null && ctx.vid !== '') {
@@ -407,11 +408,8 @@ async function timeOneFallback(ctx) {
     time: 1,
     site: SITE,
   };
-  // Mirror authenticateClient: the same voucher field travels with the
-  // fallback re-authorization, so both extPortal/auth calls look alike.
-  if (ctx.voucherCode !== undefined && ctx.voucherCode !== null && String(ctx.voucherCode).trim() !== '') {
-    fallbackBody.code = String(ctx.voucherCode).trim();
-  }
+  // Mirror authenticateClient: the documented body only — no `code` field,
+  // so both extPortal/auth calls look alike (see authenticateClient).
   const body = JSON.stringify(fallbackBody);
 
   try {

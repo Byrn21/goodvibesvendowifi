@@ -300,7 +300,7 @@ describe('authenticateClient (extPortal/auth)', () => {
     ).rejects.toMatchObject({ code: 'OMADA_MISSING_FIELD' });
   });
 
-  test('sends the voucher as `code` alongside authType=4 (EAP)', async () => {
+  test('does NOT add a `code` field to the extPortal/auth body (EAP)', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
       if (options.path.includes('/extPortal/auth')) {
@@ -320,9 +320,9 @@ describe('authenticateClient (extPortal/auth)', () => {
         voucherCode: '654321',
       });
       const authBody = JSON.parse(authReq.written[0] || '{}');
-      expect(authBody.code).toBe('654321');
+      expect(authBody.code).toBeUndefined();
       expect(authBody.authType).toBe(4);
-      // unchanged contract fields survive alongside the added one
+      // the documented contract fields are still present
       expect(authBody.clientMac).toBe('AA:BB:CC:DD:EE:FF');
       expect(authBody.apMac).toBe('AA:AA:AA:AA:AA:AA');
     } finally {
@@ -330,7 +330,7 @@ describe('authenticateClient (extPortal/auth)', () => {
     }
   });
 
-  test('sends the voucher as `code` for Gateway clients too', async () => {
+  test('does NOT add a `code` field for Gateway clients either', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
       if (options.path.includes('/extPortal/auth')) {
@@ -349,14 +349,14 @@ describe('authenticateClient (extPortal/auth)', () => {
         voucherCode: '  654321  ',
       });
       const authBody = JSON.parse(authReq.written[0] || '{}');
-      expect(authBody.code).toBe('654321'); // trimmed
+      expect(authBody.code).toBeUndefined();
       expect(authBody.gatewayMac).toBe('GG:GG:GG:GG:GG:GG');
     } finally {
       uninstall();
     }
   });
 
-  test('omits `code` only when no voucher was supplied', async () => {
+  test('sends no `code` field when no voucher was supplied', async () => {
     let authReq = null;
     const uninstall = mockHttpTransport((options, req, cb) => {
       if (options.path.includes('/extPortal/auth')) {
@@ -645,7 +645,7 @@ describe('Omada site / OMADAC id logging', () => {
     }
   });
 
-  test('time=1 fallback re-sends the voucher alongside authType=4', async () => {
+  test('time=1 fallback sends the documented body (no `code` field)', async () => {
     // The handler runs BEFORE req.write(), so the body is parsed after the
     // await completes (same pattern as the other body-shape tests).
     let fallbackReq = null;
@@ -675,7 +675,7 @@ describe('Omada site / OMADAC id logging', () => {
       const fallbackBody = JSON.parse(fallbackReq.written[0] || '{}');
       expect(fallbackBody.time).toBe(1);
       expect(fallbackBody.authType).toBe(4);
-      expect(fallbackBody.code).toBe('654321');
+      expect(fallbackBody.code).toBeUndefined();
     } finally {
       uninstall();
     }
