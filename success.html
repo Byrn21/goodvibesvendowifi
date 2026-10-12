@@ -50,7 +50,8 @@
         </div>
 
         <div id="redirect-notice" class="redirect-notice">
-          <p>You&rsquo;re connected. Tap the button below to open your destination.</p>
+          <p>You&rsquo;re connected. Taking you online automatically &mdash; or tap the button to open your destination now.</p>
+          <p id="connect-notice" aria-live="polite"></p>
           <a href="#" id="redirect-btn" class="btn btn--outline btn--full" role="button">
             Continue to website
             <svg class="btn-icon btn-icon--right" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -102,10 +103,39 @@
 
       var dest = isAllowed(destination) ? destination : DEFAULT_DEST;
 
-      // Click-only navigation: the external destination is opened ONLY when the
-      // user taps "Continue to website". No timer and no load-time redirect.
+      // The external destination is opened when the user taps "Continue to
+      // website". The connectivity probe below is separate: it only nudges the
+      // phone's OS to re-check internet access once Omada has authorized this
+      // client, so the captive mini-browser closes cleanly.
       var redirectBtn = document.getElementById('redirect-btn');
       if (redirectBtn) redirectBtn.href = dest;
+
+      // ---- Connectivity probe (graceful captive-browser close) ------------
+      // Omada has authorized this client, but the phone's OS only learns that
+      // when it next checks internet access. Making a real internet request
+      // prompts that check, so the OS marks the network as connected and
+      // dismisses the captive mini-browser instead of asking the user to sign
+      // in again. Prefer the URL the guest originally tried to open (Omada's
+      // originUrl); otherwise fall back to a known endpoint.
+      var originUrl = decodeURIComponent(params.get('originUrl') || params.get('originalUrl') || '');
+      var PROBE_FALLBACK = 'https://www.google.com/';
+      var PROBE_DELAY_MS = 2500;
+      var probeUrl = /^https?:\/\//i.test(originUrl) ? originUrl : PROBE_FALLBACK;
+
+      var notice = document.getElementById('connect-notice');
+      if (notice) notice.textContent = 'Finalizing your connection\u2026';
+
+      var probeTimer = window.setTimeout(function () {
+        window.location.href = probeUrl;
+      }, PROBE_DELAY_MS);
+
+      // If the user taps the destination button first, cancel the automatic
+      // probe so we never fight their navigation.
+      if (redirectBtn) {
+        redirectBtn.addEventListener('click', function () {
+          window.clearTimeout(probeTimer);
+        });
+      }
 
       // Populate session info if sessionId provided
       if (sessionId) {

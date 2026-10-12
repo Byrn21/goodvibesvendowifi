@@ -153,6 +153,17 @@
     errorPage:   'error.html',
     statusPage:  'status.html',
 
+    // ==============================================================
+    // POST-AUTH SETTLING (race-condition guard)
+    // ==============================================================
+    // Milliseconds to keep the "Connecting…" screen up AFTER the backend
+    // confirms the voucher, before loading success.html. Omada applies the
+    // client's firewall/authorization rules asynchronously, so navigating
+    // immediately makes the phone's OS re-check internet access too early,
+    // mark the network as still-captive, and close the captive mini-browser
+    // ("Sign in to network" again). 3000-4000 works for most controllers.
+    connectDelayMs: 3500,
+
   };
 
 })();

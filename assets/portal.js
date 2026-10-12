@@ -43,6 +43,13 @@
     successPage: 'success.html',
     errorPage: 'error.html',
     statusPage: 'status.html',
+    // Post-auth settling delay (ms) before the portal hands the browser over
+    // to success.html. Omada applies the client's authorization rules
+    // asynchronously AFTER it accepts the voucher; redirecting the phone
+    // immediately makes its OS re-check internet access too early, conclude
+    // the network is still captive, and close the captive mini-browser asking
+    // the user to sign in again. Default 3.5s.
+    connectDelayMs: 3500,
     // Omada controller context appended to the portal URL. Both the wireless
     // (EAP: clientMac/clientIp/apMac/ssidName/radioId) and wired (Gateway:
     // clientMac/clientIp/gatewayMac/vid) shapes are captured so the backend
@@ -289,6 +296,10 @@
   // FORM SUBMISSION
   // ===============================================================
   var submitting = false;
+  // Set once a successful auth is being handed off to the success page (we
+  // deliberately wait before navigating), so the submit cleanup below does not
+  // tear down the "Connecting…" state during that wait.
+  var navigating = false;
 
   function handleSubmit(e) {
     e.preventDefault();
@@ -358,6 +369,7 @@
     }
 
     promise.then(handleSuccess).catch(handleFailure).then(function () {
+      if (navigating) return; // success hand-off deliberately owns the UI now
       submitting = false;
       if (submitBtn) {
         submitBtn.disabled = false;
@@ -535,7 +547,39 @@
     if (result.sessionId)   params.set('sessionId', result.sessionId);
     params.set('countdown', '3');
 
-    window.location.href = CONFIG.successPage + '?' + params.toString();
+    // Carry Omada's originUrl (the URL the guest first tried to open) through
+    // to success.html so it can nudge the OS with a real internet request.
+    var originUrl = queryParams.raw && (queryParams.raw.originUrl || queryParams.raw.originalUrl);
+    if (originUrl) params.set('originUrl', encodeURIComponent(originUrl));
+
+    var target = CONFIG.successPage + '?' + params.toString();
+
+    // ---- Settle before navigating (race-condition fix) ----
+    // The backend has confirmed the voucher, but the Omada controller still has
+    // to program the firewall / authorization rules for THIS client's MAC. If
+    // we navigate right away, the phone's OS probes for internet before that
+    // access exists, marks the network as still-captive, and tears the captive
+    // mini-browser down asking the user to sign in again. Hold on the
+    // "Connecting…" screen for a few seconds so the controller catches up.
+    var delayMs = (typeof CONFIG.connectDelayMs === 'number') ? CONFIG.connectDelayMs : 3500;
+
+    // Keep the loading overlay visible (and labelled) throughout the wait.
+    var settleOverlay = $('loading-overlay');
+    var settleText = $('loading-text');
+    var settleLabel = $('submit-label');
+    if (settleOverlay) { settleOverlay.setAttribute('aria-hidden', 'false'); show(settleOverlay); }
+    if (settleText) settleText.textContent = 'Connecting…';
+    if (settleLabel) settleLabel.textContent = 'Connecting…';
+
+    // Return a promise so the caller's cleanup waits for the hand-off instead
+    // of resolving (and resetting the UI) during the delay.
+    navigating = true;
+    return new Promise(function (resolve) {
+      window.setTimeout(function () {
+        window.location.href = target;
+        resolve();
+      }, delayMs);
+    });
   }
 
   // ---- Handle auth failure ----
