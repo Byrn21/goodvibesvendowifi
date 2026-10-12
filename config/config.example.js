@@ -96,9 +96,13 @@
     allowedRedirectDomains: [
       'example.com',
       'google.com',
-      'captive.apple.com',
-      'connectivitycheck.gstatic.com',
-      // Add your actual guest-facing domains here
+      // Add your actual guest-facing domains here.
+      // Do NOT list the OS captive-portal probe endpoints (captive.apple.com,
+      // connectivitycheck.gstatic.com / connectivitycheck.android.com) or any
+      // host that is whitelisted in Omada's Pre-Authentication Access list
+      // (this portal's own domain, Render). Landing on a whitelisted host
+      // produces no network-state change, so the OS keeps the captive
+      // mini-browser open and re-probes — the client loop.
     ],
 
     // Fallback destination if no original URL is captured.

@@ -106,12 +106,31 @@
       //     'http://connectivitycheck.gstatic.com/generate_204'
       var EXTERNAL_FALLBACK = 'http://neverssl.com/';
 
-      // Hosts that must never be used as the exit: the whole *.onrender.com
-      // estate (pre-auth whitelisted) and whatever origin served this page.
-      var RENDER_HOST = 'onrender.com';
+      // Hosts that must NEVER be used as the exit destination. Reaching one of
+      // these produces no network-state change (they are pre-auth whitelisted
+      // on the OC200, or they are the OS's own captive-detection endpoints that
+      // the phone is already polling), so the OS keeps the captive mini-browser
+      // open and re-probes — the client loop this page exists to avoid.
+      //   - *.onrender.com            this portal's Render host
+      //   - goodvibesvendowifi.com    the portal's custom domain (also whitelisted)
+      //   - captive.apple.com         iOS captive-portal probe
+      //   - connectivitycheck.*       Android captive-portal probe
+      // Whatever origin served this page is rejected separately below.
+      var BLOCKED_HOSTS = [
+        'onrender.com',
+        'goodvibesvendowifi.com',
+        'captive.apple.com',
+        'connectivitycheck.gstatic.com',
+        'connectivitycheck.android.com',
+      ];
       var PAGE_ORIGIN = (function () {
         try { return new URL(window.location.href).origin.toLowerCase(); } catch (e) { return ''; }
       })();
+
+      function hostMatches(host, domain) {
+        return host === domain ||
+          (host.length > domain.length && host.slice(-(domain.length + 1)) === '.' + domain);
+      }
 
       function isUsableExternalUrl(url) {
         if (!url) return false;
@@ -119,8 +138,9 @@
         try { u = new URL(url); } catch (e) { return false; }
         if (u.protocol !== 'http:' && u.protocol !== 'https:') return false; // http(s) only
         var host = u.hostname.toLowerCase();
-        if (host === RENDER_HOST) return false;
-        if (host.length > RENDER_HOST.length && host.slice(-(RENDER_HOST.length + 1)) === '.' + RENDER_HOST) return false;
+        for (var b = 0; b < BLOCKED_HOSTS.length; b++) {
+          if (hostMatches(host, BLOCKED_HOSTS[b])) return false;
+        }
         if (PAGE_ORIGIN && u.origin.toLowerCase() === PAGE_ORIGIN) return false;
         return true;
       }
