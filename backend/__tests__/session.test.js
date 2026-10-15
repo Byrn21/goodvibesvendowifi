@@ -146,7 +146,57 @@ describe('Session State Machine', () => {
     expect(s.state).toBe('expired');
   });
 
-    test('pause rejects non-active session', async () => {
+    test('getSession lazily expires an active session whose time has passed (no recursion)', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_lazy_expire',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      duration: 60,
+    });
+
+    // Push expires_at into the past while the row is STILL 'active'. This is the
+    // exact state that used to make getSession() -> expireSession() ->
+    // getSession() recurse forever on the still-'active' row and exhaust the
+    // heap on a long-lived server.
+    await getDb().run(
+      'UPDATE sessions SET expires_at = ? WHERE session_id = ?',
+      [new Date(Date.now() - 60 * 1000).toISOString(), 'sess_lazy_expire']
+    );
+
+    const s = await sessionService.getSession('sess_lazy_expire');
+    expect(s.state).toBe('expired');
+
+    // The expiry must actually be persisted, not just reported.
+    const row = await getDb().getOne(
+      'SELECT state FROM sessions WHERE session_id = ?',
+      ['sess_lazy_expire']
+    );
+    expect(row.state).toBe('expired');
+  });
+
+  test('expireSession on an already-timed-out active row persists and is idempotent', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_worker_expire',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      duration: 60,
+    });
+    await getDb().run(
+      'UPDATE sessions SET expires_at = ? WHERE session_id = ?',
+      [new Date(Date.now() - 60 * 1000).toISOString(), 'sess_worker_expire']
+    );
+
+    // This mirrors what startExpirationWorker does on its first pass.
+    await sessionService.expireSession('sess_worker_expire', 'time_expired');
+    await sessionService.expireSession('sess_worker_expire', 'time_expired');
+
+    const row = await getDb().getOne(
+      'SELECT state, expire_reason FROM sessions WHERE session_id = ?',
+      ['sess_worker_expire']
+    );
+    expect(row.state).toBe('expired');
+    expect(row.expire_reason).toBe('time_expired');
+  });
+
+  test('pause rejects non-active session', async () => {
     await expect(sessionService.pauseSession('nonexistent')).rejects.toThrow('Session not found');
   });
 

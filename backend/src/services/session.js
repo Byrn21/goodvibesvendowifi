@@ -189,9 +189,17 @@ async function recordSession({
 }
 
 /**
- * getSession — Get a session by ID.
+ * loadSession — read a session row and map it to the session object.
+ *
+ * PURE READ: unlike getSession(), this NEVER applies the lazy active→expired
+ * side effect. expireSession() uses it precisely so the chain
+ * getSession() → expireSession() → loadSession() cannot re-enter getSession()
+ * and recurse forever (see the note on getSession below).
+ *
+ * @param {string} sessionId
+ * @returns {Promise<Object|null>}
  */
-async function getSession(sessionId) {
+async function loadSession(sessionId) {
   const db = getDb();
 
   const row = await db.getOne(`
@@ -238,12 +246,32 @@ async function getSession(sessionId) {
     session.radioId = 0; // context table may not exist yet in legacy DBs
   }
 
+  return session;
+}
+
+/**
+ * getSession — Get a session by ID, applying the lazy server-side expiry.
+ *
+ * CRITICAL: the expiry branch below passes the session it already read into
+ * expireSession(). expireSession() must NEVER call getSession() back: the row
+ * is still 'active' in the database (nothing has been written yet), so a
+ * re-entrant getSession() would see the same active-but-timed-out row, call
+ * expireSession() again, and so on — an unbounded async recursion that never
+ * yields to the event loop and exhausts the heap on a long-lived server.
+ *
+ * @param {string} sessionId
+ * @returns {Promise<Object|null>}
+ */
+async function getSession(sessionId) {
+  const session = await loadSession(sessionId);
+  if (!session) return null;
+
   // Check server-side expiration for active sessions
   if (session.state === 'active' && session.expiresAt) {
     const now = Date.now();
     const expiresAt = new Date(session.expiresAt).getTime();
     if (now >= expiresAt) {
-      await expireSession(sessionId, 'time_expired');
+      await expireSession(sessionId, 'time_expired', session);
       return { ...session, state: 'expired' };
     }
   }
@@ -253,10 +281,19 @@ async function getSession(sessionId) {
 
 /**
  * expireSession — Deactivate via Omada and mark expired in DB.
+ *
+ * @param {string} sessionId
+ * @param {string} [reason]
+ * @param {Object} [loaded]  Session already read by the caller (getSession's
+ *                           lazy-expiry path). Read here when absent. The row
+ *                           is deliberately loaded with loadSession(), NOT
+ *                           getSession(): the latter would re-enter its own
+ *                           expiry branch on an active-but-timed-out row and
+ *                           recurse forever.
  */
-async function expireSession(sessionId, reason = 'time_expired') {
+async function expireSession(sessionId, reason = 'time_expired', loaded) {
   const db = getDb();
-  const session = await getSession(sessionId);
+  const session = loaded || await loadSession(sessionId);
 
   if (!session) return false;
   if (session.state === 'expired') return false; // Idempotent
