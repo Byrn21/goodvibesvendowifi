@@ -131,10 +131,10 @@ describe('POST /api/auth — Premium pause/resume re-login', () => {
     expect(after.state).toBe('paused');
   });
 
-  test('Standard vouchers run continuously and cannot be resumed', async () => {
+  test('a still-active Standard session on the same device reauthorizes (no 403)', async () => {
     await seedUsedVoucher('111111', 'standard', MAC);
     await sessionService.recordSession({
-      sessionId: 'sess_std_used',
+      sessionId: 'sess_std_live',
       clientMac: MAC,
       duration: 60,
       voucherUsed: '111111',
@@ -142,6 +142,40 @@ describe('POST /api/auth — Premium pause/resume re-login', () => {
     });
 
     const res = await authRequest({ voucher: '111111' });
+
+    // Standard plans cannot PAUSE, but a still-ACTIVE session on the SAME
+    // device is re-authorized for its remaining time so the guest reconnects
+    // without a new voucher — this is the seamless-reconnect fix.
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.resumed).toBeUndefined();
+    expect(res.body.sessionId).toBe('sess_std_live');
+    expect(res.body.session.state).toBe('active');
+    expect(res.body.session.remainingSeconds).toBeGreaterThan(3500);
+
+    // The session kept running: not paused, not reset, still active.
+    const after = await sessionService.getSession('sess_std_live');
+    expect(after.state).toBe('active');
+  });
+
+  test('a PAUSED Standard session is still rejected (pause is Premium-only)', async () => {
+    await seedUsedVoucher('555555', 'standard', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_std_paused',
+      clientMac: MAC,
+      duration: 60,
+      voucherUsed: '555555',
+      voucherType: 'standard',
+    });
+    // A Standard session should never reach 'paused' via the API; force the
+    // state directly to prove the resume branch guards on voucher type.
+    await getDb().run(
+      `UPDATE sessions SET state = 'paused', remaining_seconds = 1800, expires_at = NULL
+       WHERE session_id = ?`,
+      ['sess_std_paused']
+    );
+
+    const res = await authRequest({ voucher: '555555' });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('STANDARD_CONTINUOUS');
@@ -223,5 +257,188 @@ describe('POST /api/auth — Premium pause/resume re-login', () => {
 
     expect(res.status).toBe(401);
     expect(res.body.code).toBe('USED_VOUCHER');
+  });
+});
+
+describe('POST /api/session/reauthorize — MAC-based silent reconnect', () => {
+  test('re-authorizes the newest active session for a MAC', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_reau_active',
+      clientMac: MAC,
+      clientIp: '10.0.0.5',
+      apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GuestWiFi',
+      duration: 60,
+      voucherType: 'standard',
+    });
+
+    const res = await request(app)
+      .post('/api/session/reauthorize')
+      .send({ clientMac: MAC, apMac: 'AA:AA:AA:AA:AA:AA', ssidName: 'GuestWiFi', radioId: 0 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.active).toBe(true);
+    expect(res.body.sessionId).toBe('sess_reau_active');
+    expect(res.body.remainingSeconds).toBeGreaterThan(3500);
+  });
+
+  test('returns 404 { active: false } when no live session exists for the MAC', async () => {
+    const res = await request(app)
+      .post('/api/session/reauthorize')
+      .send({ clientMac: OTHER_MAC });
+
+    expect(res.status).toBe(404);
+    expect(res.body.active).toBe(false);
+  });
+
+  test('rejects a missing/invalid clientMac with 400', async () => {
+    const missing = await request(app).post('/api/session/reauthorize').send({});
+    expect(missing.status).toBe(400);
+
+    const invalid = await request(app)
+      .post('/api/session/reauthorize')
+      .send({ clientMac: 'not-a-mac' });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe('INVALID_MAC');
+  });
+
+  test('does not re-authorize an expired session', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_reau_expired',
+      clientMac: MAC,
+      duration: 60,
+    });
+    await sessionService.expireSession('sess_reau_expired', 'time_expired');
+
+    const res = await request(app)
+      .post('/api/session/reauthorize')
+      .send({ clientMac: MAC });
+
+    expect(res.status).toBe(404);
+    expect(res.body.active).toBe(false);
+  });
+});
+
+describe('GET /api/session/status?voucher= — offline status checker', () => {
+  test('reports remaining time for a live session created by the voucher', async () => {
+    await seedUsedVoucher('111111', 'standard', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_status_active',
+      clientMac: MAC,
+      duration: 60,
+      voucherUsed: '111111',
+      voucherType: 'standard',
+    });
+
+    const res = await request(app).get('/api/session/status?voucher=111111');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.active).toBe(true);
+    expect(res.body.state).toBe('active');
+    expect(res.body.sessionId).toBe('sess_status_active');
+    expect(res.body.remainingSeconds).toBeGreaterThan(3500);
+  });
+
+  test('reports the frozen remaining time for a paused session', async () => {
+    await seedUsedVoucher('222222', 'premium', MAC);
+    await seedPausedPremiumSession('sess_status_paused', '222222', MAC);
+
+    const res = await request(app).get('/api/session/status?voucher=222222');
+
+    expect(res.status).toBe(200);
+    expect(res.body.active).toBe(true);
+    expect(res.body.state).toBe('paused');
+    expect(res.body.remainingSeconds).toBeGreaterThan(3500);
+  });
+
+  test('reports an unused voucher as active with its full duration', async () => {
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, state)
+       VALUES ('333333', 'standard', 180, 'active')`
+    );
+
+    const res = await request(app).get('/api/session/status?voucher=333333');
+
+    expect(res.status).toBe(200);
+    expect(res.body.active).toBe(true);
+    expect(res.body.state).toBe('unused');
+    expect(res.body.remainingSeconds).toBe(180 * 60);
+  });
+
+  test('reports EXPIRED for a used voucher whose session has elapsed', async () => {
+    await seedUsedVoucher('444444', 'standard', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_status_done',
+      clientMac: MAC,
+      duration: 60,
+      voucherUsed: '444444',
+    });
+    await sessionService.expireSession('sess_status_done', 'time_expired');
+
+    const res = await request(app).get('/api/session/status?voucher=444444');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.active).toBe(false);
+    expect(res.body.error).toBe('EXPIRED');
+    expect(res.body.remainingSeconds).toBe(0);
+  });
+
+  test('reports EXPIRED for a used voucher with no session row at all', async () => {
+    await seedUsedVoucher('555555', 'standard', MAC);
+
+    const res = await request(app).get('/api/session/status?voucher=555555');
+
+    expect(res.status).toBe(200);
+    expect(res.body.active).toBe(false);
+    expect(res.body.error).toBe('EXPIRED');
+  });
+
+  test('returns 404 when the voucher code does not exist', async () => {
+    const res = await request(app).get('/api/session/status?voucher=999999');
+
+    expect(res.status).toBe(404);
+    expect(res.body.active).toBe(false);
+    expect(res.body.code).toBe('VOUCHER_NOT_FOUND');
+  });
+
+  test('rejects a malformed voucher code with 400', async () => {
+    const res = await request(app).get('/api/session/status?voucher=abc');
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_VOUCHER_FORMAT');
+  });
+
+  test('reports EXPIRED for a voucher past its own expiry date', async () => {
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, state, expires_at)
+       VALUES ('777777', 'standard', 60, 'active', '2020-01-01T00:00:00.000Z')`
+    );
+
+    const res = await request(app).get('/api/session/status?voucher=777777');
+
+    expect(res.status).toBe(200);
+    expect(res.body.active).toBe(false);
+    expect(res.body.error).toBe('EXPIRED');
+
+    // The lazy sweep marks the row 'expired', matching validateVoucher().
+    const row = await getDb().getOne(`SELECT state FROM vouchers WHERE code = '777777'`);
+    expect(row.state).toBe('expired');
+  });
+
+  test('still serves the sessionId path unchanged', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_status_byid',
+      clientMac: MAC,
+      duration: 60,
+    });
+
+    const res = await request(app).get('/api/session/status?sessionId=sess_status_byid');
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('sess_status_byid');
+    expect(res.body.state).toBe('active');
   });
 });

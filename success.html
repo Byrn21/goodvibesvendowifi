@@ -91,6 +91,7 @@
       var destination = decodeURIComponent(params.get('redirectUrl') || params.get('targetUrl') || '');
       var originUrl = decodeURIComponent(params.get('originUrl') || params.get('originalUrl') || '');
       var sessionId = params.get('sessionId') || '';
+      var clientMac = params.get('clientMac') || '';
 
       // ---- Final exit destination -----------------------------------------
       // The mobile OS only marks the network as open when a request reaches a
@@ -193,6 +194,9 @@
         try {
           window.localStorage.setItem('portalSessionId', sessionId);
           window.sessionStorage.setItem('portalSessionId', sessionId);
+          // Persist the client MAC alongside the session id so a later silent
+          // re-authorization can identify this device even without URL params.
+          if (clientMac) window.localStorage.setItem('portalClientMac', clientMac);
         } catch (e) { /* storage unavailable */ }
 
         var infoBox = document.getElementById('session-info');

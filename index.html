@@ -480,6 +480,7 @@
           <div class="claim-cta">
             <button type="button" class="btn btn--secondary btn--full" id="claim-voucher-btn">Claim Voucher</button>
             <p class="form-hint form-hint--centered">Already paid? Claim your voucher with the last 4 digits of your reference number.</p>
+            <button id="open-status-modal-btn" class="btn btn--outline btn--full" type="button" style="margin-top: 8px;">Check Voucher Status / Reconnect</button>
           </div>
         </section>
       <!-- ================================================================
@@ -826,6 +827,53 @@
         </button>
         <button type="button" class="btn btn--primary hidden" id="claim-retry">Try Again</button>
         <button type="button" class="btn btn--primary hidden" id="claim-connect">Connect Now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       CHECK VOUCHER STATUS / RECONNECT MODAL
+       Opened by the "Check Voucher Status / Reconnect" button on the main
+       portal screen. Works while the guest is OFFLINE: it reports the time
+       left on a voucher code via GET /api/session/status?voucher=... and
+       shows the reconnect steps. Wired up by assets/portal.js
+       (initVoucherStatusModal).
+       ================================================================ -->
+  <div id="status-modal" class="modal-overlay hidden" tabindex="-1" role="dialog" aria-labelledby="status-modal-title" aria-modal="true">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="status-modal-title">Check Voucher Status</h3>
+        <button type="button" class="modal-close" id="status-modal-close" aria-label="Close status dialog">&times;</button>
+      </div>
+      <div class="modal-body claim-modal__body">
+
+        <!-- Section 1: reconnection guide (shown first — a guest who just
+             dropped off the network usually only needs these steps). -->
+        <div class="status-banner status-banner--info" style="margin-bottom: 16px; text-align: left;">
+          <p><strong>Nawala ang Wi-Fi? Naka-save ang oras mo!</strong></p>
+          <p>1. I-OFF at I-ON ang Wi-Fi.</p>
+          <p>2. Mag-connect ulit sa GoodVibesVendoWifi.</p>
+          <p>3. Automatic babalik ang internet!</p>
+        </div>
+
+        <!-- Section 2: the time checker -->
+        <p class="modal-instruction">Enter your voucher code to see the time remaining on it.</p>
+        <input
+          type="text"
+          id="status-voucher-input"
+          class="qr-ref-input claim-modal__input"
+          placeholder="Enter 6-digit code"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          maxlength="6"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="Voucher code to check"
+        >
+        <p id="status-input-error" class="form-error hidden" role="alert"></p>
+        <button id="check-status-submit" class="btn btn--primary btn--full" type="button" style="margin-top: 8px;">Check Time</button>
+        <div id="status-result-box" class="hidden" style="margin-top: 12px; text-align: center; font-weight: bold;"></div>
+
       </div>
     </div>
   </div>

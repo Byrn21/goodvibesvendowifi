@@ -357,10 +357,12 @@ function maskVoucher(code) {
  *      lands on success.html and the guest regains access.
  *   2. PAUSED (Premium only) — resume from the frozen remaining time.
  *
- * Standard plans run continuously and never pause, so reusing one is rejected.
- * In every case the requesting device must match the MAC the voucher was first
- * bound to (vouchers.used_by_mac, falling back to the session's client_mac) —
- * this is the anti-sharing guard for BOTH the active and paused paths.
+ * Standard plans run continuously and never pause, but a still-ACTIVE session
+ * on the SAME device is re-authorized for BOTH tiers (case 1) so a Standard
+ * guest who drops off can reconnect; only the PAUSED resume (case 2) is
+ * Premium-only. In every case the requesting device must match the MAC the
+ * voucher was first bound to (vouchers.used_by_mac, falling back to the
+ * session's client_mac) — this is the anti-sharing guard for BOTH paths.
  *
  * Always resolves to { status, body }: the caller sends it as the response.
  *
@@ -377,13 +379,6 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
   const session = await getSessionByVoucher(voucher);
   if (!session) {
     return fail(401, 'USED_VOUCHER', 'This voucher has already been used.');
-  }
-
-  // Standard vouchers run continuously and never pause, so there is no paused
-  // state for them to resume — reusing one is an error.
-  if (!isPausableVoucherType(session.voucherType)) {
-    return fail(403, 'STANDARD_CONTINUOUS',
-      'Standard vouchers run continuously and cannot be paused or resumed.');
   }
 
   // ── MAC binding: only the device the voucher was first used on may re-enter ──
@@ -403,6 +398,9 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
   // ── Still-active session, same device: re-open the firewall ──────────────
   // The session is valid and belongs to this device, so this is NOT the
   // "already active" error case — replay extPortal/auth with the time left.
+  // Runs for BOTH Standard and Premium: a Standard plan cannot pause, but its
+  // live session is still re-authorized here (a dropped firewall / reopened
+  // captive mini-browser is not an error).
   if (session.state === 'active') {
     let reauthed;
     try {
@@ -450,6 +448,13 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
   if (session.state !== 'paused') {
     // Any other state (e.g. a payment stage) is not resumable.
     return fail(409, 'ALREADY_ACTIVE', 'This session is already active on this device.');
+  }
+
+  // Pause/resume is a Premium-only feature: Standard plans run continuously
+  // and never pause, so a non-pausable tier reaching this branch is an error.
+  if (!isPausableVoucherType(session.voucherType)) {
+    return fail(403, 'STANDARD_CONTINUOUS',
+      'Standard vouchers run continuously and cannot be paused or resumed.');
   }
 
   const remaining = Math.max(0, Math.floor(session.remainingSeconds || 0));

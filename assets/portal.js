@@ -542,6 +542,14 @@
         window.localStorage.setItem('portalSessionId', result.sessionId);
         window.sessionStorage.setItem('portalSessionId', result.sessionId);
       }
+      // Persist the client MAC so a later silent re-authorization can still
+      // identify this device even if the Omada query params are gone.
+      if (queryParams.clientMac) {
+        window.localStorage.setItem(
+          'portalClientMac',
+          normalizeMac(queryParams.clientMac) || queryParams.clientMac
+        );
+      }
     } catch (e) { /* storage unavailable — URL param still works */ }
 
     // Build the post-login destination.
@@ -557,6 +565,9 @@
       var params = new URLSearchParams();
       if (result.redirectUrl) params.set('redirectUrl', encodeURIComponent(result.redirectUrl));
       if (result.sessionId)   params.set('sessionId', result.sessionId);
+      if (queryParams.clientMac) {
+        params.set('clientMac', normalizeMac(queryParams.clientMac) || queryParams.clientMac);
+      }
       params.set('countdown', '3');
 
       // Carry Omada's originUrl (the URL the guest first tried to open) through
@@ -615,6 +626,7 @@
       VOUCHER_DEVICE_MISMATCH: 'This voucher is already in use on another device and cannot be resumed here.',
       ALREADY_ACTIVE:          'This session is already active on this device.',
       CONFIG_ERROR:    'Portal configuration error. Please contact support.',
+      OMADA_ERROR:     'Temporary connection error. Please wait a moment and try again.',
       AUTH_FAILED:     'Authentication failed. Please check your voucher and try again.',
     };
 
@@ -1623,6 +1635,236 @@
     });
   }
 
+  // ===============================================================
+  // CHECK VOUCHER STATUS / RECONNECT MODAL
+  // ===============================================================
+  // Works for a guest who is OFFLINE (or whose Wi-Fi just dropped) and only
+  // has the printed code in hand: GET /api/session/status?voucher=<code>
+  // reports the time left on that code, and the dialog also carries the
+  // reconnect steps. Nothing here grants access — the checker is read-only,
+  // and re-opening the firewall is what attemptAutoReconnect()/the voucher
+  // form already do.
+  var statusState = {
+    open: false,
+    checking: false,
+    lastFocus: null
+  };
+
+  // "1h 30m" / "45m" / "30s" — the modal reports time in hours/minutes, not
+  // the m:ss the cash-payment countdown uses.
+  function formatRemainingLong(seconds) {
+    var total = Math.max(0, Math.floor(Number(seconds) || 0));
+    var hours = Math.floor(total / 3600);
+    var mins = Math.floor((total % 3600) / 60);
+    if (hours > 0 && mins > 0) return hours + 'h ' + mins + 'm';
+    if (hours > 0) return hours + 'h';
+    if (mins > 0) return mins + 'm';
+    return total + 's';
+  }
+
+  // Show a line in #status-result-box. `tone` picks the theme colour:
+  // 'success' (green), 'error' (red), 'warning' (amber), 'info' (brown).
+  function setStatusResult(message, tone) {
+    var box = $('status-result-box');
+    if (!box) return;
+    if (!message) {
+      box.textContent = '';
+      box.style.color = '';
+      hide(box);
+      return;
+    }
+    var colors = {
+      success: 'var(--green)',
+      error: 'var(--error-text)',
+      warning: 'var(--warning-text)',
+      info: 'var(--text-2)'
+    };
+    box.textContent = message;
+    box.style.color = colors[tone] || colors.info;
+    show(box);
+  }
+
+  function setStatusInputError(message) {
+    var errEl = $('status-input-error');
+    if (errEl) {
+      if (message) { errEl.textContent = message; show(errEl); }
+      else { errEl.textContent = ''; hide(errEl); }
+    }
+    var input = $('status-voucher-input');
+    if (input) {
+      if (message) input.classList.add('is-error');
+      else input.classList.remove('is-error');
+    }
+  }
+
+  function openStatusModal() {
+    var modal = $('status-modal');
+    if (!modal) return;
+    statusState.lastFocus = document.activeElement;
+    statusState.checking = false;
+
+    var input = $('status-voucher-input');
+    if (input) { input.value = ''; input.classList.remove('is-error'); }
+    setStatusInputError('');
+    setStatusResult('');
+
+    show(modal);
+    statusState.open = true;
+    modal.focus();
+
+    // Hide the page-level banner so the modal is the only message on screen.
+    setBanner('');
+
+    var submitBtn = $('check-status-submit');
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.removeAttribute('aria-busy'); }
+
+    if (input) setTimeout(function () { input.focus(); }, 60);
+  }
+
+  function closeStatusModal() {
+    if (!statusState.open) return;
+    var modal = $('status-modal');
+    if (modal) hide(modal);
+    statusState.open = false;
+    var focusTarget = statusState.lastFocus;
+    statusState.lastFocus = null;
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+      setTimeout(function () { focusTarget.focus(); }, 60);
+    }
+  }
+
+  // Map a successful payload onto the result line. The backend distinguishes
+  // an unused voucher (full duration still due), a live/paused session, and a
+  // fully consumed one ({ active: false, error: 'EXPIRED' }).
+  function renderVoucherStatus(data) {
+    var remaining = formatRemainingLong(data.remainingSeconds);
+
+    if (data.active) {
+      if (data.state === 'active') {
+        return setStatusResult(
+          'Active session: ' + remaining + ' left. Nawala ang Wi-Fi? I-OFF at I-ON lang ang Wi-Fi para bumalik.',
+          'success'
+        );
+      }
+      if (data.state === 'paused') {
+        return setStatusResult(
+          'Session is paused \u2014 ' + remaining + ' left when you resume.',
+          'success'
+        );
+      }
+      if (data.state === 'pending_payment' || data.state === 'pending_verification') {
+        return setStatusResult(
+          'Payment confirmed \u2014 your ' + remaining + ' of internet starts when you connect.',
+          'success'
+        );
+      }
+      return setStatusResult(
+        'Voucher is still valid \u2014 ' + remaining + ' of internet available.',
+        'success'
+      );
+    }
+
+    return setStatusResult(
+      'This voucher has been fully used or has expired.',
+      'error'
+    );
+  }
+
+  // GET /api/session/status?voucher=<code> — native fetch, same shape as the
+  // other portal calls (see attemptAutoReconnect / submitClaim).
+  function checkVoucherStatus() {
+    if (statusState.checking) return;
+
+    var input = $('status-voucher-input');
+    var raw = input ? input.value : '';
+
+    // Reuse the shared 6-digit rule (validateVoucher) rather than a new one.
+    var check = validateVoucher(raw);
+    if (!check.ok) {
+      setStatusInputError(check.message);
+      setStatusResult('');
+      if (input) input.focus();
+      return;
+    }
+
+    statusState.checking = true;
+    setStatusInputError('');
+    setStatusResult('Checking\u2026', 'info');
+
+    var submitBtn = $('check-status-submit');
+    if (submitBtn) { submitBtn.disabled = true; submitBtn.setAttribute('aria-busy', 'true'); }
+
+    fetch((CONFIG.apiBaseUrl || '') + '/api/session/status?voucher=' + encodeURIComponent(check.value), {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      credentials: 'same-origin'
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        return { ok: r.ok, status: r.status, data: data };
+      });
+    }).then(function (res) {
+      var data = res.data || {};
+
+      if (res.status === 404) {
+        setStatusResult('Voucher code not found. Please check the 6 digits and try again.', 'error');
+        return;
+      }
+      if (res.status === 400) {
+        setStatusResult(data.error || 'Please enter a valid 6-digit voucher code.', 'error');
+        return;
+      }
+      if (!res.ok || !data.success) {
+        setStatusResult('Temporary connection error. Please wait a moment and try again.', 'warning');
+        return;
+      }
+      renderVoucherStatus(data);
+    }).catch(function () {
+      setStatusResult('Temporary connection error. Please wait a moment and try again.', 'warning');
+    }).then(function () {
+      statusState.checking = false;
+      var btn = $('check-status-submit');
+      if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+    });
+  }
+
+  function initVoucherStatusModal() {
+    var modal = $('status-modal');
+    if (!modal) return;
+
+    var openBtn = $('open-status-modal-btn');
+    var closeBtn = $('status-modal-close');
+    var submitBtn = $('check-status-submit');
+    var input = $('status-voucher-input');
+
+    if (openBtn) openBtn.addEventListener('click', openStatusModal);
+    if (closeBtn) closeBtn.onclick = closeStatusModal;
+    if (submitBtn) submitBtn.addEventListener('click', checkVoucherStatus);
+
+    // Click on the dimmed overlay (outside the dialog) closes the modal.
+    modal.addEventListener('click', function (e) {
+      if (e.target === modal) closeStatusModal();
+    });
+
+    if (input) {
+      // Numeric only, at most 6 digits — mirrors the voucher input on the form.
+      input.addEventListener('input', function () {
+        input.value = input.value.replace(/\D/g, '').slice(0, 6);
+        setStatusInputError('');
+      });
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          checkVoucherStatus();
+        }
+      });
+    }
+
+    document.addEventListener('keydown', function (e) {
+      if (!statusState.open) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeStatusModal(); }
+    });
+  }
+
   // Keep keyboard focus inside the dialog while it is open.
   function qrFocusable() {
     var overlay = qrEl('payment-qr-modal');
@@ -1719,9 +1961,75 @@
     });
   }
 
+  // ===============================================================
+  // AUTO-RECONNECT ON LOAD (MAC-based, no voucher re-entry)
+  // ===============================================================
+  // A device whose session is still live but whose firewall authorization was
+  // lost (Wi-Fi dropped, captive mini-browser reopened, OS re-probe) is
+  // silently re-authorized by MAC so the guest reconnects WITHOUT re-entering a
+  // voucher. The controller call is proxied by the backend (backend mode only);
+  // a 404 (no active session) falls through to the normal voucher form.
+  function attemptAutoReconnect() {
+    if (CONFIG.mockMode || CONFIG.mode !== 'backend') return;
+
+    var clientMac = queryParams.clientMac;
+    if (!clientMac) return;
+
+    fetch((CONFIG.apiBaseUrl || '') + '/api/session/reauthorize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        clientMac: normalizeMac(clientMac) || clientMac,
+        apMac:     normalizeMac(queryParams.apMac) || queryParams.apMac || '',
+        ssidName:  queryParams.ssidName || '',
+        radioId:   queryParams.radioId,
+      }),
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        return { ok: r.ok, data: data };
+      });
+    }).then(function (res) {
+      var data = res.data || {};
+      if (!res.ok || !data.success || !data.sessionId) {
+        // 404 / not active / anything else → fall through to voucher entry.
+        return;
+      }
+
+      // Persist the identifiers so status.html can recover the session after
+      // the redirect, even if it is opened later without query params.
+      try {
+        window.localStorage.setItem('portalSessionId', data.sessionId);
+        window.sessionStorage.setItem('portalSessionId', data.sessionId);
+        window.localStorage.setItem(
+          'portalClientMac',
+          normalizeMac(clientMac) || clientMac
+        );
+      } catch (e) { /* storage unavailable — URL param still works */ }
+
+      setBanner('Active session detected, reconnecting\u2026', 'info');
+
+      var params = new URLSearchParams();
+      params.set('sessionId', data.sessionId);
+      params.set('clientMac', normalizeMac(clientMac) || clientMac);
+      params.set('countdown', '3');
+      var target = (CONFIG.successPage || 'success.html') + '?' + params.toString();
+
+      // Reuse the post-auth settling delay so Omada's asynchronous firewall
+      // programming finishes before the OS re-probes the network.
+      var delayMs = (typeof CONFIG.connectDelayMs === 'number') ? CONFIG.connectDelayMs : 3500;
+      window.setTimeout(function () { window.location.href = target; }, delayMs);
+    }).catch(function () { /* silent — the voucher form still works */ });
+  }
+
   function init() {
     // Parse Omada query params first (affects everything)
     parseQueryParams();
+
+    // Silent reconnection: if the controller gave us a clientMac and an active
+    // session still exists for it, re-open the firewall and hand off to
+    // success.html without asking for a voucher again.
+    attemptAutoReconnect();
 
     // Fire-and-forget context capture: on portal LANDING, beacon the
     // controller context (client/AP MAC, SSID, radioId) to the backend so
@@ -1752,6 +2060,9 @@
 
     // Set up the centralized Claim Voucher modal
     initClaimModal();
+
+    // Set up the Check Voucher Status / Reconnect modal
+    initVoucherStatusModal();
 
     // Input UX
     initInputEnhancements();

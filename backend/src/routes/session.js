@@ -2,6 +2,8 @@
  * routes/session.js
  *
  * GET  /api/session/status  — Poll session remaining time
+ *                             (?sessionId=, ?mac=, or ?voucher= for the
+ *                              offline "Check Voucher Status" modal)
  * POST /api/session/pause  — Pause active session
  * POST /api/session/resume — Resume paused session
  * POST /api/session/expire — Admin: immediately expire session
@@ -13,20 +15,31 @@ const {
   getSession,
   pauseSession,
   resumeSession,
+  reauthorizeSession,
   expireSession,
   isSessionActive,
   getPauseRemaining,
   isPausableVoucherType,
+  getSessionByVoucher,
 } = require('../services/session');
 const omadaService = require('../services/omada');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
+const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 
 // ── GET /api/session/status ──────────────────────────────────
 router.get('/status', async (req, res, next) => {
   try {
     let { sessionId } = req.query;
-    const { mac } = req.query;
+    const { mac, voucher } = req.query;
+
+    // The "Check Voucher Status / Reconnect" modal has no sessionId and the
+    // client may not be online yet, so it polls with ?voucher=<code>. Answered
+    // entirely from the voucher + its session row — nothing is mutated here
+    // except marking an already-expired voucher 'expired' (see below).
+    if (voucher !== undefined) {
+      return await handleVoucherStatus(req, res, voucher);
+    }
 
     // The payment QR flow does not have a sessionId yet, so it polls with
     // ?mac=<client_mac>. Resolve the newest non-terminal session for that
@@ -117,6 +130,98 @@ router.get('/status', async (req, res, next) => {
       String((err && err.message) || '(no message)') + ' ' +
       String((err && err.stack) || '(no stack)')
     );
+    next(err);
+  }
+});
+
+// ── POST /api/session/reauthorize ─────────────────────────────
+// MAC-keyed silent reconnection: when a device whose voucher session is still
+// live loses its firewall authorization (Wi-Fi dropped, captive mini-browser
+// reopened, OS re-probe) it can be put back online WITHOUT re-entering a
+// voucher. The most recent still-live active session for the MAC is looked up
+// and reauthorizeSession() replays the Omada extPortal/auth call for the
+// remaining time. Returns 404 { active: false } when there is nothing to
+// resume, so the portal can fall through to normal voucher entry.
+//
+// UNAUTHENTICATED by design (the client is not online yet) — it grants nothing
+// beyond re-opening the firewall for a session that already exists and is
+// already bound to this MAC.
+router.post('/reauthorize', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+    const rawMac = body.clientMac;
+
+    if (!rawMac || typeof rawMac !== 'string') {
+      return res.status(400).json({ success: false, error: 'clientMac is required.', code: 'INVALID_INPUT' });
+    }
+    const normalized = normalizeMac(rawMac);
+    if (!normalized) {
+      return res.status(400).json({ success: false, error: 'Invalid client MAC address.', code: 'INVALID_MAC' });
+    }
+
+    // Most recent STILL-LIVE active session for this device. `expires_at > now`
+    // (not just state = 'active') so a session the expiration worker has not
+    // swept yet is not mistaken for a resumable one.
+    const row = await getDb().getOne(
+      `SELECT session_id FROM sessions
+        WHERE LOWER(client_mac) = LOWER(?)
+          AND state = 'active'
+          AND expires_at IS NOT NULL AND expires_at > ?
+        ORDER BY id DESC LIMIT 1`,
+      [normalized, new Date().toISOString()]
+    );
+    if (!row || !row.session_id) {
+      return res.status(404).json({
+        success: false,
+        active: false,
+        code: 'NO_ACTIVE_SESSION',
+        error: 'No active session exists for this device.',
+      });
+    }
+
+    // Re-open the firewall for the remaining time. reauthorizeSession() is
+    // fail-closed: on controller rejection/throw the session's local state is
+    // left untouched and the client may safely retry.
+    let reauthed;
+    try {
+      reauthed = await reauthorizeSession(row.session_id);
+    } catch (err) {
+      if (err && err.code === 'SESSION_EXPIRED') {
+        await expireSession(row.session_id, 'time_expired');
+        return res.status(404).json({
+          success: false,
+          active: false,
+          code: 'SESSION_EXPIRED',
+          error: 'The session has expired.',
+        });
+      }
+      console.error(
+        '[session/reauthorize] Omada auth failed for ' + normalized +
+        ' (session ' + row.session_id + '): ' + String((err && err.message) || '(no message)')
+      );
+      return res.status(502).json({
+        success: false,
+        error: 'Temporary connection error. Please wait a moment and try again.',
+        code: 'OMADA_ERROR',
+      });
+    }
+
+    console.log(
+      '[session/reauthorize] re-authorized client ' + normalized +
+      ' session=' + reauthed.session.sessionId +
+      ' remainingSeconds=' + reauthed.remainingSeconds
+    );
+
+    return res.json({
+      success: true,
+      active: true,
+      sessionId: reauthed.session.sessionId,
+      state: reauthed.session.state,
+      remainingSeconds: reauthed.remainingSeconds,
+      expiresAt: reauthed.session.expiresAt,
+      voucherType: reauthed.session.voucherType || 'standard',
+    });
+  } catch (err) {
     next(err);
   }
 });
@@ -233,6 +338,146 @@ function maskVoucherCode(code) {
   const cleaned = code.replace(/\s+/g, '');
   if (cleaned.length < 2) return '••••••';
   return '••••' + cleaned.slice(-2);
+}
+
+/**
+ * handleVoucherStatus — answer GET /api/session/status?voucher=<code>.
+ *
+ * Backs the "Check Voucher Status / Reconnect" modal, which must work for a
+ * guest who is OFFLINE (no sessionId, possibly no active session) and only
+ * has the printed code in hand. Nothing here re-authorizes the client or
+ * grants access — it only reports what the database already knows:
+ *
+ *   - active/paused session for the code   -> { active: true, remainingSeconds, expiresAt }
+ *   - unused voucher with a known duration -> { active: true, remainingSeconds: duration*60 }
+ *   - consumed voucher whose session ended -> { active: false, error: 'EXPIRED' }
+ *   - code not in the vouchers table       -> 404 { active: false }
+ *
+ * The only write is marking an already time-expired voucher row 'expired',
+ * matching validateVoucher()'s lazy sweep.
+ */
+async function handleVoucherStatus(req, res, voucher) {
+  if (typeof voucher !== 'string' || !voucher) {
+    return res.status(400).json({ success: false, error: 'voucher is required.', code: 'INVALID_INPUT' });
+  }
+
+  const code = normalizeVoucherCode(voucher);
+  const format = validateVoucherCodeFormat(code);
+  if (!format.ok) {
+    return res.status(400).json({ success: false, error: format.message, code: 'INVALID_VOUCHER_FORMAT' });
+  }
+
+  const row = await getDb().getOne(
+    `SELECT id, code, type, duration_minutes, state, expires_at
+       FROM vouchers WHERE code = ? LIMIT 1`,
+    [code]
+  );
+
+  // Unknown code — distinct from an expired one so the UI can say
+  // "not found" rather than "expired".
+  if (!row) {
+    return res.status(404).json({
+      success: false,
+      active: false,
+      code: 'VOUCHER_NOT_FOUND',
+      error: 'Voucher code not found.',
+    });
+  }
+
+  const serverTime = Math.floor(Date.now() / 1000);
+  const durationSeconds = (row.duration_minutes || 60) * 60;
+  const voucherExpiresAt = row.expires_at || null;
+
+  // An unused voucher that has passed its own expiry date is dead; sweep it
+  // lazily like validateVoucher() does, then report EXPIRED.
+  const voucherTimedOut = voucherExpiresAt
+    ? serverTime >= Math.floor(new Date(voucherExpiresAt).getTime() / 1000)
+    : false;
+
+  if (row.state === 'expired' || voucherTimedOut) {
+    if (row.state !== 'expired') {
+      try {
+        await getDb().run(`UPDATE vouchers SET state = 'expired' WHERE id = ?`, [row.id]);
+      } catch (_) { /* best-effort sweep — the response is unchanged */ }
+    }
+    return res.json({
+      success: true,
+      active: false,
+      error: 'EXPIRED',
+      state: 'expired',
+      remainingSeconds: 0,
+      expiresAt: voucherExpiresAt,
+      voucherType: row.type || 'standard',
+    });
+  }
+
+  // Unconsumed voucher: its full duration is still available.
+  if (row.state === 'active' || row.state === 'claimed') {
+    return res.json({
+      success: true,
+      active: true,
+      state: 'unused',
+      remainingSeconds: durationSeconds,
+      expiresAt: voucherExpiresAt,
+      voucherType: row.type || 'standard',
+      durationMinutes: row.duration_minutes || 60,
+    });
+  }
+
+  // Consumed ('used'): the answer lives on the session the code created.
+  // getSessionByVoucher -> getSession() applies server-side expiry, so an
+  // active-but-timed-out session comes back as state 'expired'.
+  const session = await getSessionByVoucher(code);
+
+  if (session && session.state === 'active') {
+    return res.json({
+      success: true,
+      active: true,
+      state: 'active',
+      sessionId: session.sessionId,
+      remainingSeconds: computeRemaining(session, serverTime),
+      expiresAt: session.expiresAt,
+      voucherType: session.voucherType || row.type || 'standard',
+    });
+  }
+
+  if (session && session.state === 'paused') {
+    // Premium pause freezes the remaining time on the session row.
+    return res.json({
+      success: true,
+      active: true,
+      state: 'paused',
+      sessionId: session.sessionId,
+      remainingSeconds: computeRemaining(session, serverTime),
+      expiresAt: session.expiresAt,
+      voucherType: session.voucherType || row.type || 'standard',
+    });
+  }
+
+  if (session && (session.state === 'pending_payment' || session.state === 'pending_verification')) {
+    // Payment recorded, duration not started yet — the full time is still due.
+    return res.json({
+      success: true,
+      active: true,
+      state: session.state,
+      sessionId: session.sessionId,
+      remainingSeconds: computeRemaining(session, serverTime),
+      expiresAt: session.expiresAt,
+      voucherType: session.voucherType || row.type || 'standard',
+    });
+  }
+
+  // Used voucher with no live session left (or a session that has fully
+  // elapsed): fully consumed / expired.
+  return res.json({
+    success: true,
+    active: false,
+    error: 'EXPIRED',
+    state: (session && session.state) || 'expired',
+    remainingSeconds: 0,
+    expiresAt: (session && session.expiresAt) || voucherExpiresAt,
+    voucherType: (session && session.voucherType) || row.type || 'standard',
+  });
 }
 
 function computeRemaining(session, serverTime) {
