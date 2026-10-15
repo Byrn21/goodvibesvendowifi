@@ -473,52 +473,68 @@ async function isSessionActive(sessionId) {
  * Queries for active sessions whose expires_at has passed, then calls
  * Omada unauth and marks them expired. Runs every EXPIRE_CHECK_INTERVAL ms.
  */
+let isWorkerRunning = false; // Lock to prevent overlapping memory leaks
+
 function startExpirationWorker() {
   if (expirationTimer) return; // Already running
 
   expirationTimer = setInterval(async () => {
-    const db = getDb();
-    const now = new Date().toISOString();
+    // 1. Check if the previous run is still working. If yes, skip this cycle.
+    if (isWorkerRunning) return; 
+    isWorkerRunning = true;
 
-        const expiredSessions = await db.query(`
-      SELECT session_id FROM sessions
-      WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
-    `, [now]);
-
-    for (const row of expiredSessions) {
-      await expireSession(row.session_id, 'time_expired');
-    }
-
-        // Also expire premium sessions paused beyond the validity window
-    const maxPausedAt = new Date(Date.now() - PREMIUM_PAUSE_VALIDITY_HOURS * 60 * 60 * 1000).toISOString();
-    let stalePaused = [];
     try {
-      stalePaused = await db.query(`
-      SELECT session_id FROM sessions
-      WHERE state = 'paused' AND voucher_type = 'premium' AND paused_at IS NOT NULL AND paused_at <= ?
-    `, [maxPausedAt]);
-    } catch (err) {
-      // voucher_type column may not exist in older databases — fall back to query without it
-      if (err.code === '42701' || err.message && err.message.includes('voucher_type')) {
-        console.warn('[expiration-worker] voucher_type column not found, using fallback query');
-        stalePaused = await db.query(`
+      const db = getDb();
+      const now = new Date().toISOString();
+
+      // 2. Add LIMIT 50 to prevent unbounded arrays from filling up the RAM
+      const expiredSessions = await db.query(`
         SELECT session_id FROM sessions
-        WHERE state = 'paused' AND paused_at IS NOT NULL AND paused_at <= ?
-      `, [maxPausedAt]);
-      } else {
-        throw err;
+        WHERE state = 'active' AND expires_at IS NOT NULL AND expires_at <= ?
+        LIMIT 50
+      `, [now]);
+
+      for (const row of expiredSessions) {
+        await expireSession(row.session_id, 'time_expired');
       }
-    }
 
-    for (const row of stalePaused) {
-      await expireSession(row.session_id, 'pause_expired');
-    }
+      // Also expire premium sessions paused beyond the validity window
+      const maxPausedAt = new Date(Date.now() - PREMIUM_PAUSE_VALIDITY_HOURS * 60 * 60 * 1000).toISOString();
+      let stalePaused = [];
+      try {
+        stalePaused = await db.query(`
+          SELECT session_id FROM sessions
+          WHERE state = 'paused' AND voucher_type = 'premium' AND paused_at IS NOT NULL AND paused_at <= ?
+          LIMIT 50
+        `, [maxPausedAt]);
+      } catch (err) {
+        // voucher_type column may not exist in older databases — fall back to query without it
+        if (err.code === '42701' || (err.message && err.message.includes('voucher_type'))) {
+          stalePaused = await db.query(`
+            SELECT session_id FROM sessions
+            WHERE state = 'paused' AND paused_at IS NOT NULL AND paused_at <= ?
+            LIMIT 50
+          `, [maxPausedAt]);
+        } else {
+          throw err;
+        }
+      }
 
-    if (expiredSessions.length > 0) {
-      console.log(`[expiration-worker] Expired ${expiredSessions.length} session(s)`);
-    }
-    if (stalePaused.length > 0) {
-      console.log(`[expiration-worker] Expired ${stalePaused.length} paused premium session(s) past validity window`);
+      for (const row of stalePaused) {
+        await expireSession(row.session_id, 'pause_expired');
+      }
+
+      if (expiredSessions.length > 0) {
+        console.log(`[expiration-worker] Expired ${expiredSessions.length} session(s)`);
+      }
+      if (stalePaused.length > 0) {
+        console.log(`[expiration-worker] Expired ${stalePaused.length} paused premium session(s) past validity window`);
+      }
+    } catch (err) {
+      console.error('[expiration-worker] Critical error during run:', err);
+    } finally {
+      // 3. Release the lock so the next interval can run safely
+      isWorkerRunning = false;
     }
   }, EXPIRE_CHECK_INTERVAL);
 
@@ -527,7 +543,6 @@ function startExpirationWorker() {
     expirationTimer.unref();
   }
 }
-
 function stopExpirationWorker() {
     if (expirationTimer) {
     clearInterval(expirationTimer);
