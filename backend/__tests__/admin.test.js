@@ -91,6 +91,35 @@ beforeEach(async () => {
 
 // --- Tests ---
 
+describe('POST /api/admin/login — bounded token store', () => {
+  test('keeps only the most recent tokens and evicts the oldest', async () => {
+    let firstToken = null;
+    let lastToken = null;
+
+    // 105 logins against a 100-token cap: the first 5 must be evicted.
+    for (let i = 0; i < 105; i++) {
+      const res = await request(app)
+        .post('/api/admin/login')
+        .send({ username: 'admin', password: VALID_KEY });
+      expect(res.status).toBe(200);
+      if (i === 0) firstToken = res.body.token;
+      lastToken = res.body.token;
+    }
+
+    // The newest token still authenticates.
+    const ok = await request(app)
+      .get('/api/admin/me')
+      .set('Authorization', 'Bearer ' + lastToken);
+    expect(ok.status).toBe(200);
+
+    // The oldest token has been evicted by the cap.
+    const evicted = await request(app)
+      .get('/api/admin/me')
+      .set('Authorization', 'Bearer ' + firstToken);
+    expect(evicted.status).toBe(401);
+  });
+});
+
 describe('DELETE /api/admin/vouchers/:id — Voucher Deletion', () => {
 
   test('returns 200 + success when deleting an existing voucher with valid API key', async () => {

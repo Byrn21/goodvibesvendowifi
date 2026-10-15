@@ -29,7 +29,21 @@ const { parsePriceToCentavos } = require('../utils/price');
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ADMIN_API_KEY;
+
+// In-memory admin session-token store, bounded to the most recent N logins.
+// A Set preserves insertion order, so trimming from the front evicts the
+// OLDEST token. Before this cap the set grew for the process lifetime: every
+// successful login added a 64-char token that nothing ever removed (there is
+// no logout/expiry path), a slow leak on a long-lived server.
+const MAX_VALID_TOKENS = 100;
 const VALID_TOKENS = new Set();
+
+function rememberToken(token) {
+  VALID_TOKENS.add(token);
+  while (VALID_TOKENS.size > MAX_VALID_TOKENS) {
+    VALID_TOKENS.delete(VALID_TOKENS.values().next().value);
+  }
+}
 
 // Middleware: require bearer token or API key
 function requireAuth(req, res, next) {
@@ -50,7 +64,7 @@ router.post('/login', (req, res, next) => {
     const { username, password } = req.body || {};
     if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
       const token = require('crypto').randomBytes(32).toString('hex');
-      VALID_TOKENS.add(token);
+      rememberToken(token);
       return res.json({ success: true, token, expiresIn: 8 * 3600 });
     }
     return res.status(401).json({ success: false, error: 'Invalid credentials.' });
