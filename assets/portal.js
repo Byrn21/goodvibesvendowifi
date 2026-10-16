@@ -176,6 +176,106 @@
     return result;
   }
 
+  // ===============================================================
+  // OMADA CONTEXT PERSISTENCE (localStorage)
+  // ===============================================================
+  // The controller appends its context (clientMac, apMac, ssidName, …) to the
+  // portal URL on the FIRST redirect only. A page refresh, an accidentally
+  // closed-and-reopened tab, or a return visit therefore lands on the bare
+  // portal URL — and without clientMac + apMac + ssidName the backend cannot
+  // rebuild the controller's extPortal/auth request for this device.
+  //
+  // RULE: the URL always wins (it is the freshest controller context); the
+  // persisted copy fills whichever fields this page load is missing. Whatever
+  // is resolved is written straight back, so the values survive refreshes and
+  // are available to every later step — context beacon, voucher submission and
+  // the payment claim.
+  //
+  // Keys match the names already used by success.html (`portalClientMac`) so a
+  // hand-off between pages keeps reading the same values.
+  var CONTEXT_STORAGE_KEYS = {
+    clientMac: 'portalClientMac',
+    apMac:     'portalApMac',
+    ssidName:  'portalSsidName',
+  };
+
+  /**
+   * getStoredContext — read the persisted Omada context.
+   * Never throws: private mode / disabled storage degrades to URL-only.
+   * @returns {Object} { clientMac?, apMac?, ssidName? }
+   */
+  function getStoredContext() {
+    var stored = {};
+    try {
+      for (var name in CONTEXT_STORAGE_KEYS) {
+        if (!CONTEXT_STORAGE_KEYS.hasOwnProperty(name)) continue;
+        var value = window.localStorage.getItem(CONTEXT_STORAGE_KEYS[name]);
+        if (value) stored[name] = value;
+      }
+    } catch (e) { /* storage unavailable — this page load falls back to the URL */ }
+    return stored;
+  }
+
+  /**
+   * saveContext — persist the Omada context. Never throws (same reason as
+   * getStoredContext): a storage failure must not break the portal.
+   * @param {Object} values { clientMac?, apMac?, ssidName? }
+   */
+  function saveContext(values) {
+    try {
+      for (var name in CONTEXT_STORAGE_KEYS) {
+        if (!CONTEXT_STORAGE_KEYS.hasOwnProperty(name)) continue;
+        var value = values ? values[name] : null;
+        if (value) window.localStorage.setItem(CONTEXT_STORAGE_KEYS[name], value);
+      }
+    } catch (e) { /* storage unavailable — the URL values still work this load */ }
+  }
+
+  /**
+   * captureOmadaContext — resolve clientMac / apMac / ssidName on page load and
+   * persist them to localStorage.
+   *
+   * Resolution order per field: URL query param → localStorage. The resolved
+   * values are copied back into `queryParams` so the context beacon, the
+   * voucher submission and the payment claim see them even when this page load
+   * had an empty query string (refresh / re-opened tab).
+   *
+   * @returns {Object} the resolved { clientMac?, apMac?, ssidName? }
+   */
+  function captureOmadaContext() {
+    var stored = getStoredContext();
+    var resolved = {};
+    var fromStorage = 0;
+
+    for (var name in CONTEXT_STORAGE_KEYS) {
+      if (!CONTEXT_STORAGE_KEYS.hasOwnProperty(name)) continue;
+
+      var urlValue = queryParams[name];
+      var hasUrlValue = urlValue !== undefined && urlValue !== null && String(urlValue).trim() !== '';
+      var value = hasUrlValue ? String(urlValue).trim() : stored[name];
+
+      if (!value) continue;
+
+      resolved[name] = value;
+      queryParams[name] = value; // visible to every later step in this page load
+      if (!hasUrlValue) fromStorage += 1;
+    }
+
+    // Write back unconditionally: on a fresh redirect this stores the new
+    // context (also replacing a previous device's values), and on a bare URL it
+    // simply re-writes what was already there.
+    saveContext(resolved);
+
+    if (fromStorage) {
+      console.log(
+        '[portal] Omada context restored from localStorage (' + fromStorage +
+        ' field(s); this page load had no query string)'
+      );
+    }
+
+    return resolved;
+  }
+
   function getRedirectDestination() {
     var candidate = queryParams.redirectUrl
       || queryParams.originalUrl
@@ -1474,7 +1574,31 @@
     }
   }
 
-  // POST /api/payment/claim { ref_suffix } and drive the modal states.
+  /**
+   * getDeviceContext — the client/AP MAC for a payment request.
+   *
+   * captureOmadaContext() ran at page load and merged the URL params with the
+   * persisted copy, so reading localStorage here is what keeps the device
+   * identifiable when the request is made from the parameterless URL of a
+   * refresh or a re-opened tab. MACs are normalized to the canonical
+   * aa:bb:cc:dd:ee:ff form the backend expects; a value we cannot parse is
+   * forwarded unchanged so the controller can still try it.
+   *
+   * @returns {{clientMac: string, apMac: string}}
+   */
+  function getDeviceContext() {
+    var stored = getStoredContext();
+    var clientMac = queryParams.clientMac || stored.clientMac || '';
+    var apMac = queryParams.apMac || stored.apMac || '';
+    return {
+      clientMac: normalizeMac(clientMac) || clientMac,
+      apMac: normalizeMac(apMac) || apMac,
+    };
+  }
+
+  // POST /api/payment/claim { ref_suffix, client_mac, ap_mac } and drive the
+  // modal states. The device context is sent with the claim so the backend can
+  // bind the pending session to this device without a second lookup.
   function submitClaim() {
     if (claimState.submitting) return;
 
@@ -1499,11 +1623,19 @@
     if (verifyLabel) verifyLabel.textContent = 'Verifying\u2026';
     if (verifySpinner) show(verifySpinner);
 
+    // Device context from localStorage (see getDeviceContext). Fields are only
+    // sent when known, so an unknown context never overwrites a better one the
+    // backend already captured from /api/payment/context.
+    var device = getDeviceContext();
+    var claimBody = { ref_suffix: suffix };
+    if (device.clientMac) claimBody.client_mac = device.clientMac;
+    if (device.apMac) claimBody.ap_mac = device.apMac;
+
     fetch((CONFIG.apiBaseUrl || '') + '/api/payment/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ ref_suffix: suffix })
+      body: JSON.stringify(claimBody)
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         return { ok: r.ok, data: data };
@@ -2025,6 +2157,12 @@
   function init() {
     // Parse Omada query params first (affects everything)
     parseQueryParams();
+
+    // Capture + persist the Omada context (clientMac / apMac / ssidName)
+    // immediately, before anything below reads it: a refresh or a re-opened
+    // tab arrives without query params, and localStorage is what keeps the
+    // device identifiable for the backend's later authorization call.
+    captureOmadaContext();
 
     // Silent reconnection: if the controller gave us a clientMac and an active
     // session still exists for it, re-open the firewall and hand off to
