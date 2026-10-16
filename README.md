@@ -347,6 +347,23 @@ dashboard → Environment** (or `render.yaml`) for production.
 | `MACRODROID_WEBHOOK_SECRET` | `routes/webhook.js` | *(empty)* | Shared secret MacroDroid sends as `secret_token`; compared in constant time. |
 | `MACRODROID_PESOS_PER_MINUTE` | `config/index.js` | `10` | Whole units of currency granted per minute of Wi-Fi time. |
 
+### InstaPay / PESONet webhook + tiered QoS
+
+`POST /api/webhooks/instapay` authorizes the paying device directly through
+Omada. A payment whose `amount` is one of `PREMIUM_AMOUNTS_PESOS` receives the
+premium bandwidth caps; every other amount receives the default caps. Values
+are parsed with `parseInt(..., 10)` and range-checked (1–1024) before reaching
+the controller.
+
+| Variable | Referenced in | Default | Description |
+|---|---|---|---|
+| `INSTAPAY_WEBHOOK_SECRET` | `routes/webhook.js` | `MACRODROID_WEBHOOK_SECRET` | Shared secret for the InstaPay/PESONet webhook. |
+| `PREMIUM_AMOUNTS_PESOS` | `routes/webhook.js` | `25,45,80` | Comma-separated payment amounts (Pesos) treated as the premium tier. |
+| `PREMIUM_DOWN_MBPS` | `routes/webhook.js` | *(empty → default caps)* | Premium download cap (Mbps). Unset/out-of-range falls back to the default caps. |
+| `PREMIUM_UP_KBPS` | `routes/webhook.js` | *(empty → default caps)* | Premium upload cap (Kbps). Unset/out-of-range falls back to the default caps. |
+| `VOUCHER_DEFAULT_DOWN_MBPS` | `services/omada-northbound.js` | *(empty → error)* | Default download cap (Mbps) for non-premium amounts. |
+| `VOUCHER_DEFAULT_UP_KBPS` | `services/omada-northbound.js` | *(empty → error)* | Default upload cap (Kbps) for non-premium amounts. |
+
 ### Captive-portal QR payment methods
 
 Served to the frontend by `GET /api/payment/methods`; each defaults to `''`

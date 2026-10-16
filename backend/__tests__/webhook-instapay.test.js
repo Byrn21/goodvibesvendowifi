@@ -11,6 +11,10 @@
  *   - 200 success: authorizeGuest → (>= 2000 ms) → setClientRateLimit, in that
  *     exact order, with the rate limit called WITHOUT explicit limits so the
  *     service falls back to VOUCHER_DEFAULT_*
+ *   - tiered QoS: each premium amount (PREMIUM_AMOUNTS_PESOS, default
+ *     25/45/80) passes PREMIUM_DOWN_MBPS / PREMIUM_UP_KBPS as integers; every
+ *     other amount (and a premium amount with unset/out-of-range premium caps)
+ *     uses the default VOUCHER_DEFAULT_* path
  *   - a failed rate limit is tolerated (200 + qosApplied:false), because the
  *     guest is already online
  *
@@ -244,5 +248,102 @@ describe('POST /api/webhooks/instapay — Omada sequence', () => {
     expect(res.status).toBe(200);
     expect(res.body.minutes).toBe(120);
     expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 120 });
+  });
+});
+
+describe('POST /api/webhooks/instapay — tiered QoS', () => {
+  const PREMIUM_ENV = ['PREMIUM_AMOUNTS_PESOS', 'PREMIUM_DOWN_MBPS', 'PREMIUM_UP_KBPS'];
+  let saved;
+
+  beforeEach(() => {
+    saved = {};
+    for (const name of PREMIUM_ENV) saved[name] = process.env[name];
+    delete process.env.PREMIUM_AMOUNTS_PESOS; // exercise the DEFAULT list
+    process.env.PREMIUM_DOWN_MBPS = '50';
+    process.env.PREMIUM_UP_KBPS = '1024';
+  });
+
+  afterEach(() => {
+    for (const name of PREMIUM_ENV) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  const PREMIUM_CAPS = {
+    upEnable: true,
+    upUnit: 1,        // Kbps
+    upLimit: 1024,    // PREMIUM_UP_KBPS
+    downEnable: true,
+    downUnit: 2,      // Mbps
+    downLimit: 50,    // PREMIUM_DOWN_MBPS
+  };
+
+  test.each([25, 45, 80])(
+    'applies the PREMIUM_* caps (as integers) for the default premium amount %i',
+    async (amount) => {
+      const res = await request(app).post('/api/webhooks/instapay').send(payload({ amount }));
+
+      expect(res.status).toBe(200);
+      expect(res.body.qosApplied).toBe(true);
+      expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({
+        clientMac: MAC,
+        customRateLimit: PREMIUM_CAPS,
+      });
+
+      // parseInt(..., 10) — the controller rejects strings in the limit fields.
+      const arg = omadaNorthbound.setClientRateLimit.mock.calls[0][0];
+      expect(typeof arg.customRateLimit.upLimit).toBe('number');
+      expect(typeof arg.customRateLimit.downLimit).toBe('number');
+    }
+  );
+
+  test('a non-premium amount falls back to the VOUCHER_DEFAULT_* path (no explicit limits)', async () => {
+    const res = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 30 }));
+
+    expect(res.status).toBe(200);
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+  });
+
+  test('PREMIUM_AMOUNTS_PESOS overrides the default premium list', async () => {
+    process.env.PREMIUM_AMOUNTS_PESOS = '15, 99';
+
+    const premium = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 99 }));
+    expect(premium.status).toBe(200);
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenLastCalledWith(
+      expect.objectContaining({ clientMac: MAC, customRateLimit: PREMIUM_CAPS })
+    );
+
+    // 80 is a DEFAULT premium amount, but the override list replaces the default.
+    const fallback = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 80 }));
+    expect(fallback.status).toBe(200);
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenLastCalledWith({ clientMac: MAC });
+  });
+
+  test('falls back to the default premium amounts when PREMIUM_AMOUNTS_PESOS is empty', async () => {
+    process.env.PREMIUM_AMOUNTS_PESOS = '   ';
+    const res = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 25 }));
+
+    expect(res.status).toBe(200);
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ clientMac: MAC, customRateLimit: PREMIUM_CAPS })
+    );
+  });
+
+  test('falls back to VOUCHER_DEFAULT_* when the premium caps are unset', async () => {
+    delete process.env.PREMIUM_DOWN_MBPS;
+    delete process.env.PREMIUM_UP_KBPS;
+    const res = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 80 }));
+
+    expect(res.status).toBe(200);
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+  });
+
+  test('falls back to VOUCHER_DEFAULT_* when a premium cap is out of range', async () => {
+    process.env.PREMIUM_DOWN_MBPS = 'not-a-number';
+    const res = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 80 }));
+
+    expect(res.status).toBe(200);
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
   });
 });

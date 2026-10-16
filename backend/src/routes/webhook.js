@@ -143,6 +143,15 @@ router.post('/macrodroid', async (req, res, next) => {
  * failed rate limit is NOT fatal — the guest is already online, so the response
  * reports `qosApplied: false` for a retry instead of pretending the payment
  * failed.
+ *
+ * ── TIERED QoS ─────────────────────────────────────────────────────────────
+ * The bandwidth cap depends on the payment amount:
+ *   amount ∈ PREMIUM_AMOUNTS_PESOS (default 25, 45, 80) → PREMIUM_DOWN_MBPS /
+ *                                                         PREMIUM_UP_KBPS
+ *   every other amount                                  → VOUCHER_DEFAULT_DOWN_MBPS /
+ *                                                         VOUCHER_DEFAULT_UP_KBPS
+ * See resolvePremiumAmountsPesos() / resolveCustomRateLimit() for the
+ * parsing and range rules.
  */
 const AUTHORIZE_INDEX_DELAY_MS = 2000;
 const PAYMENT_METHODS = new Set(['instapay', 'pesonet']);
@@ -150,6 +159,78 @@ const PAYMENT_METHODS = new Set(['instapay', 'pesonet']);
 /** Promise-based sleep — keeps the 2000 ms wait awaitable inside the handler. */
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Premium plan prices (Pesos) used when PREMIUM_AMOUNTS_PESOS is unset.
+// Mirrors the portal's premium tier (5h = P25, 12h = P45, 24h = P80).
+const DEFAULT_PREMIUM_AMOUNTS_PESOS = [25, 45, 80];
+
+/**
+ * Resolve the set of payment amounts (Pesos) treated as the premium tier.
+ *
+ * PREMIUM_AMOUNTS_PESOS is a comma-separated list, e.g. "25,45,80". Each
+ * entry is parsed with parseInt(..., 10); non-integer or non-positive entries
+ * are dropped so a typo cannot silently widen the tier. When the variable is
+ * unset (or yields no valid entries) the DEFAULT_PREMIUM_AMOUNTS_PESOS list is
+ * used instead.
+ *
+ * @returns {number[]} premium amounts in Pesos
+ */
+function resolvePremiumAmountsPesos() {
+  const raw = process.env.PREMIUM_AMOUNTS_PESOS;
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return DEFAULT_PREMIUM_AMOUNTS_PESOS.slice();
+  }
+
+  const parsed = String(raw)
+    .split(',')
+    .map((part) => parseInt(part.trim(), 10))
+    .filter((n) => Number.isInteger(n) && n > 0);
+
+  return parsed.length ? parsed : DEFAULT_PREMIUM_AMOUNTS_PESOS.slice();
+}
+
+/**
+ * Resolve the mode-0 custom QoS limits for a payment amount.
+ *
+ * A payment whose amount is one of the PREMIUM_AMOUNTS_PESOS values
+ * (default 25, 45, 80) is a premium purchase and gets PREMIUM_DOWN_MBPS /
+ * PREMIUM_UP_KBPS. Every other amount returns undefined, which makes
+ * setClientRateLimit() apply the operator's VOUCHER_DEFAULT_DOWN_MBPS /
+ * VOUCHER_DEFAULT_UP_KBPS defaults.
+ *
+ * The premium values are parsed with parseInt(..., 10) — the controller rejects
+ * a STRING in upLimit/downLimit — and range-checked against the 1–1024 ceiling
+ * the OpenAPI documents. When either premium value is unset or out of range, the
+ * premium path falls back to the VOUCHER_DEFAULT_* defaults too, so a premium
+ * guest is still capped rather than left unlimited.
+ *
+ * Units mirror the Omada service: down is Mbps (downUnit 2) and up is Kbps
+ * (upUnit 1).
+ *
+ * @param {number|string} amount payment amount in Pesos
+ * @returns {Object|undefined} a customRateLimit payload, or undefined to use
+ *                             the service defaults
+ */
+function resolveCustomRateLimit(amount) {
+  const premiumAmounts = resolvePremiumAmountsPesos();
+  if (!premiumAmounts.includes(Number(amount))) {
+    return undefined;
+  }
+
+  const downMbps = parseInt(process.env.PREMIUM_DOWN_MBPS, 10);
+  const upKbps = parseInt(process.env.PREMIUM_UP_KBPS, 10);
+  if (!Number.isInteger(downMbps) || downMbps < 1 || downMbps > 1024) return undefined;
+  if (!Number.isInteger(upKbps) || upKbps < 1 || upKbps > 1024) return undefined;
+
+  return {
+    upEnable: true,
+    upUnit: 1,      // 1 = Kbps
+    upLimit: upKbps,
+    downEnable: true,
+    downUnit: 2,    // 2 = Mbps
+    downLimit: downMbps,
+  };
 }
 
 router.post('/instapay', async (req, res, next) => {
@@ -268,13 +349,21 @@ router.post('/instapay', async (req, res, next) => {
     // (b) Wait exactly 2000 ms so the cloud indexes the new auth record.
     await delay(AUTHORIZE_INDEX_DELAY_MS);
 
-    // (c) Apply the bandwidth caps. Defaults come from
-    //     VOUCHER_DEFAULT_DOWN_MBPS / VOUCHER_DEFAULT_UP_KBPS.
+    // (c) Apply the bandwidth caps. A premium purchase (amount is one of
+    //     PREMIUM_AMOUNTS_PESOS) gets the PREMIUM_DOWN_MBPS / PREMIUM_UP_KBPS
+    //     limits; every other amount passes no explicit limits so the service
+    //     applies VOUCHER_DEFAULT_DOWN_MBPS / VOUCHER_DEFAULT_UP_KBPS.
     let qosApplied = true;
     let qosError = null;
     try {
-      await omadaNorthbound.setClientRateLimit({ clientMac });
-      console.log('[webhook/instapay] rate limit applied to ' + clientMac);
+      const customRateLimit = resolveCustomRateLimit(amount);
+      await omadaNorthbound.setClientRateLimit(
+        customRateLimit ? { clientMac, customRateLimit } : { clientMac }
+      );
+      console.log(
+        '[webhook/instapay] rate limit applied to ' + clientMac +
+        (customRateLimit ? ' (premium tier)' : ' (default tier)')
+      );
     } catch (err) {
       qosApplied = false;
       qosError = err.message;
