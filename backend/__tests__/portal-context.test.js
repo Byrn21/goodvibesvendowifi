@@ -335,6 +335,54 @@ describe('Claim Voucher (reference number) submission', () => {
     expect(claimBody(portal).mobile_number).toBe('09171234567');
   });
 
+  test('pasting a full reference number keeps only its last 4 digits', () => {
+    const portal = loadPortal({ search: '' });
+    const input = portal.getEl('claim-ref-input');
+    let prevented = false;
+
+    input.fire('paste', {
+      target: input,
+      clipboardData: { getData: () => 'GCash Ref 2026-0917-1234' },
+      preventDefault: () => { prevented = true; },
+    });
+
+    expect(prevented).toBe(true);
+    expect(input.value).toBe('1234');
+  });
+
+  test('pasting fewer than 4 digits keeps the stripped value as-is', () => {
+    const portal = loadPortal({ search: '' });
+    const input = portal.getEl('claim-ref-input');
+
+    input.fire('paste', {
+      target: input,
+      clipboardData: { getData: () => '1a2' },
+      preventDefault: () => {},
+    });
+
+    expect(input.value).toBe('12');
+  });
+
+  test('pasting clears a lingering reference error', () => {
+    const portal = loadPortal({ search: '' });
+    const input = portal.getEl('claim-ref-input');
+    const errEl = portal.getEl('claim-input-error');
+
+    // Trigger the validation error first: fewer than 4 digits, no mobile.
+    input.value = '12';
+    portal.getEl('claim-verify').onclick();
+    expect(errEl.textContent).toBe('Enter the last 4 digits of your reference number.');
+
+    input.fire('paste', {
+      target: input,
+      clipboardData: { getData: () => '99887766' },
+      preventDefault: () => {},
+    });
+
+    expect(input.value).toBe('7766');
+    expect(errEl.textContent).toBe('');
+  });
+
   test('an authorized response shows the auto-authorized state, not a voucher code', async () => {
     const portal = loadPortal({
       search: '',

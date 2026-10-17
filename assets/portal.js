@@ -1838,6 +1838,16 @@
           submitClaim();
         }
       });
+      // Accepting a full reference number pasted from an SMS / receipt: keep
+      // only the last 4 digits so the customer does not have to trim it.
+      input.addEventListener('paste', function (e) {
+        e.preventDefault();
+        var pasted = (e.clipboardData || window.clipboardData).getData('text') || '';
+        var digits = String(pasted).replace(/\D/g, '');
+        if (digits.length >= 4) digits = digits.slice(-4);
+        e.target.value = digits;
+        setClaimError('');
+      });
     }
 
     var mobileInput = claimEl('claim-mobile-input');
