@@ -1577,6 +1577,13 @@
     var connectBtn = claimEl('claim-connect');
     if (connectBtn) connectBtn.disabled = false;
 
+    // Collapse the reference cheat sheet again so the modal reopens in its
+    // compact state on every visit.
+    var guideContainer = claimEl('ref-guide-container');
+    var guideBtn = claimEl('show-ref-guide-btn');
+    if (guideContainer) hide(guideContainer);
+    if (guideBtn) guideBtn.textContent = 'Saan makikita ang Reference No.?';
+
     showClaimStep('input');
   }
 
@@ -1797,6 +1804,22 @@
       setClaimError('');
       showClaimStep('input');
     };
+
+    // "Saan makikita ang Reference No.?" — toggle the screenshot cheat sheet
+    // that shows where the reference number sits in a GCash / Maya receipt.
+    var guideBtn = claimEl('show-ref-guide-btn');
+    var guideContainer = claimEl('ref-guide-container');
+    if (guideBtn && guideContainer) {
+      guideBtn.addEventListener('click', function () {
+        if (guideContainer.classList.contains('hidden')) {
+          show(guideContainer);
+          guideBtn.textContent = 'Itago ang guide';
+        } else {
+          hide(guideContainer);
+          guideBtn.textContent = 'Saan makikita ang Reference No.?';
+        }
+      });
+    }
 
     // Click on the dimmed overlay (outside the dialog) closes the modal
     modal.addEventListener('click', function (e) {

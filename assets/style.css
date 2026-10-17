@@ -2747,3 +2747,42 @@ body.qr-modal-open { overflow: hidden; }
   font-variant-numeric: tabular-nums;
 }
 
+/* Reference-number cheat sheet ("Saan makikita ang Reference No.?") */
+.ref-guide-toggle {
+  text-align: right;
+  margin-top: -10px;
+  margin-bottom: 15px;
+}
+.text-link {
+  background: none;
+  border: none;
+  color: #0056b3;
+  text-decoration: underline;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+}
+#ref-guide-container {
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 15px;
+}
+.ref-guide-text {
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+  color: #495057;
+  text-align: center;
+}
+.ref-guide-images {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+.ref-guide-img {
+  max-width: 45%;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+}
+
