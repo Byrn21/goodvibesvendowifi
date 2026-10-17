@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS webhook_events (
         provider     VARCHAR(16),
     event_type   VARCHAR(64),
     amount       INTEGER,
+    mobile_number VARCHAR(15), -- 11-digit PH mobile (09XXXXXXXXX) captured at claim time; the SMS destination
     status       VARCHAR(16),
     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

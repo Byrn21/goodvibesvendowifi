@@ -83,7 +83,11 @@ const WEBHOOK_EVENTS_COLUMNS = [
   { name: 'provider', type: 'VARCHAR(16)', after: 'session_id' },
   { name: 'event_type', type: 'VARCHAR(64)', after: 'provider' },
   { name: 'amount', type: 'INTEGER', after: 'event_type' },
-  { name: 'status', type: 'VARCHAR(16)', after: 'amount' },
+  // mobile_number: customer's 11-digit mobile, saved by POST /api/payment/claim
+  // and read by the MacroDroid SMS webhook. Added after `amount` to match
+  // schema.sql's column order on fresh databases.
+  { name: 'mobile_number', type: 'VARCHAR(15)', after: 'amount' },
+  { name: 'status', type: 'VARCHAR(16)', after: 'mobile_number' },
   { name: 'processed_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP', after: 'status' },
 ];
 

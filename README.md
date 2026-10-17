@@ -346,6 +346,16 @@ dashboard → Environment** (or `render.yaml`) for production.
 |---|---|---|---|
 | `MACRODROID_WEBHOOK_SECRET` | `routes/webhook.js` | *(empty)* | Shared secret MacroDroid sends as `secret_token`; compared in constant time. |
 | `MACRODROID_PESOS_PER_MINUTE` | `config/index.js` | `10` | Whole units of currency granted per minute of Wi-Fi time. |
+| `MACRODROID_SMS_WEBHOOK_URL` | `routes/payment.js` | *(empty → no SMS)* | MacroDroid SMS macro endpoint. `POST /api/payment/claim` POSTs the claimed voucher here so the code can be texted to the customer. |
+
+`MACRODROID_SMS_WEBHOOK_URL` is optional and the call is **fire-and-forget**:
+it is dispatched without blocking the response and any failure is logged only,
+so an unreachable SMS endpoint can never turn a successful claim into an error.
+The body is JSON: `{ target_number, voucher_code, ref_suffix, ref_no,
+authorized, minutes, status_link? }` — `target_number` is the customer's
+11-digit mobile, `voucher_code` is the 6-digit code they need (with
+`ref_suffix` kept for correlation), and `status_link` (`BASE_URL` +
+`/status.html`) is included only when `BASE_URL` is set.
 
 ### InstaPay / PESONet webhook + tiered QoS
 
@@ -498,6 +508,38 @@ environment. Cache-Control is `no-store`.
 
 Manual fallback: submit a reference number when the automatic interception has
 not arrived.
+
+Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac? }`
+
+| Field | Required | Notes |
+|---|---|---|
+| `ref_suffix` | yes | Last 4 digits of the payment reference. |
+| `mobile_number` | yes | 11-digit PH mobile (`09XXXXXXXXX`). Saved on the reconciled `webhook_events` row and used as the SMS destination. |
+| `client_mac` | no | The device to authorize. Without it the claim still succeeds, it is just not auto-connected. |
+| `ap_mac` | no | Recorded in logs for traceability; the cloud authorize call is keyed on the client MAC alone. |
+
+Once the claim transaction commits, the paying device is authorized **directly**
+through the Omada cloud — `authorizeGuest` → 2000 ms index wait →
+`setClientRateLimit` — so the customer does not have to type a code at all. The
+bandwidth cap comes from the same amount-based tier rules as the InstaPay
+webhook (`utils/qos.js`); a premium amount gets the `PREMIUM_*` caps and every
+other amount gets the `VOUCHER_DEFAULT_*` caps.
+
+| Result | Response |
+|---|---|
+| Device authorized | `200 { success: true, authorized: true, message: 'Device authorized', voucherCode, ref_no, minutes, qosApplied }` |
+| Not auto-connected (no `client_mac`, or the amount buys no whole minute) | `200 { success: true, authorized: false, voucherCode, ref_no, minutes, authError }` |
+| Omada refused | `502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED', voucherCode, ref_no }` |
+
+Two deliberate behaviours worth noting:
+
+- **A failed authorization never rolls the claim back.** The customer keeps the
+  voucher their money bought and the code is still returned, so they can connect
+  manually. A failed *bandwidth cap* is likewise reported as `qosApplied: false`
+  rather than failing the claim — the guest is already online.
+- **`voucherCode` is still returned even when the device is authorized.** It
+  keeps the payment↔voucher ledger intact and provides the manual fallback, so
+  the portal can stop *showing* it without the backend losing the audit trail.
 
 ### Admin routes
 

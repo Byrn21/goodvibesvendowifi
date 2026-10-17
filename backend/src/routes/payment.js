@@ -21,6 +21,9 @@ const router = express.Router();
 const { rateLimit } = require('express-rate-limit');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
+const { computeMinutesFromAmount } = require('../utils/duration');
+const { resolveCustomRateLimit } = require('../utils/qos');
+const omadaNorthbound = require('../services/omada-northbound');
 const SITE = process.env.OMADA_SITE || 'Default';
 
 // ── Per-IP rate limiter (stricter than the global apiLimiter) ──────────
@@ -73,6 +76,59 @@ function parseRadioId(value) {
 
 function isValidIp(value) {
   return typeof value === 'string' && value.trim().length <= 45;
+}
+
+// ── Mobile number (PH format) ───────────────────────────────────────────
+// An 11-digit Philippine mobile number: 09 followed by 9 digits. This is the
+// same rule the portal enforces client-side, restated here because it decides
+// whether the customer can be texted the code they paid for — a value the
+// client must never be trusted to guarantee.
+const MOBILE_RE = /^09\d{9}$/;
+
+// The Omada cloud does not index a brand-new auth record instantly, so a QoS
+// PATCH sent in the same tick races the indexer and is silently dropped (the
+// same constraint documented on the InstaPay route). Exactly 2000 ms.
+const AUTHORIZE_INDEX_DELAY_MS = 2000;
+
+/** Promise-based sleep — keeps the index wait awaitable inside the handler. */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * fireSmsWebhook — hand the claimed voucher to MacroDroid so it can text the
+ * customer their code.
+ *
+ * Deliberately NOT awaited: the claim is already committed and the code is
+ * already on its way to the caller, so an unreachable or slow SMS endpoint must
+ * never turn a successful claim into an error response. Failures are logged
+ * (without the destination number — that is customer PII and does not belong in
+ * application logs).
+ *
+ * @param {Object} payload JSON body for the MacroDroid SMS macro
+ */
+function fireSmsWebhook(payload) {
+  const url = process.env.MACRODROID_SMS_WEBHOOK_URL;
+  if (!url) return;
+  try {
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then((res) => {
+      if (res && res.ok) {
+        console.log('[payment/claim] SMS webhook accepted for ref ' + payload.ref_no);
+      } else {
+        console.error('[payment/claim] SMS webhook returned HTTP ' + (res && res.status) + ' for ref ' + payload.ref_no);
+      }
+    }).catch((err) => {
+      console.error('[payment/claim] SMS webhook failed for ref ' + payload.ref_no + ': ' + (err && err.message));
+    });
+  } catch (err) {
+    // A synchronous throw (e.g. a malformed MACRODROID_SMS_WEBHOOK_URL) must
+    // not escape into the response path either.
+    console.error('[payment/claim] SMS webhook could not be dispatched for ref ' + payload.ref_no + ': ' + (err && err.message));
+  }
 }
 
 // ── Route ───────────────────────────────────────────────────────────────
@@ -240,7 +296,13 @@ router.get('/methods', (req, res) => {
  * webhook_events row) and now claims the matching pre-imported voucher by
  * entering the LAST 4 DIGITS of their reference number.
  *
- * Body: { ref_suffix }  — exactly 4 digits
+ * Body: { ref_suffix, mobile_number, client_mac?, ap_mac? }
+ *   ref_suffix    — exactly 4 digits (the last 4 of the customer's receipt)
+ *   mobile_number — 11-digit PH mobile (09XXXXXXXXX); REQUIRED
+ *   client_mac    — the device to authorize. Optional: without it the claim
+ *                   still succeeds, it just is not auto-connected
+ *   ap_mac        — recorded for traceability only; the cloud authorize call
+ *                   is keyed on the client MAC alone
  *
  * Behaviour (all inside ONE transaction):
  *   1. Find the newest 'unclaimed' webhook_events row whose ref_no ends
@@ -253,8 +315,25 @@ router.get('/methods', (req, res) => {
  *      assigned_ref_no) AND the event 'claimed'. Any failure rolls BOTH
  *      back, so a voucher is never claimed without its event (or vice versa).
  *
- * Returns 200 with { success, voucherCode, ref_no }. The frontend injects
- * voucherCode into the existing /api/auth voucher flow to connect.
+ * Once the claim is committed, the paying device is authorized DIRECTLY
+ * through the Omada cloud — authorizeGuest → 2000 ms index wait →
+ * setClientRateLimit — so the customer does not have to type a code at all.
+ *
+ * Returns:
+ *   200 { success: true, authorized: true, message: 'Device authorized',
+ *         voucherCode, ref_no, minutes, qosApplied }
+ *   200 { success: true, authorized: false, voucherCode, ref_no, minutes,
+ *         authError }  — no client_mac was supplied, or the amount buys no
+ *                          whole minute. The code is still returned so the
+ *                          customer can connect manually.
+ *   502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED',
+ *         voucherCode, ref_no }  — Omada refused. The claim is deliberately
+ *                          NOT rolled back: the customer's entitlement is
+ *                          kept and the code is returned for a manual connect.
+ *
+ * voucherCode is still returned even when the device is authorized — it keeps
+ * the payment↔voucher ledger intact and gives a manual fallback, so the portal
+ * can stop SHOWING it without the backend losing the audit trail.
  */
 
 /** Build a typed HTTP error (thrown to roll back the claim transaction). */
@@ -278,6 +357,36 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         code: 'INVALID_REF_SUFFIX',
       });
     }
+
+    // mobile_number — required: it is the only way the customer can be texted
+    // the code they just paid for, so a claim without it would leave them with
+    // a voucher they have no way to discover.
+    const mobileNumber = typeof body.mobile_number === 'string' ? body.mobile_number.trim() : '';
+    if (!MOBILE_RE.test(mobileNumber)) {
+      return res.status(400).json({
+        success: false,
+        error: 'mobile_number is required and must be an 11-digit Philippine mobile number (e.g. 09171234567).',
+        code: 'INVALID_MOBILE_NUMBER',
+      });
+    }
+
+    // client_mac — required for the DIRECT AUTHORIZATION below, but not for the
+    // claim itself. An older portal build, or a device whose Omada context
+    // never reached the beacon, still gets its voucher code; it simply is not
+    // auto-connected. A malformed value is still a client bug worth a 400.
+    const clientMac = parseMac(body.client_mac);
+    if (body.client_mac !== undefined && body.client_mac !== null && body.client_mac !== '' && !clientMac) {
+      return res.status(400).json({
+        success: false,
+        error: 'client_mac must be a valid MAC address.',
+        code: 'INVALID_CLIENT_MAC',
+      });
+    }
+
+    // ap_mac — recorded for traceability in the logs only. The Omada CLOUD
+    // authorize call is keyed on the client MAC alone, unlike the local
+    // extPortal/auth path which needs the AP/SSID/radio triple.
+    const apMac = parseMac(body.ap_mac);
 
     const db = getDb();
 
@@ -319,16 +428,16 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
 
         const eventUpdate = await tx.run(
           `UPDATE webhook_events
-              SET status = 'claimed', processed_at = ?
+              SET status = 'claimed', mobile_number = ?, processed_at = ?
             WHERE ref_no = ? AND status = 'unclaimed'`,
-          [new Date().toISOString(), event.ref_no]
+          [mobileNumber, new Date().toISOString(), event.ref_no]
         );
         if (eventUpdate.rowCount === 0) {
           // Another request claimed this payment first — roll the voucher back.
           throw httpError(404, 'PAYMENT_NOT_FOUND', 'Payment not found or already claimed.');
         }
 
-        return { voucherCode: voucher.code, refNo: event.ref_no };
+        return { voucherCode: voucher.code, refNo: event.ref_no, amount: Number(event.amount) };
       });
     } catch (err) {
       if (err.code === 'PAYMENT_NOT_FOUND' || err.code === 'NO_VOUCHER_AVAILABLE') {
@@ -337,8 +446,115 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       throw err;
     }
 
+    // ── Direct MAC authorization (Omada cloud) ───────────────────────────
+    // The claim above is ALREADY COMMITTED, so the customer's payment is
+    // reconciled to a voucher no matter what Omada does next. That is
+    // deliberate: an authorization failure must never also cost them the
+    // entitlement their money bought (it is reported as authorized:false, with
+    // the code still returned so they can connect manually).
+    const minutes = computeMinutesFromAmount(claim.amount);
+    let authAttempted = false;
+    let authorized = false;
+    let authError = null;
+    let qosApplied = null;
+    let qosError = null;
+
+    if (clientMac && minutes > 0) {
+      authAttempted = true;
+      try {
+        await omadaNorthbound.authorizeGuest({ clientMac, durationMinutes: minutes });
+        authorized = true;
+        console.log(
+          '[payment/claim] authorized ' + clientMac + ' for ' + minutes + 'min' +
+          ' (ref ' + claim.refNo + ', ap ' + (apMac || 'unknown') + ')'
+        );
+      } catch (err) {
+        authError = err && err.message ? err.message : String(err);
+        console.error(
+          '[payment/claim] authorization failed for ' + clientMac +
+          ' (ref ' + claim.refNo + '): ' + authError
+        );
+      }
+    } else if (clientMac) {
+      authError = 'amount is below the minimum chargeable amount';
+    } else {
+      authError = 'no client_mac was supplied with the claim';
+    }
+
+    // The SMS is dispatched as soon as the authorization OUTCOME is known but
+    // BEFORE the QoS index wait below (the long pole), so the customer is texted
+    // about 2 s sooner. It reports whether the device was authorized; the
+    // bandwidth cap applied afterwards is not part of the customer's message.
+    //
+    // NOTE ON THE PAYLOAD: `voucher_code` carries the REAL 6-digit voucher code
+    // (the thing the customer needs), not the 4-digit ref_suffix — `ref_suffix`
+    // is included separately for correlation. Both are present, so a MacroDroid
+    // macro expecting either key works.
+    fireSmsWebhook({
+      target_number: mobileNumber,
+      voucher_code: claim.voucherCode,
+      ref_suffix: refSuffix,
+      ref_no: claim.refNo,
+      authorized,
+      minutes,
+      ...(process.env.BASE_URL
+        ? { status_link: String(process.env.BASE_URL).replace(/\/+$/, '') + '/status.html' }
+        : {}),
+    });
+
+    // ── Bandwidth caps (best-effort) ─────────────────────────────────────
+    // A premium purchase (amount ∈ PREMIUM_AMOUNTS_PESOS) gets the premium caps;
+    // every other amount passes no explicit limits so the service applies
+    // VOUCHER_DEFAULT_DOWN_MBPS / VOUCHER_DEFAULT_UP_KBPS. Mirrors the InstaPay
+    // route, including the index wait — the tier rules themselves are shared
+    // through utils/qos.js.
+    if (authorized) {
+      await delay(AUTHORIZE_INDEX_DELAY_MS);
+      try {
+        const customRateLimit = resolveCustomRateLimit(claim.amount);
+        await omadaNorthbound.setClientRateLimit(
+          customRateLimit ? { clientMac, customRateLimit } : { clientMac }
+        );
+        qosApplied = true;
+        console.log(
+          '[payment/claim] rate limit applied to ' + clientMac +
+          (customRateLimit ? ' (premium tier)' : ' (default tier)')
+        );
+      } catch (err) {
+        // The guest is already online, so a failed cap is NOT a failed claim.
+        qosApplied = false;
+        qosError = err && err.message ? err.message : String(err);
+        console.error('[payment/claim] authorized but rate limit failed for ' + clientMac + ': ' + qosError);
+      }
+    }
+
+    // Omada refused the authorization: the claim stands, the device is NOT
+    // online. This is a genuine error, reported as one — while still handing
+    // back the code so the customer is not stranded with nothing.
+    if (authAttempted && !authorized) {
+      return res.status(502).json({
+        success: false,
+        authorized: false,
+        code: 'OMADA_AUTH_FAILED',
+        error: 'Payment received but Wi-Fi authorization failed. Please contact support.',
+        voucherCode: claim.voucherCode,
+        ref_no: claim.refNo,
+      });
+    }
+
     console.log('[payment/claim] claimed voucher ' + claim.voucherCode + ' for ref ' + claim.refNo);
-    return res.json({ success: true, voucherCode: claim.voucherCode, ref_no: claim.refNo });
+
+    return res.json({
+      success: true,
+      authorized,
+      message: authorized ? 'Device authorized' : 'Voucher claimed. Enter the code to connect.',
+      voucherCode: claim.voucherCode,
+      ref_no: claim.refNo,
+      minutes,
+      ...(authorized ? { qosApplied } : {}),
+      ...(qosError ? { qosError } : {}),
+      ...(authError ? { authError } : {}),
+    });
   } catch (err) {
     next(err);
   }

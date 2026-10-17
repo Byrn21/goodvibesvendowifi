@@ -113,10 +113,13 @@ function loadPortal(opts) {
 
   const fetchStub = (url, init) => {
     fetchCalls.push({ url, init, body: init && init.body ? JSON.parse(init.body) : null });
+    // opts.fetchJson lets a test drive a specific backend response shape
+    // (authorized:true vs voucherCode-only vs failure).
+    const payload = (opts.fetchJson && opts.fetchJson(url)) || { success: true };
     return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve({ success: true }),
+      ok: opts.fetchOk === undefined ? true : opts.fetchOk,
+      status: opts.fetchStatus || 200,
+      json: () => Promise.resolve(payload),
     });
   };
 
@@ -330,6 +333,41 @@ describe('Claim Voucher (reference number) submission', () => {
     await portal.flush();
 
     expect(claimBody(portal).mobile_number).toBe('09171234567');
+  });
+
+  test('an authorized response shows the auto-authorized state, not a voucher code', async () => {
+    const portal = loadPortal({
+      search: '',
+      fetchJson: () => ({ success: true, authorized: true, message: 'Device authorized' }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    // The only action left is dismissal ("Done"), and NO code is rendered.
+    expect(portal.getEl('claim-cancel').textContent).toBe('Done');
+    expect(portal.getEl('claim-voucher-code').textContent).toBe('');
+  });
+
+  test('a voucherCode-only response still falls back to the manual code flow', async () => {
+    // The backend replies this way when it could not auto-authorize the device
+    // (no MAC context, or Omada refused), so the guest must still get the code.
+    const portal = loadPortal({
+      search: '',
+      fetchJson: () => ({ success: true, voucherCode: '777777' }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    expect(portal.getEl('claim-voucher-code').textContent).toBe('777777');
+    expect(portal.getEl('claim-cancel').textContent).toBe('Cancel');
   });
 
   test('opening the modal clears the previous mobile number and its error', async () => {

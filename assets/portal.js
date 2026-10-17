@@ -1476,6 +1476,7 @@
       input: claimEl('claim-step-input'),
       loading: claimEl('claim-step-loading'),
       success: claimEl('claim-step-success'),
+      authorized: claimEl('claim-step-authorized'),
       error: claimEl('claim-step-error')
     };
     for (var name in steps) {
@@ -1488,10 +1489,19 @@
     var verifyBtn = claimEl('claim-verify');
     var retryBtn = claimEl('claim-retry');
     var connectBtn = claimEl('claim-connect');
+    // In the auto-authorized state the guest is already online, so a "Connect
+    // Now" button would be misleading — but "Cancel" would read as a failure
+    // for what is in fact success, hence the relabel.
+    var cancelBtn = claimEl('claim-cancel');
+    if (cancelBtn) cancelBtn.textContent = (step === 'authorized') ? 'Done' : 'Cancel';
     if (step === 'success') {
       if (verifyBtn) hide(verifyBtn);
       if (retryBtn) hide(retryBtn);
       if (connectBtn) show(connectBtn);
+    } else if (step === 'authorized') {
+      if (verifyBtn) hide(verifyBtn);
+      if (retryBtn) hide(retryBtn);
+      if (connectBtn) hide(connectBtn);
     } else if (step === 'error') {
       if (verifyBtn) hide(verifyBtn);
       if (retryBtn) show(retryBtn);
@@ -1508,6 +1518,8 @@
         if (input) input.focus();
       } else if (step === 'success' && connectBtn) {
         connectBtn.focus();
+      } else if (step === 'authorized' && cancelBtn) {
+        cancelBtn.focus();
       }
     }, 60);
   }
@@ -1612,9 +1624,16 @@
     };
   }
 
-  // POST /api/payment/claim { ref_suffix, client_mac, ap_mac } and drive the
-  // modal states. The device context is sent with the claim so the backend can
-  // bind the pending session to this device without a second lookup.
+  // POST /api/payment/claim { ref_suffix, mobile_number, client_mac, ap_mac }
+  // and drive the modal states. The device context is sent with the claim so the
+  // backend can authorize THIS device directly (no code to type).
+  //
+  // Response handling is deliberately tolerant, because the backend can answer
+  // in three ways:
+  //   authorized:true  — the MAC is online, so there is no code to show
+  //   voucherCode only — claimed, but not auto-authorized (no MAC context, or
+  //                      Omada refused); fall back to the manual code flow
+  //   neither          — a real failure, shown on the error step
   function submitClaim() {
     if (claimState.submitting) return;
 
@@ -1668,7 +1687,9 @@
       });
     }).then(function (res) {
       var data = res.data || {};
-      if (res.ok && data.success && data.voucherCode) {
+      if (res.ok && data.success && data.authorized) {
+        showClaimAuthorized();
+      } else if (data.voucherCode) {
         showClaimSuccess(data.voucherCode);
       } else {
         showClaimFailure(data.error || 'We could not verify that payment. Please check the digits and try again.');
@@ -1694,6 +1715,15 @@
     if (codeEl) codeEl.textContent = voucherCode;
     claimClearBusy();
     showClaimStep('success');
+  }
+
+  // Auto-authorized: the backend authorized this device's MAC, so there is no
+  // code to display, copy, or re-enter — the guest is already online.
+  function showClaimAuthorized() {
+    claimState.submitting = false;
+    claimState.voucherCode = null;
+    claimClearBusy();
+    showClaimStep('authorized');
   }
 
   function showClaimFailure(message) {

@@ -31,7 +31,19 @@ const request = require('supertest');
 const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 
+// The Omada cloud client is replaced wholesale: no fetch, no credentials, and
+// deterministic control over the authorization / QoS outcome.
+jest.mock('../src/services/omada-northbound', () => ({
+  authorizeGuest: jest.fn(),
+  setClientRateLimit: jest.fn(),
+}));
+const omadaNorthbound = require('../src/services/omada-northbound');
+
+// The authorized path waits a real 2000 ms for the cloud indexer.
+jest.setTimeout(20000);
+
 const MAC = 'AA:BB:CC:DD:EE:FF';
+const MOBILE = '09171234567';
 
 async function seedSession(sessionId, refNo, state, clientMac = MAC, durationMinutes = 5) {
   const now = new Date().toISOString();
@@ -57,6 +69,9 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events; DELETE FROM portal_client_context;');
+  jest.clearAllMocks();
+  omadaNorthbound.authorizeGuest.mockResolvedValue({ success: true, clientMac: MAC, authRecordId: 'rec-claim' });
+  omadaNorthbound.setClientRateLimit.mockResolvedValue({ success: true, clientMac: MAC });
 });
 
 describe('POST /api/payment/claim', () => {
@@ -80,14 +95,14 @@ describe('POST /api/payment/claim', () => {
 
   test('400 when ref_suffix is missing or not exactly 4 digits', async () => {
     for (const bad of ['', '123', '12345', 'abcd', undefined]) {
-      const res = await request(app).post('/api/payment/claim').send({ ref_suffix: bad });
+      const res = await request(app).post('/api/payment/claim').send({ ref_suffix: bad, mobile_number: MOBILE });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('INVALID_REF_SUFFIX');
     }
   });
 
   test('404 when no unclaimed payment ends with the suffix', async () => {
-    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '9999' });
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '9999', mobile_number: MOBILE });
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('PAYMENT_NOT_FOUND');
     expect(res.body.error).toMatch(/not found or already claimed/i);
@@ -98,7 +113,7 @@ describe('POST /api/payment/claim', () => {
     await seedVoucher('111111', 5000);                          // must be chosen
     await seedVoucher('222222', 5000, 'active', 'REF-OLD0001'); // already assigned -> skip
 
-    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234' });
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234', mobile_number: MOBILE });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.voucherCode).toBe('111111');
@@ -116,7 +131,7 @@ describe('POST /api/payment/claim', () => {
     await seedUnclaimed('REF-XYZ5678', 50); // -> 5000 centavos
     await seedVoucher('333333', 50);        // a Peso/centavo mismatch must NOT match
 
-    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '5678' });
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '5678', mobile_number: MOBILE });
     expect(res.status).toBe(404);
     expect(res.body.code).toBe('NO_VOUCHER_AVAILABLE');
 
@@ -133,11 +148,11 @@ describe('POST /api/payment/claim', () => {
     await seedVoucher('444444', 5000);
     await seedVoucher('555555', 5000);
 
-    const first = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001' });
+    const first = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001', mobile_number: MOBILE });
     expect(first.status).toBe(200);
     expect(first.body.voucherCode).toBe('444444');
 
-    const second = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001' });
+    const second = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001', mobile_number: MOBILE });
     expect(second.status).toBe(404);
     expect(second.body.code).toBe('PAYMENT_NOT_FOUND');
 
@@ -152,7 +167,7 @@ describe('POST /api/payment/claim', () => {
     await seedUnclaimed('REF-TWO1234', 50);
     await seedVoucher('666666', 5000);
 
-    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234' });
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234', mobile_number: MOBILE });
     expect(res.status).toBe(200);
     expect(res.body.ref_no).toBe('REF-TWO1234');
   });
@@ -161,7 +176,7 @@ describe('POST /api/payment/claim', () => {
     await seedUnclaimed('REF-CH1234', 50);
     await seedVoucher('777777', 5000);
 
-    const claim = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234' });
+    const claim = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234', mobile_number: MOBILE });
     expect(claim.status).toBe(200);
     expect(claim.body.voucherCode).toBe('777777');
 
@@ -178,6 +193,260 @@ describe('POST /api/payment/claim', () => {
     const voucher = await getDb().getOne('SELECT state, used_by_mac FROM vouchers WHERE code = ?', ['777777']);
     expect(voucher.state).toBe('used');
     expect(voucher.used_by_mac).toBe(MAC);
+  });
+
+  // ── mobile_number (required by the SMS flow) ──────────────────────────
+
+  test('400 when mobile_number is missing or not an 11-digit 09 number', async () => {
+    await seedUnclaimed('REF-MOB0001', 50);
+    await seedVoucher('888888', 5000);
+
+    for (const bad of [undefined, '', '0917123456', '091712345678', '99171234567', 'abcdefghijk', '0917-123-4567']) {
+      const res = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0001', mobile_number: bad });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_MOBILE_NUMBER');
+    }
+
+    // None of the rejected attempts consumed anything.
+    const event = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-MOB0001']);
+    expect(event.status).toBe('unclaimed');
+    expect(event.mobile_number).toBe(null);
+  });
+
+  test('saves mobile_number on the payment it reconciled', async () => {
+    await seedUnclaimed('REF-MOB0002', 50);
+    await seedVoucher('818181', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0002', mobile_number: MOBILE });
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+
+    const event = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-MOB0002']);
+    expect(event.status).toBe('claimed');
+    expect(event.mobile_number).toBe(MOBILE);
+  });
+
+  // ── Direct MAC authorization ──────────────────────────────────────────
+
+  test('authorizes the MAC through the Omada cloud (authorized:true + QoS)', async () => {
+    await seedUnclaimed('REF-AUTH0001', 50);   // 50 pesos -> 5 minutes
+    await seedVoucher('828282', 5000);
+
+    const startedAt = Date.now();
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC, ap_mac: 'AA:AA:AA:AA:AA:AA' });
+    const elapsed = Date.now() - startedAt;
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.authorized).toBe(true);
+    expect(res.body.message).toBe('Device authorized');
+    expect(res.body.minutes).toBe(5);
+    expect(res.body.qosApplied).toBe(true);
+    // The voucher is still returned so the ledger and a manual fallback survive.
+    expect(res.body.voucherCode).toBe('828282');
+    expect(res.body.ref_no).toBe('REF-AUTH0001');
+
+    expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 5 });
+    // 50 is not a premium amount, so no explicit limits are passed.
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+
+    // ...and the QoS call happens AFTER the authorization, with the full
+    // cloud indexing delay in between (not skipped).
+    expect(omadaNorthbound.authorizeGuest.mock.invocationCallOrder[0])
+      .toBeLessThan(omadaNorthbound.setClientRateLimit.mock.invocationCallOrder[0]);
+    expect(elapsed).toBeGreaterThanOrEqual(2000);
+  });
+
+  test('applies the premium caps when the amount is a premium tier price', async () => {
+    const savedDown = process.env.PREMIUM_DOWN_MBPS;
+    const savedUp = process.env.PREMIUM_UP_KBPS;
+    process.env.PREMIUM_DOWN_MBPS = '50';
+    process.env.PREMIUM_UP_KBPS = '1024';
+    try {
+      await seedUnclaimed('REF-PREM0001', 25);   // premium amount -> 2 minutes
+      await seedVoucher('838383', 2500);
+
+      const res = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
+
+      expect(res.status).toBe(200);
+      expect(res.body.authorized).toBe(true);
+      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 2 });
+      expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({
+        clientMac: MAC,
+        customRateLimit: {
+          upEnable: true, upUnit: 1, upLimit: 1024,
+          downEnable: true, downUnit: 2, downLimit: 50,
+        },
+      });
+    } finally {
+      if (savedDown === undefined) delete process.env.PREMIUM_DOWN_MBPS; else process.env.PREMIUM_DOWN_MBPS = savedDown;
+      if (savedUp === undefined) delete process.env.PREMIUM_UP_KBPS; else process.env.PREMIUM_UP_KBPS = savedUp;
+    }
+  });
+
+  test('a failed rate limit does not fail the claim (authorized:true + qosApplied:false)', async () => {
+    omadaNorthbound.setClientRateLimit.mockRejectedValue(new Error('ratelimit 500'));
+    await seedUnclaimed('REF-QOS0001', 50);
+    await seedVoucher('848484', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
+
+    // The guest is online, so the claim is still a success.
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.authorized).toBe(true);
+    expect(res.body.qosApplied).toBe(false);
+    expect(res.body.qosError).toBe('ratelimit 500');
+  });
+
+  test('502 OMADA_AUTH_FAILED when the cloud rejects, but the claim is NOT rolled back', async () => {
+    omadaNorthbound.authorizeGuest.mockRejectedValue(new Error('cloud 503'));
+    await seedUnclaimed('REF-FAIL0001', 50);
+    await seedVoucher('858585', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
+
+    expect(res.status).toBe(502);
+    expect(res.body.success).toBe(false);
+    expect(res.body.authorized).toBe(false);
+    expect(res.body.code).toBe('OMADA_AUTH_FAILED');
+    // The customer keeps the entitlement their money bought, and gets the code
+    // so they are not stranded with nothing.
+    expect(res.body.voucherCode).toBe('858585');
+    expect(res.body.ref_no).toBe('REF-FAIL0001');
+
+    // The QoS step is skipped entirely when the guest never got online.
+    expect(omadaNorthbound.setClientRateLimit).not.toHaveBeenCalled();
+
+    const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['858585']);
+    expect(voucher.state).toBe('claimed');
+    expect(voucher.assigned_ref_no).toBe('REF-FAIL0001');
+    const event = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-FAIL0001']);
+    expect(event.status).toBe('claimed');
+    expect(event.mobile_number).toBe(MOBILE);
+  });
+
+  test('without a client_mac the claim still succeeds, with authorized:false and no Omada call', async () => {
+    await seedUnclaimed('REF-NOM0001', 50);
+    await seedVoucher('868686', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.authorized).toBe(false);
+    expect(res.body.voucherCode).toBe('868686');
+    expect(res.body.authError).toMatch(/no client_mac/i);
+    expect(omadaNorthbound.authorizeGuest).not.toHaveBeenCalled();
+  });
+
+  test('400 when client_mac is present but malformed', async () => {
+    await seedUnclaimed('REF-BAD0001', 50);
+    await seedVoucher('878787', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: 'not-a-mac' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_CLIENT_MAC');
+  });
+
+  // ── MacroDroid SMS webhook ────────────────────────────────────────────
+
+  describe('MacroDroid SMS webhook', () => {
+    const SMS_URL = 'https://macrodroid.example.com/sms';
+    const realFetch = global.fetch;
+    let savedUrl;
+    let savedBase;
+
+    beforeEach(() => {
+      savedUrl = process.env.MACRODROID_SMS_WEBHOOK_URL;
+      savedBase = process.env.BASE_URL;
+    });
+
+    afterEach(() => {
+      global.fetch = realFetch;
+      if (savedUrl === undefined) delete process.env.MACRODROID_SMS_WEBHOOK_URL;
+      else process.env.MACRODROID_SMS_WEBHOOK_URL = savedUrl;
+      if (savedBase === undefined) delete process.env.BASE_URL;
+      else process.env.BASE_URL = savedBase;
+    });
+
+    test('POSTs target_number + voucher_code to MACRODROID_SMS_WEBHOOK_URL', async () => {
+      process.env.MACRODROID_SMS_WEBHOOK_URL = SMS_URL;
+      process.env.BASE_URL = 'https://goodvibes.example.com/';
+      const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+      global.fetch = fetchMock;
+
+      await seedUnclaimed('REF-SMS0001', 50);
+      await seedVoucher('898989', 5000);
+
+      const res = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
+      expect(res.status).toBe(200);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(SMS_URL);
+      expect(init.method).toBe('POST');
+      expect(init.headers['Content-Type']).toBe('application/json');
+      expect(JSON.parse(init.body)).toEqual({
+        target_number: MOBILE,
+        voucher_code: '898989',
+        ref_suffix: '0001',
+        ref_no: 'REF-SMS0001',
+        authorized: true,
+        minutes: 5,
+        status_link: 'https://goodvibes.example.com/status.html',
+      });
+    });
+
+    test('does not call the SMS webhook when MACRODROID_SMS_WEBHOOK_URL is unset', async () => {
+      delete process.env.MACRODROID_SMS_WEBHOOK_URL;
+      const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+      global.fetch = fetchMock;
+
+      await seedUnclaimed('REF-SMS0002', 50);
+      await seedVoucher('909090', 5000);
+
+      const res = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0002', mobile_number: MOBILE, client_mac: MAC });
+      expect(res.status).toBe(200);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    test('a failing SMS webhook does not fail the claim', async () => {
+      process.env.MACRODROID_SMS_WEBHOOK_URL = SMS_URL;
+      global.fetch = jest.fn().mockRejectedValue(new Error('sms endpoint unreachable'));
+
+      await seedUnclaimed('REF-SMS0003', 50);
+      await seedVoucher('919191', 5000);
+
+      const res = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0003', mobile_number: MOBILE, client_mac: MAC });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.authorized).toBe(true);
+    });
   });
 });
 

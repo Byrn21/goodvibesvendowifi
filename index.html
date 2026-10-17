@@ -827,6 +827,13 @@
           <p class="modal-instruction">Tap Connect Now to use it and get online.</p>
         </div>
 
+        <!-- Auto-authorized state: the backend authorized this device's MAC
+             directly, so there is no voucher code to show or enter. -->
+        <div id="claim-step-authorized" class="hidden">
+          <p class="modal-message">You are online!</p>
+          <p class="modal-instruction" id="claim-authorized-note">Your device was authorized automatically. You can start browsing — no code needed.</p>
+        </div>
+
         <!-- Error state -->
         <div id="claim-step-error" class="hidden">
           <p id="claim-error-text" class="form-error" role="alert"></p>
