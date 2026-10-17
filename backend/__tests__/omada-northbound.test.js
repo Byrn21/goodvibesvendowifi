@@ -29,7 +29,10 @@ process.env.OMADA_CLIENT_SECRET = 'test-client-secret';
 delete process.env.OMADA_NORTHBOUND_CLIENT_ID;
 delete process.env.OMADA_NORTHBOUND_CLIENT_SECRET;
 process.env.OMADA_OMADAC_ID = 'TESTOMADAC123';
-process.env.OMADA_SITE_ID = '6918c72f0abcdef123456789';
+// The Northbound client resolves the site by NAME (OMADA_SITE) to its numeric
+// ID via GET /sites; OMADA_SITE_ID is no longer read.
+process.env.OMADA_SITE = 'Default';
+delete process.env.OMADA_SITE_ID;
 // Voucher QoS defaults (Mbps down / Kbps up).
 process.env.VOUCHER_DEFAULT_DOWN_MBPS = '10';
 process.env.VOUCHER_DEFAULT_UP_KBPS = '512';
@@ -37,6 +40,11 @@ delete process.env.OMADA_NORTHBOUND_MOCK;
 
 const nb = require('../src/services/omada-northbound');
 const { _internal } = nb;
+
+// Shared fixtures.
+const SITE_ID = '6918c72f0abcdef123456789';
+const TOKEN_RESPONSE = { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } };
+const SITES_RESPONSE = { errorCode: 0, result: { data: [{ siteId: SITE_ID, name: 'Default' }] } };
 
 // ── fetch stub ──────────────────────────────────────────────
 const realFetch = global.fetch;
@@ -65,6 +73,7 @@ function installFetch() {
 beforeEach(() => {
   installFetch();
   _internal.invalidateToken();
+  _internal.resetSiteId();
 });
 
 afterAll(() => {
@@ -186,33 +195,36 @@ describe('apiRequest auth handling', () => {
 // ================================================================
 describe('authorizeClient (authClient)', () => {
   test('POSTs to the hyphenated-MAC auth path with no request body', async () => {
-    queueJson(200, { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } }); // token
-    queueJson(200, { errorCode: 0, msg: 'success' });                                     // auth
+    queueJson(200, TOKEN_RESPONSE);                       // token
+    queueJson(200, SITES_RESPONSE);                       // GET /sites (OMADA_SITE lookup)
+    queueJson(200, { errorCode: 0, msg: 'success' });      // auth
 
     const result = await nb.authorizeClient({ clientMac: 'aa:bb:cc:dd:ee:ff' });
 
     expect(result.success).toBe(true);
-    expect(calls[1].method).toBe('POST');
-    expect(calls[1].url).toBe(
+    expect(calls[1].url).toContain('/sites');              // resolved before the auth call
+    expect(calls[2].method).toBe('POST');
+    expect(calls[2].url).toBe(
       'https://use1-omada-northbound.tplinkcloud.com/openapi/v1/TESTOMADAC123' +
       '/sites/6918c72f0abcdef123456789/hotspot/clients/AA-BB-CC-DD-EE-FF/auth'
     );
-    expect(calls[1].body).toBeUndefined();
-    expect(calls[1].headers['Content-Type']).toBeUndefined();
+    expect(calls[2].body).toBeUndefined();
+    expect(calls[2].headers['Content-Type']).toBeUndefined();
   });
 
   test('with durationMinutes: authorizes, finds the record, then sets the period', async () => {
-    queueJson(200, { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } }); // token
-    queueJson(200, { errorCode: 0, msg: 'success' });                                     // auth
+    queueJson(200, TOKEN_RESPONSE);                       // token
+    queueJson(200, SITES_RESPONSE);                       // GET /sites (OMADA_SITE lookup)
+    queueJson(200, { errorCode: 0, msg: 'success' });      // auth
     queueJson(200, { errorCode: 0, result: { data: [{ id: 'rec-1', mac: 'AA-BB-CC-DD-EE-FF' }] } }); // records
-    queueJson(200, { errorCode: 0, msg: 'success' });                                     // period
+    queueJson(200, { errorCode: 0, msg: 'success' });      // period
 
     const result = await nb.authorizeClient({ clientMac: 'AA-BB-CC-DD-EE-FF', durationMinutes: 30 });
 
     expect(result.authRecordId).toBe('rec-1');
     expect(result.periodMs).toBe(30 * 60 * 1000);
 
-    const periodCall = calls[3];
+    const periodCall = calls[4];
     expect(periodCall.method).toBe('POST');
     expect(periodCall.url).toBe(
       'https://use1-omada-northbound.tplinkcloud.com/openapi/v1/TESTOMADAC123' +
@@ -228,7 +240,8 @@ describe('authorizeClient (authClient)', () => {
   });
 
   test('throws a normalized error when the controller rejects the authorization', async () => {
-    queueJson(200, { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } });
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
     queueJson(200, { errorCode: -1, msg: 'client not found' });
 
     await expect(nb.authorizeClient({ clientMac: 'AA:BB:CC:DD:EE:FF' }))
@@ -241,18 +254,19 @@ describe('authorizeClient (authClient)', () => {
 // ================================================================
 describe('unauthorizeClient (cancelAuthClient)', () => {
   test('POSTs to the unauth path with no request body', async () => {
-    queueJson(200, { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } });
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
     queueJson(200, { errorCode: 0, msg: 'success' });
 
     const result = await nb.unauthorizeClient({ clientMac: 'aa:bb:cc:dd:ee:ff' });
 
     expect(result).toEqual({ success: true, clientMac: 'AA-BB-CC-DD-EE-FF' });
-    expect(calls[1].method).toBe('POST');
-    expect(calls[1].url).toBe(
+    expect(calls[2].method).toBe('POST');
+    expect(calls[2].url).toBe(
       'https://use1-omada-northbound.tplinkcloud.com/openapi/v1/TESTOMADAC123' +
       '/sites/6918c72f0abcdef123456789/hotspot/clients/AA-BB-CC-DD-EE-FF/unauth'
     );
-    expect(calls[1].body).toBeUndefined();
+    expect(calls[2].body).toBeUndefined();
   });
 });
 
@@ -261,7 +275,8 @@ describe('unauthorizeClient (cancelAuthClient)', () => {
 // ================================================================
 describe('getAuthedRecords / findAuthRecordByMac', () => {
   test('requests the paginated authed-records endpoint and matches MACs loosely', async () => {
-    queueJson(200, { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } });
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
     queueJson(200, {
       errorCode: 0,
       result: { totalRows: 1, currentPage: 1, currentSize: 200, data: [{ id: 'rec-9', mac: 'AA-BB-CC-DD-EE-FF', valid: true }] },
@@ -270,7 +285,7 @@ describe('getAuthedRecords / findAuthRecordByMac', () => {
     const record = await nb.findAuthRecordByMac('aabbccddeeff');
 
     expect(record.id).toBe('rec-9');
-    expect(calls[1].url).toContain('/hotspot/authed-records?page=1&pageSize=200');
+    expect(calls[2].url).toContain('/hotspot/authed-records?page=1&pageSize=200');
   });
 });
 
@@ -332,13 +347,14 @@ describe('getOmadaToken / authorizeGuest / pauseGuest (canonical names)', () => 
 
 describe('setClientRateLimit (updateClientRateLimitSetting)', () => {
   test('applies the VOUCHER_DEFAULT_* caps as NUMBERS when no limits are passed', async () => {
-    queueJson(200, { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } });
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
     queueJson(200, { errorCode: 0, msg: 'success' });
 
     await nb.setClientRateLimit({ clientMac: 'aa:bb:cc:dd:ee:ff' });
 
-    expect(calls[1].method).toBe('PATCH');
-    const payload = JSON.parse(calls[1].body);
+    expect(calls[2].method).toBe('PATCH');
+    const payload = JSON.parse(calls[2].body);
     expect(payload).toEqual({
       mode: 0,
       customRateLimit: {
@@ -376,7 +392,8 @@ describe('setClientRateLimit (updateClientRateLimitSetting)', () => {
   });
 
   test('PATCHes the client ratelimit path with a custom-limit body', async () => {
-    queueJson(200, { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } });
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
     queueJson(200, { errorCode: 0, msg: 'success' });
 
     await nb.setClientRateLimit({
@@ -384,12 +401,12 @@ describe('setClientRateLimit (updateClientRateLimitSetting)', () => {
       customRateLimit: { upEnable: true, upUnit: 1, upLimit: 512, downEnable: true, downUnit: 2, downLimit: 10 },
     });
 
-    expect(calls[1].method).toBe('PATCH');
-    expect(calls[1].url).toBe(
+    expect(calls[2].method).toBe('PATCH');
+    expect(calls[2].url).toBe(
       'https://use1-omada-northbound.tplinkcloud.com/openapi/v1/TESTOMADAC123' +
       '/sites/6918c72f0abcdef123456789/clients/AA-BB-CC-DD-EE-FF/ratelimit'
     );
-    expect(JSON.parse(calls[1].body)).toEqual({
+    expect(JSON.parse(calls[2].body)).toEqual({
       mode: 0,
       customRateLimit: { upEnable: true, upUnit: 1, upLimit: 512, downEnable: true, downUnit: 2, downLimit: 10 },
     });
@@ -419,5 +436,53 @@ describe('extendClientPeriod', () => {
   test('requires a recordId', async () => {
     await expect(nb.extendClientPeriod({ periodMs: 60000 }))
       .rejects.toMatchObject({ code: 'OMADA_NORTHBOUND_MISSING_FIELD' });
+  });
+});
+
+// ================================================================
+// Site resolution — OMADA_SITE name → numeric site ID
+// ================================================================
+describe('OMADA_SITE resolution', () => {
+  test('resolves the site name to its numeric ID and caches it across calls', async () => {
+    queueJson(200, TOKEN_RESPONSE);                    // token
+    queueJson(200, SITES_RESPONSE);                    // GET /sites (name → ID)
+    queueJson(200, { errorCode: 0, msg: 'success' });  // auth #1
+    await nb.authorizeGuest({ clientMac: 'AA:BB:CC:DD:EE:FF' });
+
+    // Second call: the site ID (and token) are cached — only the auth goes out.
+    queueJson(200, { errorCode: 0, msg: 'success' });  // auth #2
+    await nb.authorizeGuest({ clientMac: 'AA:BB:CC:DD:EE:FF' });
+
+    const siteListCalls = calls.filter((c) => /\/sites(\?|$)/.test(c.url));
+    expect(siteListCalls).toHaveLength(1);
+    expect(calls[2].url).toContain('/sites/' + SITE_ID + '/hotspot/clients/AA-BB-CC-DD-EE-FF/auth');
+  });
+
+  test('matches the configured name case-insensitively', async () => {
+    process.env.OMADA_SITE = 'dEfAuLt';
+    try {
+      queueJson(200, TOKEN_RESPONSE);
+      queueJson(200, SITES_RESPONSE);
+      queueJson(200, { errorCode: 0, msg: 'success' });
+
+      await nb.authorizeGuest({ clientMac: 'AA:BB:CC:DD:EE:FF' });
+
+      expect(calls[2].url).toContain('/sites/' + SITE_ID + '/');
+    } finally {
+      process.env.OMADA_SITE = 'Default';
+    }
+  });
+
+  test('throws OMADA_NORTHBOUND_SITE_NOT_FOUND when no site matches the name', async () => {
+    process.env.OMADA_SITE = 'Nonexistent';
+    try {
+      queueJson(200, TOKEN_RESPONSE);
+      queueJson(200, { errorCode: 0, result: { data: [{ siteId: 'other', name: 'Guest' }] } });
+
+      await expect(nb.authorizeGuest({ clientMac: 'AA:BB:CC:DD:EE:FF' }))
+        .rejects.toMatchObject({ code: 'OMADA_NORTHBOUND_SITE_NOT_FOUND' });
+    } finally {
+      process.env.OMADA_SITE = 'Default';
+    }
   });
 });

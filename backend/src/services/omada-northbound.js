@@ -50,7 +50,11 @@
  *   OMADA_CLIENT_ID             — Open API app Client ID
  *   OMADA_CLIENT_SECRET         — Open API app Client Secret
  *   OMADA_OMADAC_ID             — Omada ID (shared with services/omada.js)
- *   OMADA_SITE_ID               — numeric site ID (NOT the site name)
+ *   OMADA_SITE                  — site NAME (shared with services/omada.js).
+ *                                 The OpenAPI addresses sites by numeric ID, so
+ *                                 this name is resolved once via
+ *                                 GET /openapi/v1/{omadacId}/sites and the
+ *                                 resulting ID is cached (see resolveSiteId()).
  *   OMADA_AUTH_TIMEOUT          — request timeout ms (default 10000)
  *   OMADA_NORTHBOUND_MOCK       — 'true' to bypass the cloud entirely
  *
@@ -109,7 +113,7 @@ function resolveConfig() {
     clientId: env('OMADA_CLIENT_ID') || env('OMADA_NORTHBOUND_CLIENT_ID'),
     clientSecret: env('OMADA_CLIENT_SECRET') || env('OMADA_NORTHBOUND_CLIENT_SECRET'),
     omadacId: env('OMADA_OMADAC_ID'),
-    siteId: env('OMADA_SITE_ID'),
+    siteName: env('OMADA_SITE') || 'Default',
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 10000,
     mock: env('OMADA_NORTHBOUND_MOCK') === 'true' || !baseUrl,
   };
@@ -184,7 +188,7 @@ let lastConfigSignature = null;
  */
 function logResolvedConfig(force) {
   const cfg = resolveConfig();
-  const signature = [cfg.mock, cfg.baseUrl, cfg.region, cfg.omadacId, cfg.siteId, cfg.clientId ? 'id' : ''].join('|');
+  const signature = [cfg.mock, cfg.baseUrl, cfg.region, cfg.omadacId, cfg.siteName, cfg.clientId ? 'id' : ''].join('|');
   if (signature === lastConfigSignature && !force) return;
   lastConfigSignature = signature;
 
@@ -193,7 +197,7 @@ function logResolvedConfig(force) {
     ' base=' + maskHost(cfg.baseUrl) +
     ' region=' + (cfg.region || '(from base url)') +
     ' omadacId=' + (cfg.omadacId || '(unset)') +
-    ' siteId=' + (cfg.siteId || '(unset)') +
+    ' site=' + (cfg.siteName || '(unset)') +
     ' timeout=' + cfg.timeoutMs + 'ms' +
     ' clientId=' + (cfg.clientId ? cfg.clientId.slice(0, 6) + '…' : '(unset)')
   );
@@ -208,7 +212,7 @@ function logResolvedConfig(force) {
 
   const problems = [];
   if (!cfg.omadacId) problems.push('OMADA_OMADAC_ID is unset');
-  if (!cfg.siteId) problems.push('OMADA_SITE_ID is unset — guest auth needs the numeric site ID, not the site name');
+  if (!env('OMADA_SITE')) problems.push('OMADA_SITE is unset — the Northbound client will look for a site named "Default"');
   if (!cfg.clientId || !cfg.clientSecret) {
     problems.push('OMADA_CLIENT_ID / OMADA_CLIENT_SECRET unset — the token request will fail with -44106');
   }
@@ -218,6 +222,76 @@ function logResolvedConfig(force) {
   } else {
     console.log('[omada-nb] config looks complete');
   }
+}
+
+// ================================================================
+// Site resolution (OMADA_SITE name → numeric site ID)
+// ================================================================
+// Every OpenAPI path addresses the site by its NUMERIC site ID, but operators
+// configure the site by NAME (OMADA_SITE, shared with the local hotspot API).
+// The name is mapped to its ID through GET /openapi/v1/{omadacId}/sites on
+// first use and cached, so a steady stream of webhook calls performs the lookup
+// exactly once. A changed OMADA_SITE invalidates the cache (the cached name no
+// longer matches).
+let siteIdCache = { name: null, id: null };
+// Single-flight: concurrent callers share one in-flight lookup instead of
+// each fanning out a /sites request.
+let siteIdInFlight = null;
+
+/**
+ * Look up the numeric site ID whose name matches `name` (case-insensitive).
+ *
+ * @param {string} name  the OMADA_SITE value
+ * @returns {Promise<string>} the numeric site ID
+ */
+async function lookupSiteId(name) {
+  const sites = await listSites();
+  const wanted = String(name).trim().toLowerCase();
+  const match = (sites || []).find(
+    (s) => String(s && s.name != null ? s.name : '').trim().toLowerCase() === wanted
+  );
+
+  if (!match || match.siteId === undefined || match.siteId === null || match.siteId === '') {
+    const err = new Error(
+      'OMADA_SITE "' + name + '" did not match any site returned by GET /sites (' +
+      (sites ? sites.length : 0) + ' site(s))'
+    );
+    err.code = 'OMADA_NORTHBOUND_SITE_NOT_FOUND';
+    err.omadaResponse = sites;
+    throw err;
+  }
+
+  siteIdCache = { name, id: String(match.siteId) };
+  console.log('[omada-nb] resolved OMADA_SITE "' + name + '" → siteId ' + siteIdCache.id);
+  return siteIdCache.id;
+}
+
+/**
+ * Resolve the numeric site ID to use for OpenAPI paths.
+ *
+ * Resolution order:
+ *   1. an explicit `siteId` from the caller (used by internal follow-up calls), or
+ *   2. the cached ID for the current OMADA_SITE, or
+ *   3. a fresh GET /sites lookup (cached for later calls).
+ *
+ * In mock mode no HTTP is performed and a placeholder ID is returned.
+ *
+ * @param {string} [explicit] caller-supplied site ID
+ * @returns {Promise<string>} the numeric site ID
+ */
+async function resolveSiteId(explicit) {
+  if (explicit) return String(explicit);
+
+  const cfg = resolveConfig();
+  if (cfg.mock) return 'mock-site';
+
+  const name = cfg.siteName;
+  if (siteIdCache.name === name && siteIdCache.id) return siteIdCache.id;
+
+  if (!siteIdInFlight) {
+    siteIdInFlight = lookupSiteId(name).finally(() => { siteIdInFlight = null; });
+  }
+  return siteIdInFlight;
 }
 
 // ================================================================
@@ -468,7 +542,7 @@ function assertOk(response, action) {
  * @param {Object} ctx
  * @param {string} ctx.clientMac             Client MAC, any common format
  * @param {number} [ctx.durationMinutes]     Paid session length (minutes)
- * @param {string} [ctx.siteId]              Overrides OMADA_SITE_ID
+ * @param {string} [ctx.siteId]              Overrides the OMADA_SITE lookup
  * @returns {Promise<Object>} { success, clientMac, authRecordId, periodMs }
  */
 async function authorizeGuest(ctx) {
@@ -487,9 +561,8 @@ async function authorizeGuest(ctx) {
     return { success: true, clientMac: mac, authRecordId: 'mock-record', periodMs: minutesToMs(ctx.durationMinutes) };
   }
 
-  const siteId = (ctx && ctx.siteId) || cfg.siteId;
   if (!cfg.omadacId) throw configError('OMADA_OMADAC_ID is not configured');
-  if (!siteId) throw configError('OMADA_SITE_ID is not configured (the numeric site ID, not the site name)');
+  const siteId = await resolveSiteId(ctx && ctx.siteId);
 
   const path = '/openapi/v1/' + encodeURIComponent(cfg.omadacId) +
     '/sites/' + encodeURIComponent(siteId) +
@@ -554,9 +627,8 @@ async function pauseGuest(ctx) {
 
   if (cfg.mock) return { success: true, clientMac: mac };
 
-  const siteId = (ctx && ctx.siteId) || cfg.siteId;
   if (!cfg.omadacId) throw configError('OMADA_OMADAC_ID is not configured');
-  if (!siteId) throw configError('OMADA_SITE_ID is not configured');
+  const siteId = await resolveSiteId(ctx && ctx.siteId);
 
   const path = '/openapi/v1/' + encodeURIComponent(cfg.omadacId) +
     '/sites/' + encodeURIComponent(siteId) +
@@ -582,9 +654,8 @@ async function pauseGuest(ctx) {
 async function getAuthedRecords(opts) {
   const cfg = resolveConfig();
   const o = opts || {};
-  const siteId = o.siteId || cfg.siteId;
   if (!cfg.omadacId) throw configError('OMADA_OMADAC_ID is not configured');
-  if (!siteId) throw configError('OMADA_SITE_ID is not configured');
+  const siteId = await resolveSiteId(o.siteId);
 
   const path = '/openapi/v1/' + encodeURIComponent(cfg.omadacId) +
     '/sites/' + encodeURIComponent(siteId) + '/hotspot/authed-records';
@@ -627,9 +698,7 @@ async function findAuthRecordByMac(clientMac, siteId) {
  */
 async function extendClientPeriod(ctx) {
   const cfg = resolveConfig();
-  const siteId = (ctx && ctx.siteId) || cfg.siteId;
   if (!cfg.omadacId) throw configError('OMADA_OMADAC_ID is not configured');
-  if (!siteId) throw configError('OMADA_SITE_ID is not configured');
   if (!ctx || !ctx.recordId) {
     const err = new Error('extendClientPeriod: missing recordId');
     err.code = 'OMADA_NORTHBOUND_MISSING_FIELD';
@@ -645,6 +714,7 @@ async function extendClientPeriod(ctx) {
 
   if (cfg.mock) return { success: true, recordId: ctx.recordId, periodMs };
 
+  const siteId = await resolveSiteId(ctx.siteId);
   const path = '/openapi/v1/' + encodeURIComponent(cfg.omadacId) +
     '/sites/' + encodeURIComponent(siteId) +
     '/hotspot/authed-records/' + encodeURIComponent(ctx.recordId) + '/period';
@@ -719,9 +789,7 @@ async function setClientRateLimit(ctx) {
     throw err;
   }
   const cfg = resolveConfig();
-  const siteId = (ctx && ctx.siteId) || cfg.siteId;
   if (!cfg.omadacId) throw configError('OMADA_OMADAC_ID is not configured');
-  if (!siteId) throw configError('OMADA_SITE_ID is not configured');
 
   const mode = Number(ctx.mode) === 1 ? 1 : 0;
   const body = { mode };
@@ -757,6 +825,7 @@ async function setClientRateLimit(ctx) {
 
   if (cfg.mock) return { success: true, clientMac: mac, applied: body };
 
+  const siteId = await resolveSiteId(ctx && ctx.siteId);
   const path = '/openapi/v1/' + encodeURIComponent(cfg.omadacId) +
     '/sites/' + encodeURIComponent(siteId) +
     '/clients/' + encodeURIComponent(mac) + '/ratelimit';
@@ -805,6 +874,7 @@ module.exports = {
   getAuthedRecords,
   findAuthRecordByMac,
   listSites,
+  resolveSiteId,
   logResolvedConfig,
   // Exposed for testing
   _internal: {
@@ -817,6 +887,9 @@ module.exports = {
     env,
     resolveConfig,
     defaultRateLimit,
+    resolveSiteId,
+    resetSiteId: () => { siteIdCache = { name: null, id: null }; siteIdInFlight = null; },
+    siteIdCache: () => siteIdCache,
     invalidateToken,
     requestToken,
     apiRequest,

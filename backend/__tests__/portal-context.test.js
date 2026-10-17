@@ -9,8 +9,9 @@
  *   - a refresh / re-opened tab (bare URL, no query string) restores them from
  *     localStorage, so the context beacon and the payment claim still carry the
  *     device identity
- *   - the reference-number form (Claim Voucher) POSTs client_mac + ap_mac to
- *     /api/payment/claim, read from localStorage
+ *   - the reference-number + mobile-number form (Claim Voucher) POSTs
+ *     ref_suffix + mobile_number, plus client_mac + ap_mac (read from
+ *     localStorage), to /api/payment/claim
  *   - a fresh controller redirect wins over stale stored values
  *   - blocked storage (strict captive mini-browser / private mode) degrades to
  *     URL-only instead of breaking the page
@@ -52,6 +53,8 @@ function createElement(id) {
     dataset: {},
     classList: { add() {}, remove() {}, contains() { return false; }, toggle() {} },
     addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    /** Test helper: invoke every handler registered for `type`. */
+    fire(type, event) { (listeners[type] || []).forEach((fn) => fn(event || {})); },
     removeEventListener() {},
     setAttribute() {},
     getAttribute() { return null; },
@@ -241,7 +244,7 @@ describe('Omada redirect context — capture and persistence', () => {
 });
 
 describe('Claim Voucher (reference number) submission', () => {
-  test('POSTs ref_suffix + client_mac + ap_mac read from localStorage', async () => {
+  test('POSTs ref_suffix + mobile_number + client_mac + ap_mac read from localStorage', async () => {
     const storage = new Map([
       ['portalClientMac', CONTEXT.clientMac],
       ['portalApMac', CONTEXT.apMac],
@@ -253,6 +256,7 @@ describe('Claim Voucher (reference number) submission', () => {
     const portal = loadPortal({ search: '', storage });
 
     portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
     portal.getEl('claim-verify').onclick();
     await portal.flush();
     await portal.flush();
@@ -261,6 +265,7 @@ describe('Claim Voucher (reference number) submission', () => {
     expect(body).toBeTruthy();
     expect(body).toEqual({
       ref_suffix: '1234',
+      mobile_number: '09171234567',
       client_mac: CONTEXT.clientMac,
       ap_mac: CONTEXT.apMac,
     });
@@ -270,11 +275,12 @@ describe('Claim Voucher (reference number) submission', () => {
     const portal = loadPortal({ search: '' });
 
     portal.getEl('claim-ref-input').value = '9999';
+    portal.getEl('claim-mobile-input').value = '09171234567';
     portal.getEl('claim-verify').onclick();
     await portal.flush();
     await portal.flush();
 
-    expect(claimBody(portal)).toEqual({ ref_suffix: '9999' });
+    expect(claimBody(portal)).toEqual({ ref_suffix: '9999', mobile_number: '09171234567' });
   });
 
   test('a non-4-digit entry is rejected client-side (no request at all)', async () => {
@@ -287,5 +293,63 @@ describe('Claim Voucher (reference number) submission', () => {
     expect(claimBody(portal)).toBeNull();
     expect(portal.getEl('claim-input-error').textContent)
       .toBe('Enter the last 4 digits of your reference number.');
+  });
+
+  test('a missing or malformed mobile number is rejected client-side (no request at all)', async () => {
+    const portal = loadPortal({ search: REDIRECT_SEARCH });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+
+    // Empty field: nothing is sent, and the mobile field reports the error.
+    expect(claimBody(portal)).toBeNull();
+    expect(portal.getEl('claim-mobile-error').textContent)
+      .toBe('Enter your 11-digit mobile number (e.g. 09171234567).');
+
+    // 10 digits: too short.
+    portal.getEl('claim-mobile-input').value = '0917123456';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    expect(claimBody(portal)).toBeNull();
+
+    // 11 digits, but not a 09 number.
+    portal.getEl('claim-mobile-input').value = '99171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    expect(claimBody(portal)).toBeNull();
+  });
+
+  test('normalizes a spaced / dashed mobile number before sending', async () => {
+    const portal = loadPortal({ search: '' });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '0917-123 4567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    expect(claimBody(portal).mobile_number).toBe('09171234567');
+  });
+
+  test('opening the modal clears the previous mobile number and its error', async () => {
+    const portal = loadPortal({ search: REDIRECT_SEARCH });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-mobile-input').disabled = true;
+    portal.getEl('claim-mobile-error').textContent = 'stale error';
+
+    // Portal-screen CTA -> openClaimModal() -> resetClaimModal().
+    portal.getEl('claim-voucher-btn').fire('click');
+
+    expect(portal.getEl('claim-mobile-input').value).toBe('');
+    expect(portal.getEl('claim-mobile-input').disabled).toBe(false);
+    expect(portal.getEl('claim-mobile-error').textContent).toBe('');
+    // The reference field keeps its existing reset behaviour.
+    expect(portal.getEl('claim-ref-input').value).toBe('');
+
+    // Let resetClaimModal's focus timeout settle so no timer leaks.
+    await new Promise((resolve) => setTimeout(resolve, 80));
   });
 });

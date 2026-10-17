@@ -323,7 +323,7 @@ dashboard → Environment** (or `render.yaml`) for production.
 |---|---|---|---|
 | `OMADA_BASE_URL` | `server.js`, `services/omada.js` | *(empty)* | Base URL the backend uses to reach the Omada controller API. When unset, Omada runs in mock mode and the session-expiration worker is disabled. |
 | `OMADA_OMADAC_ID` | `services/omada.js` | *(empty)* | Omada controller ID (OMADAC ID) used in API paths. |
-| `OMADA_SITE` | `services/omada.js`, `routes/payment.js` | `Default` | Omada site name. |
+| `OMADA_SITE` | `services/omada.js`, `services/omada-northbound.js`, `routes/payment.js` | `Default` | Omada site name. The Northbound (InstaPay) client resolves it to its numeric site ID via `GET /openapi/v1/{omadacId}/sites` on first use and caches the result. |
 | `OMADA_PORTAL_OPERATOR_NAME` | `services/omada.js` | *(empty)* | Hotspot portal operator username (for `POST /{OMADAC_ID}/api/v2/hotspot/login`). |
 | `OMADA_PORTAL_OPERATOR_PASSWORD` | `services/omada.js` | *(empty)* | Hotspot portal operator password. |
 | `OMADA_AUTH_TIMEOUT` | `services/omada.js` | `10000` | Controller request timeout (ms). |

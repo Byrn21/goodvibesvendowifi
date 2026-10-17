@@ -798,6 +798,20 @@
             aria-label="Last 4 digits of your reference number"
           >
           <p id="claim-input-error" class="form-error hidden" role="alert"></p>
+
+          <label for="claim-mobile-input" class="modal-instruction" style="display: block; margin-top: 14px;">Mobile number (11 digits) - we'll text your voucher code to it.</label>
+          <input
+            type="tel"
+            id="claim-mobile-input"
+            class="qr-ref-input claim-modal__input"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="11"
+            placeholder="09xxxxxxxxx"
+            autocomplete="tel"
+            spellcheck="false"
+          >
+          <p id="claim-mobile-error" class="form-error hidden" role="alert"></p>
         </div>
 
         <!-- Loading state -->
@@ -822,7 +836,7 @@
       <div class="modal-footer">
         <button type="button" class="btn btn--secondary" id="claim-cancel">Cancel</button>
         <button type="button" class="btn btn--primary" id="claim-verify">
-          <span id="claim-verify-label">Verify Payment</span>
+          <span id="claim-verify-label">Connect &amp; Send Status Link</span>
           <span class="qr-btn-spinner hidden" id="claim-verify-spinner" aria-hidden="true"></span>
         </button>
         <button type="button" class="btn btn--primary hidden" id="claim-retry">Try Again</button>

@@ -1525,6 +1525,19 @@
     }
   }
 
+  function setMobileError(message) {
+    var errEl = claimEl('claim-mobile-error');
+    if (errEl) {
+      if (message) { errEl.textContent = message; show(errEl); }
+      else { errEl.textContent = ''; hide(errEl); }
+    }
+    var input = claimEl('claim-mobile-input');
+    if (input) {
+      if (message) input.classList.add('is-error');
+      else input.classList.remove('is-error');
+    }
+  }
+
   // Reset the modal to its initial input state (called every time it opens).
   function resetClaimModal() {
     claimState.submitting = false;
@@ -1532,7 +1545,10 @@
 
     var input = claimEl('claim-ref-input');
     if (input) { input.value = ''; input.disabled = false; input.classList.remove('is-error'); }
+    var mobileInput = claimEl('claim-mobile-input');
+    if (mobileInput) { mobileInput.value = ''; mobileInput.disabled = false; mobileInput.classList.remove('is-error'); }
     setClaimError('');
+    setMobileError('');
 
     var errText = claimEl('claim-error-text');
     if (errText) errText.textContent = '';
@@ -1543,7 +1559,7 @@
     var verifyLabel = claimEl('claim-verify-label');
     var verifySpinner = claimEl('claim-verify-spinner');
     if (verifyBtn) { verifyBtn.disabled = false; verifyBtn.removeAttribute('aria-busy'); }
-    if (verifyLabel) verifyLabel.textContent = 'Verify Payment';
+    if (verifyLabel) verifyLabel.textContent = 'Connect & Send Status Link';
     if (verifySpinner) hide(verifySpinner);
 
     var connectBtn = claimEl('claim-connect');
@@ -1612,6 +1628,16 @@
       return;
     }
 
+    // Client-side rule: 11 digits, PH format (mirrors the backend validation).
+    var mobileInput = claimEl('claim-mobile-input');
+    var mobile = mobileInput ? String(mobileInput.value || '').replace(/\D/g, '') : '';
+    if (!/^09\d{9}$/.test(mobile)) {
+      setMobileError('Enter your 11-digit mobile number (e.g. 09171234567).');
+      if (mobileInput) mobileInput.focus();
+      return;
+    }
+    setMobileError('');
+
     claimState.submitting = true;
     setClaimError('');
     showClaimStep('loading');
@@ -1627,7 +1653,7 @@
     // sent when known, so an unknown context never overwrites a better one the
     // backend already captured from /api/payment/context.
     var device = getDeviceContext();
-    var claimBody = { ref_suffix: suffix };
+    var claimBody = { ref_suffix: suffix, mobile_number: mobile };
     if (device.clientMac) claimBody.client_mac = device.clientMac;
     if (device.apMac) claimBody.ap_mac = device.apMac;
 
@@ -1657,7 +1683,7 @@
     var verifyLabel = claimEl('claim-verify-label');
     var verifySpinner = claimEl('claim-verify-spinner');
     if (verifyBtn) { verifyBtn.disabled = false; verifyBtn.removeAttribute('aria-busy'); }
-    if (verifyLabel) verifyLabel.textContent = 'Verify Payment';
+    if (verifyLabel) verifyLabel.textContent = 'Connect & Send Status Link';
     if (verifySpinner) hide(verifySpinner);
   }
 
@@ -1754,6 +1780,21 @@
         setClaimError('');
       });
       input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          submitClaim();
+        }
+      });
+    }
+
+    var mobileInput = claimEl('claim-mobile-input');
+    if (mobileInput) {
+      // Numeric only, exactly 11 digits.
+      mobileInput.addEventListener('input', function () {
+        mobileInput.value = mobileInput.value.replace(/\D/g, '').slice(0, 11);
+        setMobileError('');
+      });
+      mobileInput.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') {
           e.preventDefault();
           submitClaim();
