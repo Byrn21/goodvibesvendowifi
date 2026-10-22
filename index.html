@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#2d6a4f">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <title>WiFi Portal — Connect</title>
+  <title>GoodVibesVendoWifi</title>
   <link rel="stylesheet" href="assets/style.css">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232d6a4f'/><path d='M6 22 Q16 10 26 22' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/><path d='M11 26 Q16 18 21 26' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/><circle cx='16' cy='29' r='1.5' fill='white'/></svg>">
+  <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <!-- Contact Support modal — identical markup, styling and behavior to status.html -->
   <style>
     /* ---- "Contact support" trigger styled like a link ---- */
@@ -182,6 +182,22 @@
     @media (max-width: 480px) {
       .support-modal { max-width: 100%; }
     }
+
+    /* ---- Connect Now: flex-centers the label and the arrow icon ----
+       .btn asks for inline-flex, but the admin .btn block declared later in
+       style.css overrides it with inline-block, which breaks the alignment.
+       The ID + class selector below wins that cascade. .btn-icon--right also
+       carries margin-left:auto (for space-between layouts); with centered
+       flex that would shove the arrow to the far edge, so it is reset here. */
+    #submit-btn.btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    #submit-btn.btn .btn-icon--right {
+      margin-left: 0;
+    }
   </style>
 </head>
 <body>
@@ -195,103 +211,48 @@
         <div class="marquee-content">
           <!-- First sequence -->
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <!-- Second sequence (duplicate for seamless loop) -->
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
         </div>
@@ -449,9 +410,9 @@
               <span class="checkbox-custom" aria-hidden="true"></span>
               <span class="checkbox-text">
                 I accept the
-                <a href="#" id="terms-link" class="terms-link" target="_blank" rel="noopener noreferrer">Terms of Service</a>
+                <a href="#" id="terms-link" class="terms-link" aria-haspopup="dialog" aria-controls="terms-modal">Terms of Service</a>
                 and
-                <a href="#" id="privacy-link" class="terms-link" target="_blank" rel="noopener noreferrer">Privacy Policy</a>
+                <a href="#" id="privacy-link" class="terms-link" aria-haspopup="dialog" aria-controls="privacy-modal">Privacy Policy</a>
               </span>
             </label>
             <p id="terms-error" class="form-error hidden" role="alert"></p>
@@ -689,7 +650,6 @@
           Need help?
           <button type="button" class="support-trigger" aria-haspopup="dialog">Contact support</button>
         </p>
-        <p class="powered-by">Powered by Bukuhan WiFi Vendo</p>
       </footer>
 
     </main>
@@ -1015,6 +975,197 @@
     </div>
   </div>
 
+  <!-- ================================================================
+       LEGAL MODALS — Terms of Service / Privacy Policy
+       Opened by the two links in the terms checkbox. Both reuse the
+       shared .modal-overlay / .modal-dialog design from assets/style.css.
+       ================================================================ -->
+  <div id="terms-modal" class="modal-overlay hidden" tabindex="-1" role="dialog"
+       aria-modal="true" aria-labelledby="terms-modal-title" aria-hidden="true">
+    <div class="modal-dialog legal-modal">
+      <div class="modal-header">
+        <h3 id="terms-modal-title">Terms of Service</h3>
+        <button type="button" class="modal-close" data-legal-close aria-label="Close Terms of Service">&times;</button>
+      </div>
+      <div class="modal-body legal-modal__body">
+        <p class="legal-modal__meta">GoodVibesVendoWifi is operated by Good Vibes Store.</p>
+
+        <h4>1. Access is tied to your voucher</h4>
+        <p>
+          Internet access on GoodVibesVendoWifi is available only through a voucher purchased
+          from Good Vibes Store. Each voucher is valid for the duration and device
+          limit stated at the time of purchase. Vouchers are non-transferable, may not be shared
+          beyond the purchased device limit, and stop working once their validity period ends.
+          Used or expired vouchers cannot be reused or refunded, except where required by law.
+        </p>
+
+        <h4>2. No illegal network activity</h4>
+        <p>You agree to use the network lawfully. The following are strictly prohibited:</p>
+        <ul>
+          <li>Any activity that is illegal under Philippine law or the law where you are located</li>
+          <li>Unauthorized access to computers, accounts, or networks (hacking, cracking, scanning)</li>
+          <li>Distributing malware, phishing pages, or spam</li>
+          <li>Pirating copyrighted material or infringing intellectual property rights</li>
+          <li>Harassing, threatening, or defrauding other people</li>
+        </ul>
+        <p>
+          We may suspend or terminate your access immediately, without refund, if we reasonably
+          believe a voucher is being used for prohibited activity, and we may report unlawful use
+          to the proper authorities.
+        </p>
+
+        <h4>3. Speeds and uptime are provided as-is</h4>
+        <p>
+          Network speed, latency, and uptime are provided on an <strong>as-is, best-effort
+          basis</strong>. Actual performance depends on signal strength, your device, network
+          load, and factors outside our control. We do not guarantee any minimum speed,
+          uninterrupted service, or a specific uptime, and the network may be unavailable during
+          maintenance or outages without prior notice.
+        </p>
+        <p>
+          To the fullest extent permitted by law, Good Vibes Store is not liable for
+          any loss or damage arising from service interruptions, slowdowns, or your inability to
+          connect.
+        </p>
+
+        <h4>4. Fair use and device limits</h4>
+        <p>
+          To keep the connection usable for everyone, bandwidth and the number of connected
+          devices may be limited per voucher. Attempting to bypass these limits is a breach of
+          these Terms.
+        </p>
+
+        <h4>5. Changes to these Terms</h4>
+        <p>
+          We may update these Terms from time to time. The version shown in this dialog when you
+          connect is the version that applies to your session, and continued use of the network
+          means you accept it.
+        </p>
+
+        <h4>6. Contact</h4>
+        <p>
+          Questions about these Terms? Visit Good Vibes Store, Blk 34 Lot 1 Eucalyptus
+          Street, Phase 5, Mabuhay City Subdivision &mdash; open daily, 8:00 AM to 8:00 PM.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn--primary" data-legal-close>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="privacy-modal" class="modal-overlay hidden" tabindex="-1" role="dialog"
+       aria-modal="true" aria-labelledby="privacy-modal-title" aria-hidden="true">
+    <div class="modal-dialog legal-modal">
+      <div class="modal-header">
+        <h3 id="privacy-modal-title">Privacy Policy</h3>
+        <button type="button" class="modal-close" data-legal-close aria-label="Close Privacy Policy">&times;</button>
+      </div>
+      <div class="modal-body legal-modal__body">
+        <p class="legal-modal__meta">GoodVibesVendoWifi is operated by Good Vibes Store.</p>
+
+        <h4>What we collect</h4>
+        <p>When you connect through this portal, we record only what is needed to run your session:</p>
+        <ul>
+          <li>Your device's <strong>MAC address</strong> (the hardware identifier of the device you connect with)</li>
+          <li><strong>Connection timestamps</strong> &mdash; when your session starts, and when it ends or expires</li>
+          <li>The voucher code you used, so it can be validated and marked as used</li>
+        </ul>
+
+        <h4>Why we collect it</h4>
+        <p>
+          Solely for <strong>voucher validation and session management</strong>: confirming that a
+          voucher is valid and unused, enforcing its duration and device limit, preventing voucher
+          sharing or abuse, and troubleshooting connection problems you report to us.
+        </p>
+
+        <h4>What we do not collect</h4>
+        <p>
+          We <strong>do not log your browsing history</strong>. We do not monitor, record, or
+          inspect the websites you visit, the content you download, or your messages. We do not
+          perform deep packet inspection, and we do not build advertising profiles from your
+          activity.
+        </p>
+
+        <h4>How long we keep it</h4>
+        <p>
+          MAC address and connection timestamp records are kept only as long as needed for
+          voucher validation and session accounting, then removed in the ordinary course of
+          business.
+        </p>
+
+        <h4>Sharing</h4>
+        <p>
+          We do not sell or rent your information. Details are disclosed only when required by
+          law, or to protect the network and other users from abuse.
+        </p>
+
+        <h4>Contact</h4>
+        <p>
+          Questions about this policy? Visit Good Vibes Store, Blk 34 Lot 1 Eucalyptus
+          Street, Phase 5, Mabuhay City Subdivision &mdash; open daily, 8:00 AM to 8:00 PM.
+        </p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn--primary" data-legal-close>Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       BACK TO TOP — floats bottom-right once the page scrolls past 100px.
+       Styled by .back-to-top in assets/style.css.
+       ================================================================ -->
+  <button type="button" id="back-to-top" class="back-to-top" aria-label="Back to top">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 19V5"/>
+      <path d="M5 12l7-7 7 7"/>
+    </svg>
+  </button>
+
+  <script>
+    /* ================================================================
+       BACK TO TOP — smooth scroll + show-after-scroll behaviour.
+       Self-contained IIFE; does not touch the login form or portal.js.
+       ================================================================ */
+    (function () {
+      'use strict';
+
+      var btn = document.getElementById('back-to-top');
+      if (!btn) return;
+
+      var SHOW_AFTER_PX = 100;
+      var ticking = false;
+
+      function updateVisibility() {
+        var y = window.pageYOffset || document.documentElement.scrollTop || 0;
+        if (y > SHOW_AFTER_PX) {
+          btn.classList.add('is-visible');
+        } else {
+          btn.classList.remove('is-visible');
+        }
+        ticking = false;
+      }
+
+      function onScroll() {
+        if (ticking) return;
+        ticking = true;
+        if (typeof window.requestAnimationFrame === 'function') {
+          window.requestAnimationFrame(updateVisibility);
+        } else {
+          updateVisibility();
+        }
+      }
+
+      window.addEventListener('scroll', onScroll, { passive: true });
+      updateVisibility();
+
+      btn.addEventListener('click', function () {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+    })();
+  </script>
+
   <script src="assets/carousel.js"></script>
   <script src="config/config.js"></script>
   <script src="assets/portal.js"></script>
@@ -1143,6 +1294,104 @@
         }
       });
 
+    })();
+  </script>
+
+  <script>
+    /* ================================================================
+       LEGAL MODALS — Terms of Service / Privacy Policy
+
+       Self-contained IIFE. It never touches the login form, portal.js,
+       or the Contact Support modal. The two links live inside the terms
+       <label>, so the click is prevented (no navigation) and stopped
+       (no checkbox toggle) before the dialog opens.
+       ================================================================ */
+    (function () {
+      'use strict';
+
+      var MODALS = [
+        { linkId: 'terms-link',   modalId: 'terms-modal' },
+        { linkId: 'privacy-link', modalId: 'privacy-modal' }
+      ];
+
+      MODALS.forEach(function (pair) {
+        var link = document.getElementById(pair.linkId);
+        var modal = document.getElementById(pair.modalId);
+        if (!link || !modal) return;
+
+        var lastFocused = null;
+
+        function isOpen() {
+          return !modal.classList.contains('hidden');
+        }
+
+        function focusables() {
+          return modal.querySelectorAll(
+            'button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+          );
+        }
+
+        function openModal() {
+          lastFocused = document.activeElement;
+          modal.classList.remove('hidden');
+          modal.setAttribute('aria-hidden', 'false');
+          document.body.classList.add('modal-open');
+          var items = focusables();
+          if (items.length) items[0].focus();
+        }
+
+        function closeModal() {
+          modal.classList.add('hidden');
+          modal.setAttribute('aria-hidden', 'true');
+          document.body.classList.remove('modal-open');
+          if (lastFocused && typeof lastFocused.focus === 'function') {
+            lastFocused.focus();
+          }
+        }
+
+        link.addEventListener('click', function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          openModal();
+        });
+
+        // Backdrop click (the overlay itself, not the dialog) closes
+        modal.addEventListener('click', function (e) {
+          if (e.target === modal) closeModal();
+        });
+
+        // The header X and the footer Close button
+        Array.prototype.forEach.call(
+          modal.querySelectorAll('[data-legal-close]'),
+          function (btn) { btn.addEventListener('click', closeModal); }
+        );
+
+        // Escape closes; Tab stays inside the open dialog
+        document.addEventListener('keydown', function (e) {
+          if (!isOpen()) return;
+
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            closeModal();
+            return;
+          }
+
+          if (e.key === 'Tab') {
+            var items = focusables();
+            if (!items.length) return;
+            var first = items[0];
+            var last = items[items.length - 1];
+
+            if (e.shiftKey && document.activeElement === first) {
+              e.preventDefault();
+              last.focus();
+            } else if (!e.shiftKey && document.activeElement === last) {
+              e.preventDefault();
+              first.focus();
+            }
+          }
+        });
+      });
     })();
   </script>
 </body>

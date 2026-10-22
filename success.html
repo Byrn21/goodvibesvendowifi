@@ -5,13 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#2d6a4f">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <title>WiFi Portal — Connected</title>
+  <title>GoodVibesVendoWifi</title>
   <link rel="stylesheet" href="assets/style.css">
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232d6a4f'/><path d='M6 22 Q16 10 26 22' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/><path d='M11 26 Q16 18 21 26' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/><circle cx='16' cy='29' r='1.5' fill='white'/></svg>">
+  <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <style>
-    /* ---- Card header aligned like index.html's .login-card ---- */
+    /* ---- Success card header: icon, heading and subtext all centered ---- */
+    .success-card .card-header {
+      text-align: center;
+    }
+
     .success-card .card-subtitle {
-      text-align: left;
+      text-align: center;
       margin-bottom: 0;
     }
 
@@ -34,6 +38,227 @@
       outline-offset: 2px;
       border-radius: 4px;
     }
+
+    /* ============================================================
+       Modernized success card — soft glass surface on the green grid
+       ============================================================ */
+    .success-card {
+      padding: clamp(24px, 5.5vw, 36px);
+      border-radius: 26px;
+      border: 1px solid #dcecd8;
+      background:
+        radial-gradient(110% 80% at 50% 0%, #ffffff 0%, #fbfdf8 52%, #f1f8ee 100%);
+      box-shadow:
+        0 26px 48px -30px rgba(31, 92, 63, 0.42),
+        0 10px 22px -14px rgba(31, 92, 63, 0.20),
+        inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    }
+
+    .success-icon svg {
+      filter: drop-shadow(0 10px 18px rgba(24, 128, 56, 0.16));
+    }
+
+    .success-card .card-title {
+      letter-spacing: -0.01em;
+    }
+
+    .success-card .session-info-box {
+      background: #f3faf1;
+      border-color: #d9ebd6;
+      border-radius: 14px;
+    }
+
+    /* Primary action — emerald gradient that sits calmly on the green grid */
+    #redirect-btn.btn--primary {
+      height: 54px;
+      border-color: transparent;
+      background: linear-gradient(135deg, #2f9e6e 0%, #1f7a54 55%, #17694a 100%);
+      box-shadow:
+        0 12px 24px -14px rgba(23, 105, 74, 0.85),
+        inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    }
+    #redirect-btn.btn--primary:hover:not(:disabled) {
+      background: linear-gradient(135deg, #35a977 0%, #238259 55%, #1a7250 100%);
+      box-shadow:
+        0 16px 28px -14px rgba(23, 105, 74, 0.9),
+        inset 0 1px 0 rgba(255, 255, 255, 0.26);
+    }
+    #redirect-btn.btn--primary:active:not(:disabled) {
+      transform: scale(0.99);
+    }
+
+    /* Secondary action — white glass with a matching green outline */
+    #status-link.btn--secondary {
+      height: 50px;
+      background: rgba(255, 255, 255, 0.72);
+      color: #1f6b4a;
+      border: 1.5px solid #c7e3cd;
+      box-shadow: 0 6px 14px -10px rgba(31, 107, 74, 0.45);
+    }
+    #status-link.btn--secondary:hover:not(:disabled) {
+      background: #ffffff;
+      border-color: #9ed0ad;
+      box-shadow: 0 8px 18px -10px rgba(31, 107, 74, 0.5);
+    }
+
+    /* ============================================================
+       Contact Support modal
+       ============================================================ */
+    body.modal-open { overflow: hidden; }
+
+    .support-modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(15, 37, 26, 0.58);
+      -webkit-backdrop-filter: blur(5px);
+      backdrop-filter: blur(5px);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 200ms ease, visibility 0s linear 200ms;
+    }
+    .support-modal-overlay.is-open {
+      opacity: 1;
+      visibility: visible;
+      transition: opacity 200ms ease;
+    }
+
+    .support-modal {
+      width: 100%;
+      max-width: 420px;
+      max-height: calc(100dvh - 32px);
+      overflow-y: auto;
+      background: #ffffff;
+      border-radius: 20px;
+      box-shadow:
+        0 32px 72px -24px rgba(12, 36, 24, 0.55),
+        0 4px 16px -6px rgba(12, 36, 24, 0.18);
+      transform: scale(0.95) translateY(12px);
+      transition: transform 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
+    }
+    .support-modal-overlay.is-open .support-modal {
+      transform: scale(1) translateY(0);
+    }
+
+    .support-modal__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 22px 22px 16px;
+      border-bottom: 1px solid #e6f0e6;
+    }
+    .support-modal__title {
+      margin: 0;
+      font-size: 1.125rem;
+      font-weight: 700;
+      line-height: 1.3;
+      color: #173d2a;
+    }
+    .support-modal__subtitle {
+      margin: 4px 0 0;
+      font-size: 0.8125rem;
+      color: #6b7f6f;
+      line-height: 1.4;
+    }
+    .support-modal__close {
+      flex-shrink: 0;
+      width: 34px;
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: none;
+      border: none;
+      border-radius: 10px;
+      color: #6b7f6f;
+      cursor: pointer;
+      transition: color 180ms ease, background 180ms ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-modal__close:hover { color: #173d2a; background: #eef7ef; }
+    .support-modal__close:focus-visible {
+      outline: 2px solid #2d6a4f;
+      outline-offset: 2px;
+    }
+
+    .support-modal__body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: 18px 22px;
+    }
+
+    .support-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 14px 15px;
+      background: #f5faf4;
+      border: 1px solid #e1eee0;
+      border-radius: 14px;
+    }
+    .support-row__icon {
+      flex-shrink: 0;
+      width: 36px;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #e3f3e5;
+      color: #1f7a54;
+      border-radius: 11px;
+    }
+    .support-row__label {
+      display: block;
+      margin-bottom: 3px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #7d917f;
+    }
+    .support-row__value {
+      display: block;
+      font-size: 0.9rem;
+      font-weight: 600;
+      line-height: 1.45;
+      color: #214a33;
+      word-break: break-word;
+    }
+
+    .support-modal__footer { padding: 4px 22px 22px; }
+    .support-modal__close-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      height: 48px;
+      background: #ffffff;
+      color: #1f6b4a;
+      font-size: 16px;
+      font-weight: 700;
+      font-family: inherit;
+      border: 2px solid #bfe0c7;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: background 180ms ease, border-color 180ms ease, transform 80ms ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-modal__close-btn:hover { background: #f2faf3; border-color: #9ed0ad; }
+    .support-modal__close-btn:active { transform: scale(0.98); }
+    .support-modal__close-btn:focus-visible {
+      outline: 3px solid rgba(45, 106, 79, 0.4);
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 480px) {
+      .support-modal { max-width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -47,103 +272,48 @@
         <div class="marquee-content">
           <!-- First sequence -->
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <!-- Seamless loop repeats -->
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
           <span class="marquee-logo" aria-hidden="true">
-            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
-              <circle cx="26" cy="43" r="2.5" fill="white"/>
-            </svg>
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
           </span>
           <span class="marquee-text">GoodVibesVendoWifi</span>
         </div>
@@ -201,11 +371,66 @@
       <footer class="portal-footer" role="contentinfo">
         <p class="support-info">
           Need help?
-          <a href="__SUPPORT_EMAIL__" class="support-link support-trigger">Contact support</a>
+          <button type="button" class="support-trigger" id="support-trigger"
+                  aria-haspopup="dialog" aria-controls="support-modal">Contact support</button>
         </p>
-        <p class="powered-by">Powered by Bukuhan WiFi Vendo</p>
       </footer>
     </main>
+  </div>
+
+  <!-- ================================================================
+       CONTACT SUPPORT MODAL
+       Opened by the "Contact support" trigger in the footer. The store
+       details are static, so this dialog is always available.
+       ================================================================ -->
+  <div class="support-modal-overlay" id="support-modal" role="dialog" aria-modal="true"
+       aria-labelledby="support-modal-title" aria-hidden="true">
+    <div class="support-modal">
+      <header class="support-modal__header">
+        <div>
+          <h3 class="support-modal__title" id="support-modal-title">Kuya By's Gadget Repair Shop</h3>
+          <p class="support-modal__subtitle">Good Vibes Store</p>
+        </div>
+        <button type="button" class="support-modal__close" id="support-modal-close" aria-label="Close contact support dialog">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+            <line x1="6" y1="6" x2="18" y2="18"/>
+            <line x1="18" y1="6" x2="6" y2="18"/>
+          </svg>
+        </button>
+      </header>
+
+      <div class="support-modal__body">
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+              <circle cx="12" cy="10" r="3"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Location</span>
+            <span class="support-row__value">Blk 34 Lot 1 Eucalyptus Street, Phase 5, Mabuhay City Subdivision</span>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="9"/>
+              <polyline points="12 7 12 12 15.5 14"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Hours</span>
+            <span class="support-row__value">Open Daily, 8:00 AM to 8:00 PM</span>
+          </div>
+        </div>
+      </div>
+
+      <footer class="support-modal__footer">
+        <button type="button" class="support-modal__close-btn" id="support-modal-close-btn">Close</button>
+      </footer>
+    </div>
   </div>
 
   <!-- Redirect logic: reads URL params for destination and session ID, wires
@@ -352,6 +577,74 @@
           if (supportRow) supportRow.style.display = 'none';
         }
       }
+    })();
+  </script>
+
+  <!-- Contact Support modal open/close. Kept in its own IIFE so the redirect
+       and session logic above stays untouched. -->
+  <script>
+    (function () {
+      'use strict';
+      var overlay = document.getElementById('support-modal');
+      if (!overlay) return;
+
+      var trigger = document.getElementById('support-trigger');
+      var closeX = document.getElementById('support-modal-close');
+      var closeBtn = document.getElementById('support-modal-close-btn');
+      var lastFocused = null;
+
+      function openModal() {
+        lastFocused = document.activeElement;
+        overlay.classList.add('is-open');
+        overlay.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+        closeX.focus();
+      }
+
+      function closeModal() {
+        overlay.classList.remove('is-open');
+        overlay.setAttribute('aria-hidden', 'true');
+        document.body.classList.remove('modal-open');
+        if (lastFocused && typeof lastFocused.focus === 'function') {
+          lastFocused.focus();
+        }
+      }
+
+      if (trigger) trigger.addEventListener('click', openModal);
+      closeX.addEventListener('click', closeModal);
+      closeBtn.addEventListener('click', closeModal);
+
+      // Click on the dark backdrop (outside the dialog) closes the modal.
+      overlay.addEventListener('click', function (e) {
+        if (e.target === overlay) closeModal();
+      });
+
+      // Escape closes; Tab is trapped inside the dialog while it is open.
+      document.addEventListener('keydown', function (e) {
+        if (!overlay.classList.contains('is-open')) return;
+
+        if (e.key === 'Escape') {
+          closeModal();
+          return;
+        }
+
+        if (e.key === 'Tab') {
+          var focusables = overlay.querySelectorAll(
+            'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          );
+          if (!focusables.length) return;
+          var first = focusables[0];
+          var last = focusables[focusables.length - 1];
+
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      });
     })();
   </script>
 </body>

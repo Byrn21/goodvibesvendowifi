@@ -4,8 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#c0392b">
-  <title>Connection Failed — WiFi Portal</title>
+  <title>GoodVibesVendoWifi</title>
   <link rel="stylesheet" href="assets/style.css">
+  <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <style>
     /* ============================================================
        Error page scoped styles — theme inherited from assets/style.css
@@ -69,6 +70,17 @@
       outline-offset: 2px;
     }
     .retry-btn svg { flex-shrink: 0; }
+
+    /* ---- Try Again: keep the refresh icon and label flex-centered.
+       The generic .btn rules in style.css are also declared later in that
+       file (admin block), which replaces inline-flex with inline-block; the
+       ID+class selector here restores flex centering for this button. ---- */
+    #retry-btn.btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
 
     /* ---- "Contact support" trigger styled like a link ---- */
     .support-trigger {
@@ -247,17 +259,56 @@
 </head>
 <body>
   <div class="page-wrapper">
-    <header class="portal-header portal-header--error" role="banner">
-      <div class="logo-container">
-        <svg class="logo-svg" width="52" height="52" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <rect width="52" height="52" rx="14" fill="#c0392b"/>
-          <line x1="17" y1="17" x2="35" y2="35" stroke="white" stroke-width="3.5" stroke-linecap="round"/>
-          <line x1="35" y1="17" x2="17" y2="35" stroke="white" stroke-width="3.5" stroke-linecap="round"/>
-        </svg>
-      </div>
-      <div class="brand-text">
-        <h1 class="brand-name" id="brand-name">Bukuhan WiFi</h1>
-        <p class="brand-tagline" id="brand-tagline">Connection issue</p>
+    <header class="portal-header portal-header--marquee" role="banner" aria-label="GoodVibesVendoWifi - Connect to our Guest Network">
+      <div class="marquee-track">
+        <div class="marquee-content">
+          <!-- First sequence -->
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <!-- Second sequence (duplicate for seamless loop) -->
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <img class="logo-svg" src="assets/images/goodvibes.png" alt="Good Vibes Logo" style="height: 24px; width: auto; vertical-align: middle; margin: 0 10px;">
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+        </div>
       </div>
     </header>
 
@@ -286,8 +337,8 @@
 
         <div id="retry-notice" class="retry-notice">
           <p>Tap the button below to return to the login.</p>
-          <a href="index.html" id="retry-btn" class="retry-btn" role="button">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <a href="index.html" id="retry-btn" class="btn btn--primary btn--full" role="button">
+            <svg class="btn-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
               <path d="M3 3v5h5"/>
             </svg>
@@ -313,13 +364,6 @@
             <strong>Session already active</strong> — if already connected, you may need to disconnect first.
           </li>
         </ul>
-        <div class="support-cta" id="support-cta">
-          <p>Still not working?
-            <button type="button" class="support-trigger" id="support-trigger" aria-haspopup="dialog">
-              Contact support
-            </button>
-          </p>
-        </div>
       </section>
     </main>
   </div>
@@ -498,7 +542,9 @@
         }
       }
 
-      trigger.addEventListener('click', openModal);
+      // The "Contact support" trigger inside the card was removed; the modal
+      // markup and handlers stay so it can still be opened programmatically.
+      if (trigger) trigger.addEventListener('click', openModal);
       closeX.addEventListener('click', closeModal);
       closeBtn.addEventListener('click', closeModal);
 
