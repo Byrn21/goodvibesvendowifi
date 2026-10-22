@@ -4,26 +4,154 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#2d6a4f">
-  <title>Connected — WiFi Portal</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>WiFi Portal — Connected</title>
   <link rel="stylesheet" href="assets/style.css">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%232d6a4f'/><path d='M6 22 Q16 10 26 22' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/><path d='M11 26 Q16 18 21 26' stroke='white' stroke-width='2' fill='none' stroke-linecap='round'/><circle cx='16' cy='29' r='1.5' fill='white'/></svg>">
+  <style>
+    /* ---- Card header aligned like index.html's .login-card ---- */
+    .success-card .card-subtitle {
+      text-align: left;
+      margin-bottom: 0;
+    }
+
+    /* ---- "Contact support" trigger styled like index.html's link ----
+       success.html keeps a mailto: anchor (not a modal trigger) so the
+       existing auto-hide logic for unconfigured support emails still works. */
+    .support-trigger {
+      background: none;
+      border: none;
+      padding: 0;
+      font: inherit;
+      color: var(--green, #2d6a4f);
+      font-weight: 700;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .support-trigger:hover { text-decoration: underline; }
+    .support-trigger:focus-visible {
+      outline: 2px solid var(--green, #2d6a4f);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+  </style>
 </head>
 <body>
+  <!-- Skip to main content -->
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+
   <div class="page-wrapper">
-    <header class="portal-header portal-header--success" role="banner">
-      <div class="logo-container">
-        <svg class="logo-svg" width="52" height="52" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
-          <circle cx="26" cy="26" r="18" fill="none" stroke="white" stroke-width="3"/>
-          <polyline points="18,26 23,32 34,19" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <div class="brand-text">
-        <h1 class="brand-name" id="brand-name">Bukuhan WiFi</h1>
-        <p class="brand-tagline" id="brand-tagline">You're connected!</p>
+    <!-- Header / Marquee Branding — identical to index.html -->
+    <header class="portal-header portal-header--marquee" role="banner" aria-label="GoodVibesVendoWifi - Connected to our Guest Network">
+      <div class="marquee-track">
+        <div class="marquee-content">
+          <!-- First sequence -->
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <!-- Seamless loop repeats -->
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+          <span class="marquee-logo" aria-hidden="true">
+            <svg class="logo-svg" width="32" height="32" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect width="52" height="52" rx="14" fill="#2d6a4f"/>
+              <path d="M9 32 Q26 14 43 32" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M17 38 Q26 27 35 38" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+              <circle cx="26" cy="43" r="2.5" fill="white"/>
+            </svg>
+          </span>
+          <span class="marquee-text">GoodVibesVendoWifi</span>
+        </div>
       </div>
     </header>
 
-    <main class="portal-main" role="main">
+    <!-- Main Content -->
+    <main id="main-content" class="portal-main" role="main">
       <section class="success-card" aria-labelledby="success-heading">
         <div class="success-icon" aria-hidden="true">
           <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -31,8 +159,11 @@
             <polyline points="20,32 28,40 44,22" stroke="#188038" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
-        <h2 id="success-heading" class="card-title card-title--success">Authentication Successful</h2>
-        <p class="card-subtitle" id="success-message">You are now connected to the guest network.</p>
+
+        <div class="card-header">
+          <h2 id="success-heading" class="card-title card-title--success">Authentication Successful</h2>
+          <p class="card-subtitle" id="success-message">You are now connected to the guest network.</p>
+        </div>
 
         <div id="session-info" class="session-info-box hidden">
           <div class="session-info-row">
@@ -52,7 +183,7 @@
         <div id="redirect-notice" class="redirect-notice">
           <p>You&rsquo;re connected. Taking you online automatically &mdash; or tap the button to open your destination now.</p>
           <p id="connect-notice" aria-live="polite"></p>
-          <a href="#" id="redirect-btn" class="btn btn--outline btn--full" role="button">
+          <a href="#" id="redirect-btn" class="btn btn--primary btn--full" role="button">
             Continue to website
             <svg class="btn-icon btn-icon--right" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M5 12h14M12 5l7 7-7 7"/>
@@ -70,8 +201,9 @@
       <footer class="portal-footer" role="contentinfo">
         <p class="support-info">
           Need help?
-          <a href="__SUPPORT_EMAIL__" class="support-link">Contact support</a>
+          <a href="__SUPPORT_EMAIL__" class="support-link support-trigger">Contact support</a>
         </p>
+        <p class="powered-by">Powered by Bukuhan WiFi Vendo</p>
       </footer>
     </main>
   </div>
