@@ -408,6 +408,54 @@ describe('operator login', () => {
       uninstall();
     }
   });
+
+  test('sends Origin and Referer matching OMADA_BASE_URL (Tomcat rejects their absence)', async () => {
+    const captured = [];
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      captured.push(options);
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } });
+    });
+    try {
+      await _internal.operatorLogin();
+      expect(captured[0].headers['Origin']).toBe('https://omada-test.example.com');
+      expect(captured[0].headers['Referer']).toBe('https://omada-test.example.com/');
+    } finally {
+      uninstall();
+    }
+  });
+
+  test('stores a proxied cookie despite a Domain mismatch and drops its attributes', async () => {
+    let authOptions = null;
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      if (options.path.includes('/login')) {
+        // Domain points at the controller's internal host, not the tunnel host.
+        respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, {
+          'set-cookie': [
+            'TPOMADA_SESSION=abc123; Domain=oc200.local; Path=/; Secure; HttpOnly',
+            'JSESSIONID=sess%3D9; Domain=192.168.0.10; Path=/{omadacId}; HttpOnly',
+          ],
+        });
+        return;
+      }
+      authOptions = options;
+      respondJson(req, cb, 200, { errorCode: 0 });
+    });
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF', apMac: 'AA:AA:AA:AA:AA:AA',
+        ssidName: 'S', radioId: 0, durationMinutes: 30,
+      });
+      const cookie = authOptions.headers['Cookie'];
+      expect(cookie).toContain('TPOMADA_SESSION=abc123');
+      expect(cookie).toContain('JSESSIONID=sess%3D9');
+      // Attributes must not leak in as bogus cookie pairs.
+      expect(cookie).not.toContain('Domain=');
+      expect(cookie).not.toContain('Path=');
+      expect(cookie).not.toContain('HttpOnly');
+    } finally {
+      uninstall();
+    }
+  });
 });
 
 // ================================================================

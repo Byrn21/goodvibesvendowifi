@@ -75,8 +75,52 @@ const MOCK_MODE = process.env.OMADA_MOCK === 'true' || !BASE_URL;
 // ── Controller session state (operator login) ──────────────────────────
 // Cookie + CSRF token are obtained once via hotspot/login and reused;
 // a 401 from the controller invalidates and re-establishes the session.
-let sessionCookie = null;
 let csrfToken = null;
+
+// ── Cookie store (loose mode) ──────────────────────────────────────────
+// The controller is reached through a Cloudflare Tunnel, so the cookie's
+// Domain (the internal OC200 host) and the Host the backend actually calls
+// (the public tunnel hostname) differ. A strict RFC 6265 jar rejects such a
+// cookie as a domain mismatch and stores nothing, which leaves the login
+// cookie off every later request. This store deliberately keeps only the
+// name=value pairs and never validates Domain/Path/Secure — the moral
+// equivalent of tough-cookie's `looseMode` — so a proxied Set-Cookie is
+// always retained and replayed.
+const sessionCookies = new Map();
+
+/**
+ * Absorb Set-Cookie response header(s) into the loose cookie store.
+ * Attributes (Domain, Path, Secure, HttpOnly, SameSite, …) are ignored.
+ *
+ * @param {string|string[]|null} setCookieHeader  res.headers['set-cookie']
+ */
+function absorbSetCookie(setCookieHeader) {
+  if (!setCookieHeader) return;
+  const list = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
+  for (const entry of list) {
+    if (typeof entry !== 'string') continue;
+    const pair = entry.split(';')[0];
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (!name) continue;
+    // An empty value is how the controller clears a cookie (Max-Age=0/Expires past).
+    if (!value) sessionCookies.delete(name);
+    else sessionCookies.set(name, value);
+  }
+}
+
+/**
+ * Build the Cookie request header from the stored pairs.
+ * @returns {string|null}
+ */
+function cookieHeaderValue() {
+  if (sessionCookies.size === 0) return null;
+  return Array.from(sessionCookies.entries())
+    .map(([name, value]) => name + '=' + value)
+    .join('; ');
+}
 
 /**
  * Convert a duration in minutes to the `time` value expected by
@@ -117,7 +161,8 @@ async function operatorLogin() {
     throw err;
   }
 
-  sessionCookie = response.setCookie || sessionCookie;
+  // The login cookie was already absorbed into the loose cookie store by
+  // omadaRequest (see absorbSetCookie); only the CSRF token is kept here.
   csrfToken = response.body.result && response.body.result.token;
   if (!csrfToken) {
     const err = new Error('Omada hotspot login response missing result.token');
@@ -128,7 +173,7 @@ async function operatorLogin() {
 
 /** Invalidate the cached controller session (forces re-login next call). */
 function invalidateSession() {
-  sessionCookie = null;
+  sessionCookies.clear();
   csrfToken = null;
 }
 
@@ -137,7 +182,7 @@ function invalidateSession() {
  * @returns {Promise<void>}
  */
 async function ensureSession() {
-  if (!sessionCookie || !csrfToken) {
+  if (sessionCookies.size === 0 || !csrfToken) {
     await operatorLogin();
   }
 }
@@ -735,6 +780,13 @@ function omadaRequest(path, method, body, opts) {
     const isHttps = parsed.protocol === 'https:';
     const client = isHttps ? https : http;
 
+    // Tomcat on the controller validates Origin/Referer on the hotspot API
+    // and answers HTTP 500 (not a clean 4xx) when they are absent — which is
+    // what happens when Node's http client, unlike a browser, sends neither.
+    // Behind a Cloudflare Tunnel the only origin the controller knows is the
+    // public tunnel hostname, i.e. OMADA_BASE_URL itself.
+    const origin = parsed.origin;
+
     const options = {
       hostname: parsed.hostname,
       port: parsed.port || (isHttps ? 443 : 80),
@@ -744,6 +796,8 @@ function omadaRequest(path, method, body, opts) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body || ''),
         'Accept': 'application/json',
+        'Origin': origin,
+        'Referer': origin + '/',
       },
       rejectUnauthorized: TLS_REJECT,
       timeout: TIMEOUT,
@@ -756,7 +810,8 @@ function omadaRequest(path, method, body, opts) {
     // Attach controller session (cookie) and CSRF token when present.
     // Login itself (opts.skipAuth) carries no session credentials.
     if (!(opts && opts.skipAuth)) {
-      if (sessionCookie) options.headers['Cookie'] = sessionCookie;
+      const cookie = cookieHeaderValue();
+      if (cookie) options.headers['Cookie'] = cookie;
       if (csrfToken) options.headers['Csrf-Token'] = csrfToken;
     }
 
@@ -770,8 +825,11 @@ function omadaRequest(path, method, body, opts) {
         } catch {
           parsedBody = { raw: data };
         }
-        // Capture the controller session cookie for subsequent requests
+        // Capture the controller session cookie for subsequent requests.
+        // Stored in loose mode: Domain/Path from the tunneled response are
+        // not enforced, so the cookie survives the host mismatch.
         const setCookieHeader = res.headers['set-cookie'];
+        absorbSetCookie(setCookieHeader);
         resolve({
           statusCode: res.statusCode,
           body: parsedBody,
