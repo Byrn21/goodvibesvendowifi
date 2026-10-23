@@ -409,7 +409,7 @@ describe('operator login', () => {
     }
   });
 
-  test('sends Origin and Referer matching OMADA_BASE_URL (Tomcat rejects their absence)', async () => {
+  test('hardcodes Origin/Referer to the controller LAN origin (matches tunnel-spoofed Host)', async () => {
     const captured = [];
     const uninstall = mockHttpTransport((options, req, cb) => {
       captured.push(options);
@@ -417,8 +417,10 @@ describe('operator login', () => {
     });
     try {
       await _internal.operatorLogin();
-      expect(captured[0].headers['Origin']).toBe('https://omada-test.example.com');
-      expect(captured[0].headers['Referer']).toBe('https://omada-test.example.com/');
+      // NOT the OMADA_BASE_URL host — Tomcat's CSRF filter compares Origin
+      // against the Host the tunnel proxy injects (the LAN address).
+      expect(captured[0].headers['Origin']).toBe('https://192.168.0.253:8043');
+      expect(captured[0].headers['Referer']).toBe('https://192.168.0.253:8043/');
     } finally {
       uninstall();
     }

@@ -50,6 +50,12 @@
  *                                     default "false" accepts the controller's
  *                                     self-signed certificate
  *   OMADA_MOCK                      — "true" to bypass the controller
+ *
+ * Origin/Referer are NOT derived from OMADA_BASE_URL. The Cloudflare
+ * Tunnel's reverse proxy rewrites the Host header to the controller's LAN
+ * address, and Tomcat's CSRF filter rejects any request whose Origin does
+ * not match it — with an HTTP 500, not a clean 4xx. They are therefore
+ * hardcoded to the controller's internal origin (CONTROLLER_ORIGIN below).
  */
 
 const https = require('https');
@@ -68,6 +74,14 @@ const TIMEOUT    = parseInt(process.env.OMADA_AUTH_TIMEOUT || '10000', 10);
 // authorization. Default to accepting it (rejectUnauthorized: false); set
 // OMADA_TLS_REJECT=true only when the controller has a publicly-trusted cert.
 const TLS_REJECT = process.env.OMADA_TLS_REJECT === 'true';
+
+// Origin/Referer sent on EVERY controller request. Hardcoded to the
+// controller's LAN origin because the Cloudflare Tunnel's reverse proxy
+// injects that same value as the Host header; Tomcat compares Origin against
+// it and answers HTTP 500 on a mismatch (OMADA_BASE_URL's public hostname
+// never matches). Change these if the controller's internal address changes.
+const CONTROLLER_ORIGIN  = 'https://192.168.0.253:8043';
+const CONTROLLER_REFERER = CONTROLLER_ORIGIN + '/';
 
 // In mock/test mode, simulate controller responses
 const MOCK_MODE = process.env.OMADA_MOCK === 'true' || !BASE_URL;
@@ -780,13 +794,6 @@ function omadaRequest(path, method, body, opts) {
     const isHttps = parsed.protocol === 'https:';
     const client = isHttps ? https : http;
 
-    // Tomcat on the controller validates Origin/Referer on the hotspot API
-    // and answers HTTP 500 (not a clean 4xx) when they are absent — which is
-    // what happens when Node's http client, unlike a browser, sends neither.
-    // Behind a Cloudflare Tunnel the only origin the controller knows is the
-    // public tunnel hostname, i.e. OMADA_BASE_URL itself.
-    const origin = parsed.origin;
-
     const options = {
       hostname: parsed.hostname,
       port: parsed.port || (isHttps ? 443 : 80),
@@ -796,8 +803,11 @@ function omadaRequest(path, method, body, opts) {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(body || ''),
         'Accept': 'application/json',
-        'Origin': origin,
-        'Referer': origin + '/',
+        // Must match the Host the tunnel proxy injects into Tomcat — see
+        // CONTROLLER_ORIGIN. Using OMADA_BASE_URL here triggers the CSRF
+        // filter's HTTP 500.
+        'Origin': CONTROLLER_ORIGIN,
+        'Referer': CONTROLLER_REFERER,
       },
       rejectUnauthorized: TLS_REJECT,
       timeout: TIMEOUT,
