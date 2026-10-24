@@ -72,8 +72,10 @@
     // BACKEND MODE (mode: 'backend')
     // ==============================================================
 
-    // Base URL of your backend server (no trailing slash)
-    apiBaseUrl: 'https://goodvibesvendowifi.onrender.com',
+    // Base URL of your backend server (no trailing slash).
+    // Leave empty when this backend also serves the portal HTML (same origin);
+    // set an absolute URL only if the HTML is hosted elsewhere.
+    apiBaseUrl: '',
 
     // ==============================================================
     // VOUCHER VALIDATION (frontend hints only â€” backend enforces)

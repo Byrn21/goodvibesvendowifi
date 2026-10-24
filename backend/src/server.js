@@ -55,27 +55,52 @@ app.use(helmet({
   },
 }));
 
-// CORS: restrict to known portal origin
+// CORS: allow same-origin, the configured allowlist, and localhost / private-LAN
+// origins. "Same-origin" is decided by comparing the request's Origin host:port
+// with the Host it actually arrived on (directly or through the tunnel's
+// X-Forwarded-Host). That is what makes a new Termux LAN IP or a rotating
+// Cloudflare quick-tunnel hostname work with no allowlist edit.
+const PRIVATE_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$/i;
+
+function originHost(origin) {
+  try { return new URL(origin).host.toLowerCase(); } catch (err) { return ''; }
+}
+
+function isAllowedOrigin(origin, req) {
+  // Allow requests with no origin (mobile captive portals)
+  if (!origin) return true;
+  // Allow null origin (file:// protocol for admin.html)
+  if (origin === 'null') return true;
+  // Allow localhost / private LAN (admin panel access from a phone on the same Wi-Fi)
+  if (PRIVATE_ORIGIN_RE.test(origin)) return true;
+  // Allow same-origin requests (this backend also serves the portal pages)
+  const host = String(req.headers.host || '').toLowerCase();
+  if (host && originHost(origin) === host) return true;
+  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim().toLowerCase();
+  if (forwardedHost && originHost(origin) === forwardedHost) return true;
+  const allowed = (process.env.CORS_ORIGINS || FRONTEND_ORIGIN)
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  return allowed.includes(origin);
+}
+
 const corsOptions = {
-  origin: (origin, cb) => {
-    // Allow requests with no origin (mobile captive portals)
-    if (!origin) return cb(null, true);
-    // Allow null origin (file:// protocol for admin.html)
-    if (origin === 'null') return cb(null, true);
-    const allowed = (process.env.CORS_ORIGINS || FRONTEND_ORIGIN)
-      .split(',')
-      .map(s => s.trim())
-      .filter(Boolean);
-    if (allowed.includes(origin)) return cb(null, true);
-    // Allow localhost (for admin panel dev access)
-    if (/^http:\/\/localhost(:\d+)?$/.test(origin)) return cb(null, true);
-    cb(new Error('CORS: origin not allowed'));
-  },
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  // Reflect the caller's Origin: it was already validated by isAllowedOrigin()
+  // below, and reflection is required for credentialed requests.
+  origin: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key', 'X-Admin-Password'],
   credentials: true,
 };
-app.use(cors(corsOptions));
+
+app.use(cors((req, cb) => {
+  if (isAllowedOrigin(req.headers.origin, req)) return cb(null, corsOptions);
+  const err = new Error('CORS: origin not allowed');
+  err.status = 403;
+  err.code = 'CORS_FORBIDDEN';
+  cb(err);
+}));
 
 app.use(compression());
 app.use(express.json({ limit: '16kb' }));
@@ -164,7 +189,16 @@ for (const candidate of candidates) {
 }
 
 if (PORTAL_HTML_DIR) {
-  app.use(express.static(PORTAL_HTML_DIR));
+  app.use(express.static(PORTAL_HTML_DIR, {
+    setHeaders: (res, filePath) => {
+      // config/config.js carries the public backend URL. Serving it no-store
+      // stops the browser (and the captive mini-browser) from running a stale
+      // copy after the backend address changes.
+      if (/[\\/]config[\\/]config\.js$/i.test(filePath)) {
+        res.setHeader('Cache-Control', 'no-store, must-revalidate');
+      }
+    },
+  }));
   app.get('/', (req, res) => res.sendFile(path.join(PORTAL_HTML_DIR, 'index.html')));
   app.get('/success', (req, res) => res.sendFile(path.join(PORTAL_HTML_DIR, 'success.html')));
       app.get('/status', (req, res) => res.sendFile(path.join(PORTAL_HTML_DIR, 'status.html')));

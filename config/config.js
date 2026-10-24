@@ -34,10 +34,19 @@
     // ==============================================================
     // BACKEND MODE
     // ==============================================================
-    // Base URL of your backend server (no trailing slash)
-    // Update this when you deploy to Render:
-    // e.g. https://goodvibesvendowifi.onrender.com
-    apiBaseUrl: 'https://goodvibesvendowifi.onrender.com',
+    // Base URL of your backend server (no trailing slash).
+    //
+    // EMPTY = call the SAME origin that served this page. That is the correct
+    // value whenever this Node backend also serves these HTML files, whether
+    // the page was opened via http://localhost:3000, a Termux LAN IP such as
+    // http://192.168.1.20:3000, or a Cloudflare Tunnel hostname
+    // (https://<name>.trycloudflare.com). It also survives a Cloudflare
+    // *quick* tunnel, whose hostname changes every time it restarts.
+    //
+    // Set an ABSOLUTE url (e.g. 'https://abc-def.trycloudflare.com') ONLY when
+    // the HTML is hosted somewhere other than this backend (e.g. uploaded to
+    // the Omada controller).
+    apiBaseUrl: '',
 
     // ==============================================================
     // VOUCHER VALIDATION
