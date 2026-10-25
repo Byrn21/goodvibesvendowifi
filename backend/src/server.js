@@ -10,7 +10,9 @@
  *   GET  /health               — Health check
  */
 
-require('dotenv').config();
+// Load backend/.env regardless of the directory the process was started from.
+// dotenv never overrides variables that are already set (e.g. by Render).
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -18,6 +20,7 @@ const compression = require('compression');
 
 const { rateLimit } = require('express-rate-limit');
 const path = require('path');
+
 const authRoutes = require('./routes/auth');
 const sessionRoutes = require('./routes/session');
 const adminRoutes = require('./routes/admin');
@@ -255,7 +258,7 @@ const startup = async () => {
     console.error('[startup] Omada config logging failed:', err.message);
   }
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`Omada portal backend running on port ${PORT} [${NODE_ENV}]`);
 
     // Start session expiration worker (calls Omada unauth when sessions expire)
@@ -266,9 +269,32 @@ const startup = async () => {
       console.warn('[WARN] In production, set OMADA_BASE_URL to enable automatic session expiry.');
     }
   });
+
+  // A listen failure (port already taken, bad bind address) is otherwise an
+  // uncaught 'error' event that kills the process with a bare stack trace.
+  server.on('error', err => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[listen] Port ${PORT} is already in use — another instance is running.`);
+      console.error('[listen] Stop the other process (or change PORT) and restart.');
+    } else {
+      console.error('[listen] HTTP server error:', err.message);
+    }
+  });
 };
 
-startup();
+// Process-level safety net. Node 22 terminates on any unhandled rejection, which
+// means one stray promise from a background worker, webhook or Omada call takes
+// the whole portal offline. Log these instead of exiting.
+process.on('unhandledRejection', reason => {
+  console.error('[process] Unhandled promise rejection:', (reason && reason.stack) || String(reason));
+});
+process.on('uncaughtException', err => {
+  console.error('[process] Uncaught exception:', (err && err.stack) || String(err));
+});
+
+startup().catch(err => {
+  console.error('[startup] Unexpected startup failure:', (err && err.stack) || String(err));
+});
 
 module.exports = app;
 

@@ -76,11 +76,22 @@ function createPgPool() {
     connectionTimeoutMillis: 10000,
   });
 
-  // Verify connection on startup
-  pool.query('SELECT 1').catch(err => {
-    console.error('[db] PostgreSQL connection error:', err.message);
-    process.exit(1);
+  // Idle pooled clients can emit 'error' (network blip, pooler restart, Supabase
+  // dropping an idle connection). With no listener that surfaces as an unhandled
+  // 'error' event and kills the process, so always listen and keep going.
+  pool.on('error', err => {
+    console.error('[db] Idle PostgreSQL client error (pool continues):', err.message);
   });
+
+  // Verify connection in the background. A failed probe must NOT terminate the
+  // server: the HTTP listener has to stay up and retry DB work per request, or a
+  // transient Supabase/pooler hiccup takes the whole portal offline.
+  pool.query('SELECT 1')
+    .then(() => console.log('[db] PostgreSQL connection verified.'))
+    .catch(err => {
+      console.error('[db] PostgreSQL connection error:', err.message);
+      console.error('[db] Server stays up; queries retry until the database is reachable.');
+    });
 
   // Unified async wrapper
   db = {
