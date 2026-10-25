@@ -330,6 +330,7 @@ dashboard → Environment** (or `render.yaml`) for production.
 | `OMADA_TLS_REJECT` | `services/omada.js` | `false` | Default accepts the controller's self-signed cert (OC200/ER605). Set to `true` only when the controller has a publicly-trusted certificate. |
 | `OMADA_NORTHBOUND_BASE_URL` | `services/omada-northbound.js` | *(resolved from `OMADA_NORTHBOUND_REGION`)* | Base URL for the OpenAPI (`authClient`, `updateClientRateLimitSetting`). A **private/loopback** host that names no port automatically uses the controller's Open API port `8043` — port 443 is the web-UI/tunnel front, which does not serve `/openapi`. |
 | `OMADA_NORTHBOUND_TLS_REJECT` | `services/omada-northbound.js` | `false` for a LAN host (falls back to `OMADA_TLS_REJECT`) | Certificate verification for the OpenAPI calls. Relaxed automatically when the base URL is a LAN/loopback controller (its certificate cannot chain to a public CA); set `true` to force verification. |
+| `OMADA_QOS_METHOD` | `services/omada-northbound.js` | `auto` | Which transport applies bandwidth caps: `auto` = the controller web API on the operator session (`OMADA_BASE_URL`) first, then the Open API; `local` = web API only; `openapi` = Open API only. See “Per-voucher bandwidth caps”. |
 | `OMADA_MOCK` | `services/omada.js` | `false` | `true` bypasses the controller entirely (mock mode). |
 | `OMADA_TIME_UNIT` | `config/index.js` | `ms` | Unit (`ms`, `us`, or `s`) for the Omada `time` field; depends on controller firmware. |
 
@@ -402,14 +403,37 @@ are copied onto the session (`sessions.down_kbps`, `sessions.up_kbps`) so a
 re-authorization or a premium resume re-applies exactly the cap the guest paid
 for, even if the voucher row is edited afterwards.
 
+**Transport.** The same Omada operation (`updateClientRateLimitSetting`) can be
+reached two ways, and `services/omada-northbound.js` routes between them:
+
+1. **Controller web API** (`OMADA_QOS_METHOD=local`, and the first attempt for
+   `auto`) — `PATCH /{omadacId}/api/v2/sites/{siteKey}/clients/{MAC}/ratelimit`
+   on the hotspot operator session the backend already holds
+   (`OMADA_BASE_URL` + `OMADA_PORTAL_OPERATOR_NAME/PASSWORD`). This is the same
+   call the controller UI makes, so it needs **no OAuth credentials**; a
+   fallback under `/openapi/v1/…` with the same session is tried if the firmware
+   does not expose the `/api/v2` route.
+2. **Open API** (`OMADA_QOS_METHOD=openapi`) — the documented
+   `updateClientRateLimitSetting` operation with an OAuth client-credentials
+   token (`OMADA_NORTHBOUND_BASE_URL`/`OMADA_NORTHBOUND_REGION` +
+   `OMADA_CLIENT_ID`/`OMADA_CLIENT_SECRET`). The Open API only exists on a
+   controller that ships it (**v5.12+**) **and** has an application created at
+   *Settings → Platform Integration → Open API*; use that page's **Omada ID /
+   Client ID / Client Secret** — Cloud-portal credentials do not work locally.
+   On a stock OC200 the token request can answer **HTTP 500**, which is why it is
+   no longer the only route.
+
+`auto` remembers the route that worked; if the controller definitively rejects
+the web-API route (missing permission, unknown site) it is skipped for 10
+minutes so logins are not slowed down by a probe that cannot succeed.
+
 Applying the cap is **best-effort**: the guest is already authorized and the
 voucher already spent, so a rejected/failed rate-limit call never fails the
 login. `POST /api/auth` reports the outcome as `qosApplied`, with `qosError`
-when it failed and `qosMock: true` when the Northbound client is in mock mode
-(no `OMADA_NORTHBOUND_BASE_URL`/`OMADA_NORTHBOUND_REGION` + client credentials),
-which means nothing was actually applied. A first rejection is retried once
-after 2 s, because the cloud indexes a freshly authorized client
-asynchronously.
+when it failed and `qosMock: true` when no transport could actually apply it
+(mock mode: no `OMADA_BASE_URL` and no Open API credentials). A first rejection
+of the Open API route is retried once after 2 s, because the cloud indexes a
+freshly authorized client asynchronously.
 
 Per-voucher caps are set through `POST /api/admin/vouchers`
 (`downKbps`/`upKbps`, both or neither, in Kbps), `PUT /api/admin/vouchers/:id`

@@ -451,6 +451,124 @@ describe('setClientRateLimit (updateClientRateLimitSetting)', () => {
   });
 });
 
+// ================================================================
+// QoS routing — web API first, Open API as the fallback
+// ================================================================
+describe('QoS transport routing (OMADA_QOS_METHOD)', () => {
+  const omadaLocal = require('../src/services/omada');
+  let localSpy;
+
+  beforeEach(() => {
+    // A local controller is configured, so 'auto' may use the web-API route.
+    process.env.OMADA_BASE_URL = 'https://192.168.0.253:8043';
+    process.env.OMADA_MOCK = 'false';
+    delete process.env.OMADA_QOS_METHOD;
+    _internal.resetLocalQosBlock();
+    localSpy = jest.spyOn(omadaLocal, 'setClientRateLimit');
+  });
+
+  afterEach(() => {
+    localSpy.mockRestore();
+    delete process.env.OMADA_QOS_METHOD;
+    delete process.env.OMADA_BASE_URL;
+    delete process.env.OMADA_MOCK;
+    _internal.resetLocalQosBlock();
+  });
+
+  test('auto applies the cap through the web API without any Open API call', async () => {
+    localSpy.mockResolvedValue({ success: true, clientMac: 'AA-BB-CC-DD-EE-FF', applied: {}, route: 'v2' });
+
+    const result = await nb.setClientRateLimit({ clientMac: 'aa:bb:cc:dd:ee:ff' });
+
+    expect(result.method).toBe('local');
+    expect(result.route).toBe('v2');
+    expect(localSpy).toHaveBeenCalledTimes(1);
+    // The payload handed to the web API is the same documented shape.
+    expect(localSpy.mock.calls[0][0]).toEqual({
+      clientMac: 'AA-BB-CC-DD-EE-FF',
+      payload: {
+        mode: 0,
+        customRateLimit: {
+          upEnable: true, upUnit: 1, upLimit: 512,
+          downEnable: true, downUnit: 2, downLimit: 10,
+        },
+      },
+    });
+    expect(calls).toHaveLength(0); // no token request, no PATCH through Open API
+  });
+
+  test('auto falls back to the Open API when the controller rejects the web-API route', async () => {
+    const rejected = Object.assign(new Error('Omada rate limit (v2) rejected: no permission'), {
+      code: 'OMADA_QOS_REJECTED',
+    });
+    localSpy.mockRejectedValue(rejected);
+
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
+    queueJson(200, { errorCode: 0, msg: 'success' }); // PATCH ratelimit
+
+    const result = await nb.setClientRateLimit({ clientMac: 'AA-BB-CC-DD-EE-FF' });
+
+    expect(result.method).toBe('openapi');
+    expect(calls.some((c) => c.url.endsWith('/clients/AA-BB-CC-DD-EE-FF/ratelimit'))).toBe(true);
+    // The unusable local route is parked so later logins skip it.
+    expect(_internal.localQosBlockedUntil()).toBeGreaterThan(Date.now());
+  });
+
+  test('a parked local route is skipped until the backoff expires', async () => {
+    localSpy.mockRejectedValue(Object.assign(new Error('no permission'), { code: 'OMADA_QOS_REJECTED' }));
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
+    queueJson(200, { errorCode: 0 });
+    await nb.setClientRateLimit({ clientMac: 'AA-BB-CC-DD-EE-FF' });
+    expect(localSpy).toHaveBeenCalledTimes(1);
+
+    localSpy.mockClear();
+    queueJson(200, { errorCode: 0 }); // PATCH, token + site are cached
+    const second = await nb.setClientRateLimit({ clientMac: 'AA-BB-CC-DD-EE-FF' });
+
+    expect(second.method).toBe('openapi');
+    expect(localSpy).not.toHaveBeenCalled();
+  });
+
+  test('OMADA_QOS_METHOD=local never touches the Open API', async () => {
+    process.env.OMADA_QOS_METHOD = 'local';
+    localSpy.mockRejectedValue(Object.assign(new Error('nope'), { code: 'OMADA_QOS_REJECTED' }));
+
+    await expect(nb.setClientRateLimit({ clientMac: 'AA-BB-CC-DD-EE-FF' }))
+      .rejects.toMatchObject({ code: 'OMADA_QOS_REJECTED' });
+
+    expect(calls).toHaveLength(0);
+  });
+
+  test('OMADA_QOS_METHOD=openapi never uses the web API', async () => {
+    process.env.OMADA_QOS_METHOD = 'openapi';
+    queueJson(200, TOKEN_RESPONSE);
+    queueJson(200, SITES_RESPONSE);
+    queueJson(200, { errorCode: 0 });
+
+    const result = await nb.setClientRateLimit({ clientMac: 'AA-BB-CC-DD-EE-FF' });
+
+    expect(result.method).toBe('openapi');
+    expect(localSpy).not.toHaveBeenCalled();
+  });
+
+  test('a transport that is in mock mode does not mask a configured one', async () => {
+    // Northbound itself is unconfigured (mock) but the local controller is not.
+    const previous = process.env.OMADA_NORTHBOUND_BASE_URL;
+    delete process.env.OMADA_NORTHBOUND_BASE_URL;
+    delete process.env.OMADA_NORTHBOUND_REGION;
+    localSpy.mockResolvedValue({ success: true, clientMac: 'AA-BB-CC-DD-EE-FF', applied: {}, route: 'v2' });
+    try {
+      const result = await nb.setClientRateLimit({ clientMac: 'AA-BB-CC-DD-EE-FF' });
+      expect(result.method).toBe('local');
+      expect(result.mock).toBeUndefined();
+    } finally {
+      process.env.OMADA_NORTHBOUND_BASE_URL = previous;
+    }
+  });
+});
+
 describe('extendClientPeriod', () => {
   test('validates the 60s–1000000day range before calling the API', async () => {
     await expect(nb.extendClientPeriod({ recordId: 'r1', periodMs: 1000 }))

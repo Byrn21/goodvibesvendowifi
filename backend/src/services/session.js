@@ -470,8 +470,12 @@ async function resumeSession(sessionId) {
  * The caps come from the session row (copied from the voucher at authorization
  * time), falling back to the tier rules in utils/qos.js.
  *
+ * The cap itself is applied by omada-northbound, which routes it to whichever
+ * transport works for this deployment (controller web API on the operator
+ * session first, Open API second) — see the module header there.
+ *
  * @param {Object} session session object from getSession()/loadSession()
- * @returns {Promise<{applied: boolean, mock?: boolean, error?: string, customRateLimit?: Object}>}
+ * @returns {Promise<{applied: boolean, method?: string, mock?: boolean, error?: string, customRateLimit?: Object}>}
  */
 async function applySessionRateLimit(session) {
   if (!session || !session.clientMac) return { applied: false, error: 'no session/clientMac' };
@@ -492,12 +496,15 @@ async function applySessionRateLimit(session) {
     if (result && result.mock) {
       console.warn(
         '[session/qos] rate limit NOT applied to ' + session.clientMac +
-        ' — omada-northbound is in MOCK mode (configure OMADA_NORTHBOUND_BASE_URL' +
-        ' / OMADA_NORTHBOUND_REGION + OMADA_CLIENT_ID + OMADA_CLIENT_SECRET)'
+        ' — mock mode: no controller is configured for QoS. Set OMADA_BASE_URL' +
+        ' (local web API, the reliable route on an OC200) or' +
+        ' OMADA_NORTHBOUND_BASE_URL / OMADA_NORTHBOUND_REGION + OMADA_CLIENT_ID +' +
+        ' OMADA_CLIENT_SECRET (Open API)'
       );
     } else {
       console.log(
         '[session/qos] rate limit applied to ' + session.clientMac +
+        ' via ' + ((result && result.method) || (result && result.route) || 'unknown') +
         ' (' + (customRateLimit ? 'voucher/premium caps' : 'default caps') + ')' +
         ' up=' + JSON.stringify(customRateLimit ? [customRateLimit.upUnit, customRateLimit.upLimit] : 'default') +
         ' down=' + JSON.stringify(customRateLimit ? [customRateLimit.downUnit, customRateLimit.downLimit] : 'default')

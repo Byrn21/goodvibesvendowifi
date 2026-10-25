@@ -37,6 +37,21 @@
  *      (undocumented), then VERIFY actual revocation, falling back to a
  *      time=1 re-authorization if the client is still authorized.
  *
+ *   4. Per-client bandwidth cap (QoS):
+ *        PATCH /{OMADAC_ID}/api/v2/sites/{siteKey}/clients/{MAC}/ratelimit
+ *        body: { mode: 0, customRateLimit: { upEnable, upUnit, upLimit,
+ *                downEnable, downUnit, downLimit } }   (mode 1 = named profile)
+ *      This is the same operation the controller's own UI performs and the
+ *      same one the Open API exposes as `updateClientRateLimitSetting` — it
+ *      is simply reached through the WEB API with the operator session
+ *      (cookie + Csrf-Token) instead of an OAuth access token. That matters
+ *      because the local Open API route needs controller firmware that
+ *      supports it (v5.12+) and an Open API application created ON THE
+ *      CONTROLLER; on a stock OC200 the OAuth token endpoint can answer
+ *      HTTP 500, which used to leave every guest uncapped. A fallback route
+ *      under /openapi/v1/... (the Open API router accepting the web session,
+ *      exactly as the controller UI calls it) is tried second.
+ *
  * Configuration (from .env):
  *   OMADA_BASE_URL                  — e.g. https://omada-tunnel.example.com
  *   OMADA_OMADAC_ID                 — controller ID (OMADAC ID)
@@ -61,6 +76,7 @@
 const https = require('https');
 const http = require('http');
 const { OMADA_TIME_UNIT } = require('../config');
+const { normalizeMac: normalizeDeviceMac } = require('../utils/device-id');
 
 const BASE_URL   = process.env.OMADA_BASE_URL || '';
 const OMADAC_ID  = process.env.OMADA_OMADAC_ID || '';
@@ -808,6 +824,9 @@ function omadaRequest(path, method, body, opts) {
         // filter's HTTP 500.
         'Origin': CONTROLLER_ORIGIN,
         'Referer': CONTROLLER_REFERER,
+        // What the controller's own web UI sends; some non-hotspot endpoints
+        // (the v2 client/config routes used for QoS) expect it.
+        'Omada-Request-Source': 'web-local',
       },
       rejectUnauthorized: TLS_REJECT,
       timeout: TIMEOUT,
@@ -874,6 +893,234 @@ function omadaRequest(path, method, body, opts) {
 }
 
 // ================================================================
+// QoS — per-client bandwidth cap through the WEB API (operator session)
+// ================================================================
+// The Open API route (services/omada-northbound.js) needs a controller that
+// ships Open API (v5.12+) AND an Open API application created on the
+// controller, and it authenticates with OAuth client credentials. An OC200
+// whose firmware does not expose it answers the token request with HTTP 500,
+// so no cap is ever applied and every guest runs uncapped.
+//
+// The cap itself is not an Open API-only feature: the controller's UI sets it
+// through the v2 web API, authenticated by the SAME kind of session this
+// module already uses for extPortal/auth (cookie + Csrf-Token from the
+// hotspot operator login). That route works on any firmware that has the
+// feature at all, so it is what this module exposes for QoS.
+
+/**
+ * Routes performing the same operation, tried in order.
+ *
+ * `v2`            — the web API path used by the controller UI.
+ * `openapi-session` — the Open API router reached with the web session, which
+ *                   is how the controller UI itself calls the Open API on a
+ *                   local controller ("old authentication style").
+ */
+const RATE_LIMIT_ROUTES = [
+  {
+    name: 'v2',
+    path: (omadacId, siteKey, mac) => '/' + encodeURIComponent(omadacId) +
+      '/api/v2/sites/' + encodeURIComponent(siteKey) +
+      '/clients/' + encodeURIComponent(mac) + '/ratelimit',
+  },
+  {
+    name: 'openapi-session',
+    path: (omadacId, siteKey, mac) => '/openapi/v1/' + encodeURIComponent(omadacId) +
+      '/sites/' + encodeURIComponent(siteKey) +
+      '/clients/' + encodeURIComponent(mac) + '/ratelimit',
+  },
+];
+
+// The route that last worked, so a working controller does not pay for the
+// rejected probe on every login. Process-local; a restart simply re-probes.
+let preferredRateLimitRoute = null;
+
+// OMADA_SITE (a NAME) → the numeric/hex site key the v2 paths require.
+let rateLimitSiteKeyCache = { name: null, key: null };
+
+/**
+ * Extract the site list from a controller response. The account's own site
+ * list lives on `result.privilege.sites` (GET /users/current); other firmware
+ * answers `result.data` / a bare array. Each entry carries the display name
+ * plus its identifier (`key`, or `id` on some builds).
+ *
+ * @param {Object} response omadaRequest result
+ * @returns {Array<Object>}
+ */
+function siteEntries(response) {
+  if (!response || response.statusCode !== 200 || !response.body || response.body.errorCode !== 0) {
+    return [];
+  }
+  const result = response.body.result || {};
+  const candidates = [
+    result.privilege && result.privilege.sites,
+    result.data,
+    result.sites,
+    Array.isArray(result) ? result : null,
+  ];
+  for (const list of candidates) {
+    if (Array.isArray(list) && list.length) return list;
+  }
+  return [];
+}
+
+/**
+ * Resolve OMADA_SITE (a name) to the site key/id the v2 client paths embed.
+ *
+ * Cached per process: the mapping only changes when the controller's site is
+ * renamed, and a changed OMADA_SITE invalidates the cache (the cached name no
+ * longer matches).
+ *
+ * @returns {Promise<string>}
+ */
+async function resolveSiteKey() {
+  if (rateLimitSiteKeyCache.name === SITE && rateLimitSiteKeyCache.key) {
+    return rateLimitSiteKeyCache.key;
+  }
+
+  const endpoints = [
+    '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/users/current',
+    '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/sites',
+  ];
+
+  let sites = [];
+  for (const path of endpoints) {
+    try {
+      const response = await withSession(() => omadaRequest(path, 'GET'));
+      sites = siteEntries(response);
+      if (sites.length) break;
+    } catch (err) {
+      console.warn('[omada/qos] site lookup via ' + path + ' failed: ' + err.message);
+    }
+  }
+
+  const wanted = String(SITE).trim().toLowerCase();
+  const match = sites.find(
+    (s) => String(s && s.name != null ? s.name : '').trim().toLowerCase() === wanted
+  );
+  const key = match && (match.key || match.id || match.siteKey);
+
+  if (!key) {
+    const err = new Error(
+      'OMADA_SITE "' + SITE + '" did not match any site the controller returned (' +
+      sites.length + ' site(s)); the bandwidth cap cannot address a site'
+    );
+    err.code = 'OMADA_SITE_NOT_FOUND';
+    err.omadaResponse = sites;
+    throw err;
+  }
+
+  rateLimitSiteKeyCache = { name: SITE, key: String(key) };
+  console.log('[omada/qos] resolved OMADA_SITE "' + SITE + '" → siteKey ' + rateLimitSiteKeyCache.key);
+  return rateLimitSiteKeyCache.key;
+}
+
+/**
+ * Normalized error for a controller rejection of the rate-limit call.
+ *
+ * @param {string} route
+ * @param {{statusCode:number, body:Object}} response
+ * @returns {Error}
+ */
+function rateLimitRejected(route, response) {
+  const body = (response && response.body) || {};
+  const reason = body.msg || body.message || ('HTTP ' + (response && response.statusCode));
+  const err = new Error(
+    'Omada rate limit (' + route + ') rejected: ' + reason +
+    (body.errorCode !== undefined ? ' (errorCode=' + body.errorCode + ')' : '')
+  );
+  err.code = 'OMADA_QOS_REJECTED';
+  err.omadaResponse = body;
+  return err;
+}
+
+/**
+ * Apply a per-client bandwidth cap through the controller's web API.
+ *
+ * Runs on the hotspot operator session that already authorizes guests, so it
+ * needs no Open API / OAuth credentials. Both routes perform the same
+ * operation; the first accepted one is remembered and tried first afterwards.
+ *
+ * @param {Object} ctx
+ * @param {string} ctx.clientMac  Client MAC, any common format
+ * @param {Object} ctx.payload    { mode, customRateLimit } or { mode: 1, rateLimitProfileId }
+ * @returns {Promise<Object>} { success, clientMac, applied, route, mock? }
+ * @throws Error with code OMADA_QOS_REJECTED / OMADA_SITE_NOT_FOUND / OMADA_MOCK…
+ */
+async function setClientRateLimit(ctx) {
+  if (!ctx || !ctx.clientMac) throw missingField('clientMac');
+
+  const canonical = normalizeDeviceMac(ctx.clientMac);
+  if (!canonical) {
+    const err = new Error('setClientRateLimit: invalid clientMac');
+    err.code = 'OMADA_INVALID_MAC';
+    throw err;
+  }
+  if (!ctx.payload || typeof ctx.payload !== 'object') throw missingField('payload');
+
+  if (MOCK_MODE) {
+    console.warn('[omada/qos] MOCK MODE — rate limit NOT applied for ' + canonical);
+    return { success: true, mock: true, clientMac: canonical, applied: ctx.payload, route: 'mock' };
+  }
+  if (!OMADAC_ID) throw configError('OMADA_OMADAC_ID is not configured');
+
+  const siteKey = await resolveSiteKey();
+  // Path segments carry the hyphen-separated MAC (AA-BB-…) the controller's
+  // URLs use; the BODY of a hotspot call uses colons, the path does not.
+  const pathMac = canonical.replace(/:/g, '-');
+  const body = JSON.stringify(ctx.payload);
+
+  const routes = preferredRateLimitRoute
+    ? [
+        ...RATE_LIMIT_ROUTES.filter((r) => r.name === preferredRateLimitRoute),
+        ...RATE_LIMIT_ROUTES.filter((r) => r.name !== preferredRateLimitRoute),
+      ]
+    : RATE_LIMIT_ROUTES;
+
+  const failures = [];
+  for (const route of routes) {
+    const path = route.path(OMADAC_ID, siteKey, pathMac);
+
+    let response;
+    try {
+      // PATCH — the verb the UI uses for a client-config change.
+      response = await withSession(() => omadaRequest(path, 'PATCH', body));
+    } catch (err) {
+      failures.push({ route: route.name, error: err });
+      console.error('[omada/qos] ' + route.name + ' request failed for ' + canonical + ': ' + err.message);
+      continue;
+    }
+
+    if (response.statusCode === 200 && response.body && response.body.errorCode === 0) {
+      preferredRateLimitRoute = route.name;
+      console.log(
+        '[omada/qos] rate limit applied to ' + canonical +
+        ' via ' + route.name + ' (PATCH ' + path + ')'
+      );
+      return { success: true, clientMac: canonical, applied: ctx.payload, route: route.name };
+    }
+
+    const rejected = rateLimitRejected(route.name, response);
+    failures.push({ route: route.name, error: rejected });
+    console.warn('[omada/qos] ' + route.name + ' rejected for ' + canonical + ' — ' + rejected.message);
+  }
+
+  const rejectedSomewhere = failures.some((f) => f.error.code === 'OMADA_QOS_REJECTED');
+  const err = new Error(
+    'Omada bandwidth cap failed for ' + canonical + ' on every local route: ' +
+    failures.map((f) => f.route + ': ' + f.error.message).join(' | ')
+  );
+  err.code = rejectedSomewhere
+    ? 'OMADA_QOS_REJECTED'
+    : ((failures[0] && failures[0].error.code) || 'OMADA_QOS_FAILED');
+  err.attempts = failures.map((f) => ({
+    route: f.route,
+    code: f.error.code,
+    message: f.error.message,
+  }));
+  throw err;
+}
+
+// ================================================================
 // Mock / test implementation
 // ================================================================
 function mockAuthenticate(ctx) {
@@ -906,12 +1153,23 @@ module.exports = {
   authenticateClient,
   unauthenticateClient,
   queryClientStatus,
+  setClientRateLimit,
+  resolveSiteKey,
   logResolvedConfig,
   // Exposed for testing
   _internal: {
     minutesToTime,
     operatorLogin,
     invalidateSession,
+    RATE_LIMIT_ROUTES,
+    siteEntries,
+    rateLimitRejected,
+    resetRateLimitState: () => {
+      preferredRateLimitRoute = null;
+      rateLimitSiteKeyCache = { name: null, key: null };
+    },
+    preferredRateLimitRoute: () => preferredRateLimitRoute,
+    siteKeyCache: () => rateLimitSiteKeyCache,
     logResolvedConfig,
     logControllerRequest,
     logAuthFailure,

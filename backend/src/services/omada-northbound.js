@@ -75,6 +75,18 @@
  * QoS defaults consumed by setClientRateLimit() (see VOUCHER_DEFAULT_*):
  *   VOUCHER_DEFAULT_DOWN_MBPS   — download cap in Mbps (mode 0 default)
  *   VOUCHER_DEFAULT_UP_KBPS     — upload cap in Kbps (mode 0 default)
+ *   OMADA_QOS_METHOD            — 'auto' (default) | 'local' | 'openapi'
+ *
+ * QoS transport (why the cap is not always applied through the Open API):
+ *   The Open API only exists on a controller that ships it (v5.12+) AND has an
+ *   Open API application created on the controller (Settings → Platform
+ *   Integration → Open API). On a stock OC200 the OAuth token request can
+ *   answer HTTP 500, so `updateClientRateLimitSetting` is unreachable and
+ *   every guest stays uncapped. The SAME operation is available through the
+ *   controller's web API on the hotspot operator session the backend already
+ *   holds (services/omada.js → setClientRateLimit), which needs no OAuth at
+ *   all. 'auto' therefore tries the web API first, then the Open API, and
+ *   remembers a route that works.
  */
 
 'use strict';
@@ -83,6 +95,9 @@ const https = require('https');
 const http = require('http');
 
 const { normalizeMac } = require('../utils/device-id');
+// The hotspot operator session client. It also owns the web-API bandwidth cap
+// (setClientRateLimit), which is the reliable route for a local controller.
+const omadaLocal = require('./omada');
 
 // ── Regional API hosts (confirmed: the three published Northbound regions) ──
 const REGION_BASE_URLS = {
@@ -309,6 +324,12 @@ function logResolvedConfig(force) {
       '[omada-nb] MOCK MODE — no OpenAPI call will reach the cloud' +
       (cfg.baseUrl ? ' (OMADA_NORTHBOUND_MOCK=true)' : ' (no base URL configured)')
     );
+    if (localQosConfigured()) {
+      console.warn(
+        '[omada-nb] QoS (bandwidth caps) is applied through the controller web API at ' +
+        maskHost(env('OMADA_BASE_URL')) + ' — no OpenAPI credentials are needed'
+      );
+    }
     return;
   }
 
@@ -922,16 +943,13 @@ function defaultRateLimit() {
 }
 
 /**
- * Apply a bandwidth (QoS) limit to a client (operationId
- * `updateClientRateLimitSetting`).
+ * Build and validate the `updateClientRateLimitSetting` request body.
  *
  * The guest-auth call itself carries no QoS fields — bandwidth is set on the
- * client by this SEPARATE call, either from a named profile (mode 1) or as
+ * client by a SEPARATE call, either from a named profile (mode 1) or as
  * explicit upload/download values (mode 0).
  *
  * @param {Object} ctx
- * @param {string} ctx.clientMac
- * @param {string} [ctx.siteId]
  * @param {0|1} [ctx.mode=0]  0 = custom values, 1 = named profile
  * @param {string} [ctx.rateLimitProfileId]  required when mode is 1
  * @param {Object} [ctx.customRateLimit]     mode-0 values. When omitted, the
@@ -944,19 +962,10 @@ function defaultRateLimit() {
  * @param {boolean} ctx.customRateLimit.downEnable
  * @param {1|2}     ctx.customRateLimit.downUnit
  * @param {number}  ctx.customRateLimit.downLimit 1–1024
- * @returns {Promise<Object>} { success, clientMac, applied }
+ * @returns {{mode:number, customRateLimit?:Object, rateLimitProfileId?:string}}
  */
-async function setClientRateLimit(ctx) {
-  const mac = toApiMac(ctx && ctx.clientMac);
-  if (!mac) {
-    const err = new Error('setClientRateLimit: missing or invalid clientMac');
-    err.code = 'OMADA_NORTHBOUND_INVALID_MAC';
-    throw err;
-  }
-  const cfg = resolveConfig();
-  if (!cfg.omadacId) throw configError('OMADA_OMADAC_ID is not configured');
-
-  const mode = Number(ctx.mode) === 1 ? 1 : 0;
+function buildRateLimitPayload(ctx) {
+  const mode = Number(ctx && ctx.mode) === 1 ? 1 : 0;
   const body = { mode };
 
   if (mode === 1) {
@@ -969,7 +978,7 @@ async function setClientRateLimit(ctx) {
   } else {
     // No explicit limits supplied → fall back to the operator-configured
     // voucher defaults (already parsed to integers by defaultRateLimit()).
-    const c = ctx.customRateLimit || defaultRateLimit();
+    const c = (ctx && ctx.customRateLimit) || defaultRateLimit();
     for (const field of ['upLimit', 'downLimit']) {
       const n = Number(c[field]);
       if (!Number.isInteger(n) || n < 1 || n > 1024) {
@@ -988,17 +997,171 @@ async function setClientRateLimit(ctx) {
     };
   }
 
-  if (cfg.mock) return { success: true, clientMac: mac, applied: body };
+  return body;
+}
 
-  const siteId = await resolveSiteId(ctx && ctx.siteId);
+/**
+ * Apply the cap through the Open API (`updateClientRateLimitSetting`), which
+ * needs a working OAuth token from `/openapi/authorize/token`.
+ *
+ * @param {string} mac   hyphen-separated MAC
+ * @param {Object} body  payload from buildRateLimitPayload()
+ * @param {string} [siteId]
+ * @returns {Promise<Object>}
+ */
+async function setClientRateLimitOpenApi(mac, body, siteId) {
+  const cfg = resolveConfig();
+  if (!cfg.omadacId) throw configError('OMADA_OMADAC_ID is not configured');
+
+  if (cfg.mock) {
+    return { success: true, clientMac: mac, applied: body, mock: true, route: 'openapi' };
+  }
+
+  const resolvedSiteId = await resolveSiteId(siteId);
   const path = '/openapi/v1/' + encodeURIComponent(cfg.omadacId) +
-    '/sites/' + encodeURIComponent(siteId) +
+    '/sites/' + encodeURIComponent(resolvedSiteId) +
     '/clients/' + encodeURIComponent(mac) + '/ratelimit';
 
   assertOk(await apiRequest(path, { method: 'PATCH', body }), 'updateClientRateLimitSetting');
-  console.log('[omada-nb] applied rate limit (mode ' + mode + ') to ' + mac);
+  console.log('[omada-nb] applied rate limit (mode ' + body.mode + ') to ' + mac + ' via the Open API');
 
-  return { success: true, clientMac: mac, applied: body };
+  return { success: true, clientMac: mac, applied: body, route: 'openapi' };
+}
+
+// When the local (web API) route is definitively unusable — rejected by the
+// controller or misaddressed — skip it for this long instead of paying for a
+// failed request on every login. Transient network failures are NOT cached.
+const LOCAL_QOS_BLOCK_MS = 10 * 60 * 1000;
+let localQosBlockedUntil = 0;
+
+/** Is a local web-API QoS attempt even possible for this deployment? */
+function localQosConfigured() {
+  return Boolean(env('OMADA_BASE_URL')) && env('OMADA_MOCK') !== 'true';
+}
+
+/** Definitive (non-transient) local failure — worth remembering. */
+function isDefinitiveLocalFailure(err) {
+  return Boolean(err && [
+    'OMADA_QOS_REJECTED',
+    'OMADA_SITE_NOT_FOUND',
+    'OMADA_CONFIG_ERROR',
+    'OMADA_INVALID_MAC',
+    'OMADA_MISSING_FIELD',
+  ].includes(err.code));
+}
+
+/**
+ * The transports to try, in order, for this deployment.
+ *
+ * OMADA_QOS_METHOD pins one of them ('local' | 'openapi'); 'auto' (default)
+ * tries the web API first — it works on a stock OC200 — then the Open API.
+ *
+ * @returns {Array<'local'|'openapi'>}
+ */
+function qosMethodOrder() {
+  const configured = env('OMADA_QOS_METHOD').toLowerCase();
+
+  if (configured === 'local') return ['local'];
+  if (configured === 'openapi') return ['openapi'];
+  if (configured && configured !== 'auto') {
+    console.warn(
+      '[omada-nb] OMADA_QOS_METHOD="' + configured +
+      '" is not auto|local|openapi — using auto'
+    );
+  }
+
+  if (!localQosConfigured()) return ['openapi'];
+  if (Date.now() < localQosBlockedUntil) return ['openapi'];
+  return ['local', 'openapi'];
+}
+
+/**
+ * Apply a bandwidth (QoS) limit to a client.
+ *
+ * Routes the SAME operation through the most reliable transport for this
+ * deployment: the controller's web API on the existing operator session
+ * (services/omada.js) first, then the Open API with OAuth credentials. See the
+ * module header for why the Open API alone is not dependable on a local OC200.
+ *
+ * @param {Object} ctx  see buildRateLimitPayload() plus:
+ * @param {string} ctx.clientMac
+ * @param {string} [ctx.siteId]  Open-API site override
+ * @returns {Promise<Object>} { success, clientMac, applied, route, method?, mock?, retried? }
+ * @throws the last transport's error when every route failed
+ */
+async function setClientRateLimit(ctx) {
+  logResolvedConfig();
+
+  const mac = toApiMac(ctx && ctx.clientMac);
+  if (!mac) {
+    const err = new Error('setClientRateLimit: missing or invalid clientMac');
+    err.code = 'OMADA_NORTHBOUND_INVALID_MAC';
+    throw err;
+  }
+
+  const body = buildRateLimitPayload(ctx);
+  const order = qosMethodOrder();
+
+  const failures = [];
+  let mockResult = null;
+
+  for (const method of order) {
+    let result;
+    try {
+      result = method === 'local'
+        ? await omadaLocal.setClientRateLimit({ clientMac: mac, payload: body })
+        : await setClientRateLimitOpenApi(mac, body, ctx && ctx.siteId);
+    } catch (err) {
+      failures.push({ method, err });
+
+      const remaining = order.slice(order.indexOf(method) + 1);
+      const blockable = method === 'local' && remaining.length > 0 && isDefinitiveLocalFailure(err);
+      if (blockable) {
+        const wasBlocked = Date.now() < localQosBlockedUntil;
+        localQosBlockedUntil = Date.now() + LOCAL_QOS_BLOCK_MS;
+        if (!wasBlocked) {
+          console.warn(
+            '[omada-nb] local web-API QoS unavailable (' + ((err && err.message) || err) + ')' +
+            ' — using the Open API for the next ' + Math.round(LOCAL_QOS_BLOCK_MS / 60000) + ' min.' +
+            ' Enable Open API on the controller (Settings → Platform Integration → Open API,' +
+            ' controller v5.12+) or grant the operator account site QoS rights'
+          );
+        }
+      }
+
+      console.warn(
+        '[omada-nb] QoS via ' + method + ' failed for ' + mac + ': ' +
+        ((err && err.message) || String(err)) +
+        (remaining.length ? ' — falling back to ' + remaining.join(' → ') : '')
+      );
+      continue;
+    }
+
+    // A transport in mock mode did not really cap anything: keep it as a
+    // last-resort answer and let a configured transport prove it can.
+    if (result && result.mock) {
+      mockResult = Object.assign({}, result, { method });
+      continue;
+    }
+
+    return Object.assign({}, result, { method });
+  }
+
+  if (mockResult) return mockResult;
+
+  const err = new Error(
+    'Omada rate limit failed for ' + mac + ' on every configured route: ' +
+    failures.map((f) => f.method + ': ' + f.err.message).join(' | ')
+  );
+  err.code = failures.length === 1 && failures[0].err.code
+    ? failures[0].err.code
+    : 'OMADA_QOS_FAILED';
+  err.attempts = failures.map((f) => ({
+    method: f.method,
+    code: f.err.code,
+    message: f.err.message,
+  }));
+  throw err;
 }
 
 /**
@@ -1013,12 +1176,17 @@ async function setClientRateLimit(ctx) {
 const RATE_LIMIT_RETRY_DELAY_MS = 2000;
 
 // Failures that are OUR fault (bad input, unusable configuration) — retrying
-// them just doubles the time to surface the same error.
+// them just doubles the time to surface the same error. A definitive local
+// rejection is included: the web API does not index clients asynchronously, so
+// there is no race to wait out.
 const NO_RETRY_RATE_LIMIT_CODES = new Set([
   'OMADA_NORTHBOUND_INVALID_MAC',
   'OMADA_NORTHBOUND_MISSING_FIELD',
   'OMADA_NORTHBOUND_INVALID_LIMIT',
   'OMADA_NORTHBOUND_CONFIG_ERROR',
+  'OMADA_QOS_REJECTED',
+  'OMADA_SITE_NOT_FOUND',
+  'OMADA_CONFIG_ERROR',
 ]);
 
 /** Promise-based sleep (local; keeps the retry awaitable). */
@@ -1041,14 +1209,12 @@ function sleep(ms) {
 async function applyClientRateLimit(ctx) {
   logResolvedConfig();
 
-  // setClientRateLimit() answers { success, applied } WITHOUT touching the
-  // network when the module is in mock mode (no base URL / MOCK=true), so a
-  // caller must be able to tell "capped" apart from "pretended to cap".
-  const mocked = resolveConfig().mock;
-
+  // Each transport reports its own `mock` flag when it could not really cap
+  // anything (no base URL / MOCK=true), so a caller can tell "capped" apart
+  // from "pretended to cap".
   const attempt = async (retried) => {
     const result = await setClientRateLimit(ctx);
-    return Object.assign({}, result, mocked ? { mock: true } : {}, { retried });
+    return Object.assign({}, result, { retried });
   };
 
   try {
@@ -1101,6 +1267,7 @@ module.exports = {
   // Supporting calls
   extendClientPeriod,
   setClientRateLimit,
+  setClientRateLimitOpenApi,
   applyClientRateLimit,
   getAuthedRecords,
   findAuthRecordByMac,
@@ -1122,6 +1289,11 @@ module.exports = {
     env,
     resolveConfig,
     defaultRateLimit,
+    buildRateLimitPayload,
+    qosMethodOrder,
+    localQosConfigured,
+    resetLocalQosBlock: () => { localQosBlockedUntil = 0; },
+    localQosBlockedUntil: () => localQosBlockedUntil,
     resolveSiteId,
     resetSiteId: () => { siteIdCache = { name: null, id: null }; siteIdInFlight = null; },
     siteIdCache: () => siteIdCache,
