@@ -32,6 +32,10 @@ const SESSIONS_COLUMNS = [
   { name: 'ap_mac', type: 'VARCHAR(32)', after: 'client_ip' },
   { name: 'ssid_name', type: 'VARCHAR(64)', after: 'ap_mac' },
   { name: 'voucher_type', type: "VARCHAR(16) DEFAULT 'standard'", after: 'duration_minutes' },
+  // Bandwidth snapshot (Kbps) copied from the voucher when the session was
+  // authorized; re-auth/resume re-applies these caps.
+  { name: 'down_kbps', type: 'INTEGER', after: 'voucher_type' },
+  { name: 'up_kbps', type: 'INTEGER', after: 'down_kbps' },
   { name: 'total_duration_seconds', type: 'INTEGER', after: 'voucher_type' },
   { name: 'started_at', type: 'TIMESTAMP', after: 'total_duration_seconds' },
   { name: 'expires_at', type: 'TIMESTAMP', after: 'started_at' },
@@ -56,7 +60,11 @@ const VOUCHERS_COLUMNS = [
   { name: 'type', type: "VARCHAR(16) NOT NULL DEFAULT 'standard'", after: 'code' },
   { name: 'duration_minutes', type: 'INTEGER NOT NULL DEFAULT 60', after: 'type' },
   { name: 'price', type: 'INTEGER', after: 'duration_minutes' },
-  { name: 'state', type: "VARCHAR(16) NOT NULL DEFAULT 'active'", after: 'price' },
+  // Per-voucher bandwidth caps in Kbps. NULL on both = use the tier defaults
+  // (PREMIUM_* for premium vouchers, VOUCHER_DEFAULT_* otherwise).
+  { name: 'down_kbps', type: 'INTEGER', after: 'price' },
+  { name: 'up_kbps', type: 'INTEGER', after: 'down_kbps' },
+  { name: 'state', type: "VARCHAR(16) NOT NULL DEFAULT 'active'", after: 'up_kbps' },
   { name: 'used_by_mac', type: 'VARCHAR(32)', after: 'state' },
   { name: 'used_at', type: 'TIMESTAMP', after: 'used_by_mac' },
   { name: 'created_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP', after: 'used_at' },

@@ -93,6 +93,7 @@ router.get('/status', async (req, res, next) => {
         } catch (_) { /* ignore */ }
                 return res.json({
           sessionId,
+          clientMac: session.clientMac || '',
           state: 'expired',
           remainingSeconds: 0,
           startedAt: session.startedAt,
@@ -109,6 +110,10 @@ router.get('/status', async (req, res, next) => {
 
         return res.json({
       sessionId: session.sessionId,
+      // Echoed so the client can persist the device identity and keep polling
+      // by MAC after the sessionId is lost, and so a stale stored sessionId
+      // can be reconciled against the device's live session.
+      clientMac: session.clientMac || '',
       state: session.state,
       remainingSeconds,
       startedAt: session.startedAt,

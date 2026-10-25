@@ -25,6 +25,7 @@ const router = express.Router();
 const { getDb } = require('../db/client');
 const { expireSession } = require('../services/session');
 const { parsePriceToCentavos } = require('../utils/price');
+const { normalizeBandwidthKbps, MAX_BANDWIDTH_KBPS } = require('../utils/qos');
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
@@ -37,6 +38,46 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ADMIN_API_KEY;
 // no logout/expiry path), a slow leak on a long-lived server.
 const MAX_VALID_TOKENS = 100;
 const VALID_TOKENS = new Set();
+
+/**
+ * Parse an optional per-voucher bandwidth pair (Kbps).
+ *
+ * Both caps or neither: null/undefined/'' clears BOTH so the voucher falls back
+ * to the tier defaults (premium → PREMIUM_*, otherwise VOUCHER_DEFAULT_*).
+ * Omada's customRateLimit takes 1–1024 per unit, so the stored Kbps value is
+ * bounded at MAX_BANDWIDTH_KBPS (1 Gbps) and converted when the cap is applied.
+ *
+ * @param {*} downKbps
+ * @param {*} upKbps
+ * @returns {{ok: true, down: number|null, up: number|null}|{ok: false, error: string}}
+ */
+function parseBandwidthCaps(downKbps, upKbps) {
+  const isBlank = (v) => v === undefined || v === null || v === '';
+
+  if (isBlank(downKbps) && isBlank(upKbps)) {
+    return { ok: true, down: null, up: null };
+  }
+
+  if (isBlank(downKbps) || isBlank(upKbps)) {
+    return {
+      ok: false,
+      error: 'downKbps and upKbps must be provided together (both in Kbps, e.g. 5000 for 5 Mbps).',
+    };
+  }
+
+  const down = normalizeBandwidthKbps(downKbps);
+  const up = normalizeBandwidthKbps(upKbps);
+
+  if (down === null || up === null) {
+    return {
+      ok: false,
+      error: 'downKbps and upKbps must be whole numbers between 1 and ' +
+        MAX_BANDWIDTH_KBPS + ' Kbps (5000 = 5 Mbps).',
+    };
+  }
+
+  return { ok: true, down, up };
+}
 
 function rememberToken(token) {
   VALID_TOKENS.add(token);
@@ -89,8 +130,8 @@ router.get('/vouchers', async (req, res, next) => {
   try {
     const db = getDb();
     const rows = await db.query(`
-      SELECT id, code, type, duration_minutes, price, state, assigned_ref_no,
-             used_by_mac, used_at, created_at, expires_at
+      SELECT id, code, type, duration_minutes, price, down_kbps, up_kbps,
+             state, assigned_ref_no, used_by_mac, used_at, created_at, expires_at
       FROM vouchers
       ORDER BY created_at DESC
     `);
@@ -110,6 +151,8 @@ router.post('/vouchers', async (req, res, next) => {
       quantity = 1,
       expiresAt = null,
       prefix = 'WIFI',
+      downKbps = null,
+      upKbps = null,
     } = req.body;
 
     if (type !== 'standard' && type !== 'premium') {
@@ -122,15 +165,23 @@ router.post('/vouchers', async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'price must be a non-negative integer number of centavos (50.00 pesos = 5000)' });
     }
 
+    // Optional per-voucher bandwidth caps, in Kbps (5 Mbps = 5000). They are
+    // all-or-nothing: a code with only one direction configured would otherwise
+    // leave the other direction on the default cap.
+    const caps = parseBandwidthCaps(downKbps, upKbps);
+    if (!caps.ok) {
+      return res.status(400).json({ success: false, error: caps.error });
+    }
+
     const db = getDb();
     const created = [];
 
     for (let i = 0; i < Math.min(quantity, 100); i++) {
       const code = `${prefix}-${uuidv4().replace(/-/g, '').slice(0, 12).toUpperCase()}`;
       await db.run(`
-        INSERT INTO vouchers (code, type, duration_minutes, price, state, expires_at)
-        VALUES (?, ?, ?, ?, 'active', ?)
-      `, [code, type, durationMinutes, price, expiresAt]);
+        INSERT INTO vouchers (code, type, duration_minutes, price, down_kbps, up_kbps, state, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
+      `, [code, type, durationMinutes, price, caps.down, caps.up, expiresAt]);
       created.push(code);
     }
 
@@ -144,7 +195,17 @@ router.post('/vouchers', async (req, res, next) => {
 router.put('/vouchers/:id', async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { state, type, durationMinutes, price, expiresAt } = req.body;
+    const { state, type, durationMinutes, price, expiresAt, downKbps, upKbps } = req.body;
+
+    // Bandwidth caps are validated as a pair: both values, or both cleared
+    // (null/absent = fall back to the tier/default caps).
+    let caps = null;
+    if (downKbps !== undefined || upKbps !== undefined) {
+      caps = parseBandwidthCaps(downKbps, upKbps);
+      if (!caps.ok) {
+        return res.status(400).json({ success: false, error: caps.error });
+      }
+    }
 
     const db = getDb();
     const fields = [];
@@ -169,6 +230,10 @@ router.put('/vouchers/:id', async (req, res, next) => {
     if (expiresAt !== undefined) {
       fields.push('expires_at = ?');
       params.push(expiresAt);
+    }
+    if (caps) {
+      fields.push('down_kbps = ?', 'up_kbps = ?');
+      params.push(caps.down, caps.up);
     }
 
     if (fields.length === 0) {
@@ -466,8 +531,23 @@ router.post('/vouchers/import', upload.single('file'), async (req, res, next) =>
         };
         errors.push(`Row ${excelRow}: column "Price" has invalid value "${priceStr}" (${reasons[priceResult.reason]})`);
       }
+      // --- Download/Upload (Kbps): OPTIONAL per-voucher bandwidth caps ---
+      // Blank on both columns = keep the tier/default caps. The same
+      // both-or-neither rule as the create/update endpoints applies.
+      const caps = parseBandwidthCaps(row['Download (Kbps)'], row['Upload (Kbps)']);
+      if (!caps.ok) {
+        errors.push(`Row ${excelRow}: bandwidth caps invalid — ${caps.error}`);
+      }
+
       if (errors.length === 0) {
-        validRows.push({ code: codeStr, type: typeStr, duration: parsedDuration, price: priceResult.ok ? priceResult.centavos : null });
+        validRows.push({
+          code: codeStr,
+          type: typeStr,
+          duration: parsedDuration,
+          price: priceResult.ok ? priceResult.centavos : null,
+          downKbps: caps.down,
+          upKbps: caps.up,
+        });
       }
     }
 
@@ -494,15 +574,15 @@ router.post('/vouchers/import', upload.single('file'), async (req, res, next) =>
       if (existing) {
         // Update existing voucher
         await db.run(
-          'UPDATE vouchers SET type = ?, duration_minutes = ?, price = ? WHERE code = ?',
-          [v.type, v.duration, v.price, v.code]
+          'UPDATE vouchers SET type = ?, duration_minutes = ?, price = ?, down_kbps = ?, up_kbps = ? WHERE code = ?',
+          [v.type, v.duration, v.price, v.downKbps, v.upKbps, v.code]
         );
         updated++;
       } else {
         // Insert new voucher
         await db.run(
-          'INSERT INTO vouchers (code, type, duration_minutes, price, state) VALUES (?, ?, ?, ?, ?)',
-          [v.code, v.type, v.duration, v.price, 'active']
+          'INSERT INTO vouchers (code, type, duration_minutes, price, down_kbps, up_kbps, state) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [v.code, v.type, v.duration, v.price, v.downKbps, v.upKbps, 'active']
         );
         inserted++;
       }

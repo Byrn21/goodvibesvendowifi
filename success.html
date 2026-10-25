@@ -485,7 +485,20 @@
       var destination = decodeURIComponent(params.get('redirectUrl') || params.get('targetUrl') || '');
       var originUrl = decodeURIComponent(params.get('originUrl') || params.get('originalUrl') || '');
       var sessionId = params.get('sessionId') || '';
-      var clientMac = params.get('clientMac') || '';
+
+      // Omada puts the device identity in the portal URL as ?clientMac=...; the
+      // backend echoes it on POST /api/auth and portal.js forwards it here.
+      // Normalized to the canonical uppercase colon form the backend stores, so
+      // the MAC fallback lookup below matches the saved session row.
+      function normalizeMac(mac) {
+        if (!mac) return null;
+        var cleaned = String(mac).replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+        if (cleaned.length !== 12) return null;
+        return cleaned.match(/.{2}/g).join(':');
+      }
+
+      var clientMacRaw = params.get('clientMac') || params.get('mac') || '';
+      var clientMac = normalizeMac(clientMacRaw) || clientMacRaw;
 
       // ---- Final exit destination -----------------------------------------
       // The mobile OS only marks the network as open when a request reaches a
@@ -581,26 +594,143 @@
         });
       }
 
-      // Populate session info if sessionId provided
-      if (sessionId) {
-        // Persist the session ID so status.html can recover it later,
+      // ---- Session box: session ID, live countdown and state ----------------
+      // The countdown must reflect the row POST /api/auth just committed to the
+      // database. portal.js forwards that row's timing (expiresAt / remaining /
+      // duration) in this page's URL, so the box is populated on first paint;
+      // one status call then re-confirms it against Supabase. The MAC fallback
+      // keeps the box working even when the redirect carried no sessionId.
+      var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
+
+      var infoBox    = document.getElementById('session-info');
+      var sidEl      = document.getElementById('info-session-id');
+      var remainingEl = document.getElementById('info-time-remaining');
+      var stateEl    = document.getElementById('info-state');
+      var statusLink = document.getElementById('status-link');
+      var countdownTimer = null;
+
+      function pad2(n) { return String(n).padStart(2, '0'); }
+
+      function formatRemaining(totalSecs) {
+        if (totalSecs == null || isNaN(totalSecs) || totalSecs < 0) return '\u2014';
+        var secs = Math.floor(totalSecs);
+        var h = Math.floor(secs / 3600);
+        var m = Math.floor((secs % 3600) / 60);
+        var s = secs % 60;
+        if (h > 0) return pad2(h) + ':' + pad2(m) + ':' + pad2(s);
+        return pad2(m) + ':' + pad2(s);
+      }
+
+      function startCountdown(totalSecs) {
+        if (countdownTimer) window.clearInterval(countdownTimer);
+        var left = Math.max(0, Math.floor(totalSecs));
+        if (remainingEl) remainingEl.textContent = formatRemaining(left);
+        countdownTimer = window.setInterval(function () {
+          left -= 1;
+          if (left <= 0) {
+            left = 0;
+            window.clearInterval(countdownTimer);
+            countdownTimer = null;
+          }
+          if (remainingEl) remainingEl.textContent = formatRemaining(left);
+        }, 1000);
+      }
+
+      function setState(value) {
+        if (stateEl && value) stateEl.textContent = value;
+      }
+
+      // The status page needs the same identifiers this page has, so hand it
+      // BOTH the session id and the device MAC (the MAC keeps working after the
+      // id is gone).
+      function statusHref() {
+        var q = new URLSearchParams();
+        if (sessionId) q.set('sessionId', sessionId);
+        if (clientMac) q.set('clientMac', clientMac);
+        var vt = params.get('voucherType') || '';
+        if (vt) q.set('voucherType', vt);
+        var qs = q.toString();
+        return 'status.html' + (qs ? '?' + qs : '');
+      }
+
+      // Seed the countdown from the URL timing params (no round-trip needed).
+      var initialSeconds = null;
+      var expiresAtParam = params.get('expiresAt') || '';
+      if (expiresAtParam) {
+        var expiryMs = new Date(expiresAtParam).getTime();
+        if (!isNaN(expiryMs)) {
+          initialSeconds = Math.max(0, Math.floor((expiryMs - Date.now()) / 1000));
+        }
+      }
+      if (initialSeconds === null) {
+        var remainingParam = parseInt(params.get('remaining'), 10);
+        if (!isNaN(remainingParam)) initialSeconds = remainingParam;
+      }
+      if (initialSeconds === null) {
+        // Older links only carry the plan length in minutes.
+        var durationParam = parseInt(params.get('duration'), 10);
+        if (!isNaN(durationParam)) initialSeconds = durationParam * 60;
+      }
+
+      if (sessionId || clientMac) {
+        // Persist the identifiers so status.html can recover the session later,
         // even after the user leaves this page for their destination.
         try {
-          window.localStorage.setItem('portalSessionId', sessionId);
-          window.sessionStorage.setItem('portalSessionId', sessionId);
+          if (sessionId) {
+            window.localStorage.setItem('portalSessionId', sessionId);
+            window.sessionStorage.setItem('portalSessionId', sessionId);
+          }
           // Persist the client MAC alongside the session id so a later silent
           // re-authorization can identify this device even without URL params.
           if (clientMac) window.localStorage.setItem('portalClientMac', clientMac);
         } catch (e) { /* storage unavailable */ }
 
-        var infoBox = document.getElementById('session-info');
-        var sidEl = document.getElementById('info-session-id');
-        var statusLink = document.getElementById('status-link');
-        if (infoBox && sidEl) {
-          sidEl.textContent = sessionId;
-          infoBox.classList.remove('hidden');
-                    if (statusLink) statusLink.href = 'status.html?sessionId=' + encodeURIComponent(sessionId) + (params.get('voucherType') ? '&voucherType=' + encodeURIComponent(params.get('voucherType')) : '');
-        }
+        if (infoBox) infoBox.classList.remove('hidden');
+        if (sidEl) sidEl.textContent = sessionId || '\u2014';
+        if (statusLink) statusLink.href = statusHref();
+        if (initialSeconds !== null) startCountdown(initialSeconds);
+        setState('active');
+
+        // Confirm against the backend and correct the countdown if the local
+        // seed was missing or slightly stale. A failed request leaves the
+        // values already on screen untouched.
+        (function refreshSessionInfo() {
+          var qs = sessionId
+            ? '?sessionId=' + encodeURIComponent(sessionId)
+            : '?mac=' + encodeURIComponent(clientMac);
+
+          fetch(API_BASE + '/api/session/status' + qs, { cache: 'no-store' })
+            .then(function (r) {
+              return r.json().catch(function () { return {}; }).then(function (body) {
+                return { ok: r.ok, status: r.status, body: body };
+              });
+            })
+            .then(function (res) {
+              var data = res.body || {};
+              if (!res.ok || !data.sessionId) return;
+
+              sessionId = data.sessionId;
+              if (data.clientMac) clientMac = data.clientMac;
+              try {
+                window.localStorage.setItem('portalSessionId', sessionId);
+                window.sessionStorage.setItem('portalSessionId', sessionId);
+                if (clientMac) window.localStorage.setItem('portalClientMac', clientMac);
+              } catch (e) { /* storage unavailable */ }
+
+              if (sidEl) sidEl.textContent = sessionId;
+              if (statusLink) statusLink.href = statusHref();
+              setState(data.state);
+
+              if (data.state === 'active' && typeof data.remainingSeconds === 'number') {
+                startCountdown(data.remainingSeconds);
+              } else if (data.state === 'expired') {
+                if (countdownTimer) window.clearInterval(countdownTimer);
+                countdownTimer = null;
+                if (remainingEl) remainingEl.textContent = formatRemaining(0);
+              }
+            })
+            .catch(function () { /* offline — keep the values already shown */ });
+        })();
       }
 
       // Hide the "Need help?" line when no support email was injected at build

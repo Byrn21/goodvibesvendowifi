@@ -16,11 +16,13 @@ const {
   validateVoucher,
   consumeVoucher,
   recordSession,
+  getSession,
   resumeSession,
   reauthorizeSession,
   expireSession,
   getSessionByVoucher,
   isPausableVoucherType,
+  applySessionRateLimit,
 } = require('../services/session');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 const { normalizeMac: normalizeDeviceMac, isSameMac } = require('../utils/device-id');
@@ -255,6 +257,10 @@ router.post('/', async (req, res, next) => {
           duration,        // minutes
           voucherUsed: normalizedVoucher,
           voucherType: voucherTypeResolved,
+          // Bandwidth snapshot, so every later re-auth/resume re-applies the
+          // exact cap this code carries (NULL = tier/default caps).
+          downKbps: voucherResult.downKbps,
+          upKbps: voucherResult.upKbps,
         }, tx);
         return true;
       });
@@ -289,6 +295,26 @@ router.post('/', async (req, res, next) => {
       || process.env.DEFAULT_REDIRECT_URL
       || 'https://www.google.com';
 
+    // ── Bandwidth (QoS) cap ─────────────────────────────────────────────
+    // The extPortal/auth body carries NO bandwidth fields (TP-Link's External
+    // Portal Server spec defines only clientMac/clientIp/apMac/ssidName/radioId
+    // (or gatewayMac/vid)/site/time/authType, and an unknown field can make
+    // firmware reject the authorization entirely). Omada applies a guest cap
+    // through the separate documented call `updateClientRateLimitSetting`, so
+    // that is what runs here — exactly like the payment webhook and claim
+    // routes. The values come from this voucher's own caps, then the premium
+    // tier, then the operator defaults (see utils/qos.js).
+    //
+    // Best-effort: the guest is ALREADY authorized by the controller and the
+    // voucher is spent, so a failed cap must never turn a successful login into
+    // an error. The response reports the outcome for the operator.
+    const qos = await applySessionRateLimit({
+      clientMac: normalizedMac,
+      downKbps: voucherResult.downKbps,
+      upKbps: voucherResult.upKbps,
+      voucherType: voucherTypeResolved,
+    });
+
     // ── Explicit success log: the Omada response AND the local lock ──
     // `omadaEchoedVoucher` is computed rather than assumed — the controller
     // answers {"errorCode":0} with no voucher in it, which is the evidence
@@ -307,16 +333,80 @@ router.post('/', async (req, res, next) => {
       ' omadaResponse=' + (omadaRawText || '(empty)')
     );
 
+    // ── Post-commit read-back: prove the active session is really stored ──
+    // The transaction above either committed voucher+session together or threw
+    // (in which case we answered 409/500 above), so the row must exist here.
+    // Reading it back is the verification step AND the source of the timing
+    // fields the success page renders: success.html shows the countdown from
+    // the value the database holds, not from a number recomputed in this
+    // handler. If the read-back somehow fails we still answer success — Omada
+    // already authorized the client and the voucher is spent, so reporting an
+    // error here would strand a guest who is actually online — but the failure
+    // is logged loudly instead of being hidden.
+    let storedSession = null;
+    try {
+      storedSession = await getSession(sessionId);
+    } catch (readErr) {
+      console.error(
+        '[auth] post-commit read-back failed for session ' + sessionId + ': ' +
+        (readErr && readErr.message ? readErr.message : String(readErr))
+      );
+    }
+    if (!storedSession) {
+      console.error(
+        '[auth] post-commit verification FAILED — session ' + sessionId +
+        ' (client ' + normalizedMac + ') is not readable after commit;' +
+        ' the client is authorized on Omada but /api/session/status will 404.'
+      );
+    }
+
+    const sessionStartedAt = (storedSession && storedSession.startedAt)
+      || new Date().toISOString();
+    const sessionExpiresAt = (storedSession && storedSession.expiresAt)
+      || new Date(Date.now() + duration * 60 * 1000).toISOString();
+    const sessionRemainingSeconds = storedSession && storedSession.expiresAt
+      ? Math.max(0, Math.floor((new Date(storedSession.expiresAt).getTime() - Date.now()) / 1000))
+      : duration * 60;
+    const sessionTotalSeconds = (storedSession && storedSession.totalDurationSeconds)
+      || duration * 60;
+
+    if (storedSession && storedSession.state !== 'active') {
+      console.warn(
+        '[auth] session ' + sessionId + ' read back with state "' +
+        storedSession.state + '" (expected "active")'
+      );
+    }
+
     return res.json({
       success: true,
       message: 'Authentication successful.',
       sessionId,
+      // Echo the canonical device identity so the success/status pages can keep
+      // querying the session by MAC even when the sessionId is lost.
+      clientMac: (storedSession && storedSession.clientMac) || normalizedMac,
       redirectUrl: finalRedirectUrl,
-      // Expose minimal session info (not secrets)
-            session: {
-        state: 'active',
-        remainingSeconds: duration * 60,
-        voucherType: voucherTypeResolved,
+      // Session timing, read back from the committed row. success.html renders
+      // its "time remaining" from these values, so the countdown matches
+      // Supabase the moment the page loads (instead of waiting for a poll and
+      // showing “—”).
+      startedAt: sessionStartedAt,
+      expiresAt: sessionExpiresAt,
+      durationMinutes: duration,
+      totalSeconds: sessionTotalSeconds,
+      // Whether the bandwidth cap was actually applied to this client. false =
+      // the guest is online but UNCAPPED (check the Render logs: northbound
+      // credentials / mock mode / controller rejection).
+      qosApplied: qos.applied,
+      qosMock: qos.mock === true,
+      ...(qos.applied ? {} : { qosError: qos.error || 'rate limit not applied' }),
+      session: {
+        state: (storedSession && storedSession.state) || 'active',
+        remainingSeconds: sessionRemainingSeconds,
+        voucherType: (storedSession && storedSession.voucherType) || voucherTypeResolved,
+        clientMac: (storedSession && storedSession.clientMac) || normalizedMac,
+        startedAt: sessionStartedAt,
+        expiresAt: sessionExpiresAt,
+        totalSeconds: sessionTotalSeconds,
       },
     });
 
@@ -434,11 +524,23 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
         success: true,
         message: 'Authentication successful.',
         sessionId: reauthed.session.sessionId,
+        clientMac: reauthed.session.clientMac || clientMac,
         redirectUrl: redirectUrl || process.env.DEFAULT_REDIRECT_URL || 'https://www.google.com',
+        startedAt: reauthed.session.startedAt,
+        expiresAt: reauthed.session.expiresAt,
+        totalSeconds: reauthed.session.totalDurationSeconds
+          || session.totalDurationSeconds
+          || reauthed.remainingSeconds,
         session: {
           state: 'active',
           remainingSeconds: reauthed.remainingSeconds,
           voucherType: reauthed.session.voucherType,
+          clientMac: reauthed.session.clientMac || clientMac,
+          startedAt: reauthed.session.startedAt,
+          expiresAt: reauthed.session.expiresAt,
+          totalSeconds: reauthed.session.totalDurationSeconds
+            || session.totalDurationSeconds
+            || reauthed.remainingSeconds,
         },
       },
     };
@@ -492,13 +594,22 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
       resumed: true,
       message: 'Session resumed.',
       sessionId: resumed.sessionId,
+      clientMac: resumed.clientMac || clientMac,
       // The session page is the live view; its timer reads the remaining time
       // straight from the re-authorized session (expires_at = now + remaining).
-      redirectUrl: 'status.html?sessionId=' + encodeURIComponent(resumed.sessionId),
+      redirectUrl: 'status.html?sessionId=' + encodeURIComponent(resumed.sessionId) +
+        (resumed.clientMac || clientMac
+          ? '&clientMac=' + encodeURIComponent(resumed.clientMac || clientMac)
+          : ''),
+      startedAt: resumed.startedAt,
+      expiresAt: resumed.expiresAt,
       session: {
         state: resumed.state,
         remainingSeconds: remaining,
         voucherType: resumed.voucherType,
+        clientMac: resumed.clientMac || clientMac,
+        startedAt: resumed.startedAt,
+        expiresAt: resumed.expiresAt,
       },
     },
   };

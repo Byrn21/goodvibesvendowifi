@@ -481,11 +481,12 @@
             '<td><span class="badge badge-' + (item.type || 'standard') + '">' + escapeHtml(item.type || 'standard') + '</span></td>' +
             '<td>' + (item.duration_minutes || 0) + ' min</td>' +
             '<td>' + (item.price ? formatPrice(item.price) : '&mdash;') + '</td>' +
+            '<td>' + escapeHtml(formatCaps(item.down_kbps, item.up_kbps)) + '</td>' +
             '<td><span class="badge badge-' + stateClass + '">' + escapeHtml(stateLabel) + '</span></td>' +
             '<td><button type="button" class="btn btn--danger btn--delete-voucher" data-voucher-id="' + (item.id || 0) + '">Delete</button></td>' +
             '</tr>';
         }).join('');
-        return '<table><thead><tr><th>#</th><th>Code</th><th>Type</th><th>Duration</th><th>Price</th><th>State</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+        return '<table><thead><tr><th>#</th><th>Code</th><th>Type</th><th>Duration</th><th>Price</th><th>Speed</th><th>State</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
       }
 
       // deleteVoucher with explicit button parameter &mdash; no reliance on global `event` object
@@ -621,11 +622,31 @@
         try { return new Date(iso).toLocaleString(); } catch (e) { return iso || ''; }
       }
 
-      // Template data shared by CSV and XLSX export
-      var TEMPLATE_HEADERS = ['ID', 'Code', 'Type', 'Duration', 'Price'];
+      // Per-voucher bandwidth caps are stored in Kbps and applied to the guest by
+      // the controller's rate-limit call at login. Show them as Mbps when the
+      // value divides evenly (5000 Kbps → 5 Mbps), otherwise keep Kbps.
+      function formatBandwidth(kbps) {
+        var n = Number(kbps);
+        if (!isFinite(n) || n < 1) return '';
+        if (n >= 1000 && n % 1000 === 0) return (n / 1000) + ' Mbps';
+        return n + ' Kbps';
+      }
+
+      function formatCaps(downKbps, upKbps) {
+        var down = formatBandwidth(downKbps);
+        var up = formatBandwidth(upKbps);
+        // Both empty = the voucher uses the tier/default caps.
+        if (!down && !up) return 'default';
+        return '\u2193 ' + (down || 'default') + ' / \u2191 ' + (up || 'default');
+      }
+
+      // Template data shared by CSV and XLSX export.
+      // The two bandwidth columns are OPTIONAL: leave them blank to use the
+      // tier/default caps. Values are Kbps, so 5 Mbps is 5000.
+      var TEMPLATE_HEADERS = ['ID', 'Code', 'Type', 'Duration', 'Price', 'Download (Kbps)', 'Upload (Kbps)'];
       var TEMPLATE_ROWS = [
-        [1, '123456', 'standard', 60, '\u20b150.00'],
-        [2, '789012', 'premium', 120, '\u20b1100.00']
+        [1, '123456', 'standard', 60, '\u20b150.00', '', ''],
+        [2, '789012', 'premium', 120, '\u20b1100.00', 20000, 5000]
       ];
 
       function buildCsv() {
@@ -664,7 +685,7 @@
         var wsData = [TEMPLATE_HEADERS].concat(TEMPLATE_ROWS);
         var ws = XLSX.utils.aoa_to_sheet(wsData);
         // Set column widths for readability
-        ws['!cols'] = [{ wch: 6 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 14 }];
+        ws['!cols'] = [{ wch: 6 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 18 }, { wch: 16 }];
         var wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Vouchers');
         var wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
@@ -692,6 +713,7 @@
         els.tabImport.innerHTML =
           '<h3>Import Vouchers from CSV/XLSX</h3>' +
           '<p class="muted">Required columns: ID, Code, Type, Duration, Price. Code must be 6-digit numeric (ID should auto-increment starting from 1).</p>' +
+          '<p class="muted">Optional columns: Download (Kbps) and Upload (Kbps) cap this voucher\u2019s speed \u2014 enter both (5 Mbps = 5000) or leave both blank to use the plan/default caps.</p>' +
           '<form id="import-form">' +
           '<div class="form-row">' +
           '<div class="form-field full-width"><label for="import-file">File</label><input type="file" id="import-file" accept=".csv,.xlsx,.xls" style="width:100%"></div>' +

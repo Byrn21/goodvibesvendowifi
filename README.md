@@ -374,6 +374,48 @@ the controller.
 | `VOUCHER_DEFAULT_DOWN_MBPS` | `services/omada-northbound.js` | *(empty → error)* | Default download cap (Mbps) for non-premium amounts. |
 | `VOUCHER_DEFAULT_UP_KBPS` | `services/omada-northbound.js` | *(empty → error)* | Default upload cap (Kbps) for non-premium amounts. |
 
+### Per-voucher bandwidth caps (voucher login)
+
+A guest who redeems a voucher is capped through the same documented Omada call
+the payment flows use (`updateClientRateLimitSetting` →
+`services/omada-northbound.js`). The `extPortal/auth` body itself carries **no**
+QoS fields: TP-Link's External Portal Server spec defines only
+`clientMac`/`clientIp`/`apMac`/`ssidName`/`radioId` (or `gatewayMac`/`vid`),
+`site`, `time` and `authType`, and an unknown field can make firmware reject the
+whole authorization.
+
+Resolution order for a redeemed voucher (`utils/qos.js` →
+`resolveVoucherRateLimit`):
+
+1. `vouchers.down_kbps` / `vouchers.up_kbps` — per-voucher caps, stored in Kbps
+   (5 Mbps = 5000). Values above 1024 Kbps are converted to Mbps for the
+   controller, which accepts 1–1024 per unit (unit 1 = Kbps, unit 2 = Mbps).
+2. Premium vouchers (`type = 'premium'`) → `PREMIUM_DOWN_MBPS` /
+   `PREMIUM_UP_KBPS`.
+3. Everything else → `VOUCHER_DEFAULT_DOWN_MBPS` / `VOUCHER_DEFAULT_UP_KBPS`.
+
+Both per-voucher caps must be set together; a half-configured row is treated as
+unset so one direction can never be left on the default by accident. The caps
+are copied onto the session (`sessions.down_kbps`, `sessions.up_kbps`) so a
+re-authorization or a premium resume re-applies exactly the cap the guest paid
+for, even if the voucher row is edited afterwards.
+
+Applying the cap is **best-effort**: the guest is already authorized and the
+voucher already spent, so a rejected/failed rate-limit call never fails the
+login. `POST /api/auth` reports the outcome as `qosApplied`, with `qosError`
+when it failed and `qosMock: true` when the Northbound client is in mock mode
+(no `OMADA_NORTHBOUND_BASE_URL`/`OMADA_NORTHBOUND_REGION` + client credentials),
+which means nothing was actually applied. A first rejection is retried once
+after 2 s, because the cloud indexes a freshly authorized client
+asynchronously.
+
+Per-voucher caps are set through `POST /api/admin/vouchers`
+(`downKbps`/`upKbps`, both or neither, in Kbps), `PUT /api/admin/vouchers/:id`
+(send `null` for both to clear), or the optional `Download (Kbps)` /
+`Upload (Kbps)` columns of a voucher import. Both columns are optional; leave
+them blank to use the tier/default caps. The admin voucher table shows the
+resulting speed (`default`, `↓ 20 Mbps / ↑ 5 Mbps`, …).
+
 ### Captive-portal QR payment methods
 
 Served to the frontend by `GET /api/payment/methods`; each defaults to `''`

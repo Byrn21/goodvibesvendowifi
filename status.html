@@ -376,7 +376,24 @@
       var CONFIG = window.CONFIG || {};
       var API_BASE = CONFIG.apiBaseUrl || '';
       var POLL_INTERVAL = CONFIG.statusPollingInterval || 30000;
+
+      // ---- Device identity ----
+      // A session is displayed from its id when that id is fresh, but the backend
+      // can also resolve the NEWEST live session for a device MAC. That MAC path
+      // is what keeps this page honest after a re-login: a sessionId left in
+      // localStorage by an earlier (already expired) session must never make the
+      // page claim the guest's current session has ended. Omada always supplies
+      // the device identity as ?clientMac=...
       var SESSION_ID = '';
+      var CLIENT_MAC = '';
+      var SESSION_ID_FROM_URL = false;
+
+      function normalizeMac(mac) {
+        if (!mac) return null;
+        var cleaned = String(mac).replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+        if (cleaned.length !== 12) return null;
+        return cleaned.match(/.{2}/g).join(':');
+      }
 
       // Plan tiers allowed to pause/resume. Mirrors the backend policy
       // (services/session.js → isPausableVoucherType, which routes/session.js
@@ -492,9 +509,37 @@
       }
 
       // ---- API calls ----
-      function fetchStatus() {
-        if (!SESSION_ID) return;
-        var url = API_BASE + '/api/session/status?sessionId=' + encodeURIComponent(SESSION_ID);
+      // Query strings this page will try, in order. A sessionId that arrived in
+      // the URL is fresh (success.html just handed it over) so it wins; a
+      // sessionId recovered from storage may belong to an older session, so the
+      // MAC's live session is preferred and the stored id is only used as the
+      // fallback — which is what still reports a genuinely expired session.
+      function statusQueries() {
+        var list = [];
+        var bySession = SESSION_ID ? '?sessionId=' + encodeURIComponent(SESSION_ID) : '';
+        var byMac = CLIENT_MAC ? '?mac=' + encodeURIComponent(CLIENT_MAC) : '';
+
+        if (SESSION_ID && (SESSION_ID_FROM_URL || !CLIENT_MAC)) {
+          if (bySession) list.push(bySession);
+          if (byMac) list.push(byMac);
+        } else {
+          if (byMac) list.push(byMac);
+          if (bySession) list.push(bySession);
+        }
+        return list;
+      }
+
+      function fetchStatus(index) {
+        var queries = statusQueries();
+        var at = (typeof index === 'number') ? index : 0;
+
+        // Nothing to identify this device with, or every identifier is exhausted.
+        if (!queries.length || at >= queries.length) {
+          showSection('unknown');
+          return;
+        }
+
+        var url = API_BASE + '/api/session/status' + queries[at];
         fetch(url, { method: 'GET', cache: 'no-store' })
           .then(function (r) {
             // Parse JSON even for error statuses so we can read the code
@@ -506,8 +551,10 @@
             if (!res.ok) {
               var errCode = (res.body && res.body.code) || '';
               if (res.status === 404 && errCode === 'SESSION_NOT_FOUND') {
-                // Genuinely no session for this device
-                showSection('unknown');
+                // No session under this identifier — try the next one (e.g. the
+                // MAC found nothing because the plan ended; the stored session
+                // id then answers "expired" instead of "not found").
+                fetchStatus(at + 1);
               } else {
                 // Server error (5xx), rate limit, or other failure —
                 // NOT a "not found" case; show the retry-friendly screen.
@@ -566,6 +613,16 @@
 
         var state = data.state || 'unknown';
         SESSION_ID = data.sessionId;
+
+        // Remember the device MAC the backend resolved, so the next poll (and
+        // a later visit without query params) can keep querying by MAC.
+        var resolvedMac = normalizeMac(data.clientMac) || '';
+        if (resolvedMac) CLIENT_MAC = resolvedMac;
+        try {
+          if (resolvedMac) window.localStorage.setItem('portalClientMac', resolvedMac);
+          window.localStorage.setItem('portalSessionId', SESSION_ID);
+          window.sessionStorage.setItem('portalSessionId', SESSION_ID);
+        } catch (e) { /* storage unavailable */ }
 
         // Single source for the "Plan" value shown in the details table.
         // Pause eligibility below is derived from the very same plan value.
@@ -705,30 +762,41 @@
       // ---- Init ----
       // Identifier resolution order:
       //   1. URL ?sessionId=  (set by portal.js / success.html after login)
-      //   2. localStorage     (persisted at login — survives redirects)
-      //   3. sessionStorage   (tab-scoped fallback)
+      //   2. URL ?clientMac=  (Omada's own parameter name; ?mac= accepted too)
+      //   3. localStorage     (persisted at login — survives redirects, but may
+      //                        be stale, which is why a URL MAC outranks it)
+      //   4. sessionStorage   (tab-scoped fallback)
       var params = new URLSearchParams(window.location.search);
       var urlSessionId = params.get('sessionId') || '';
+      var urlClientMac = params.get('clientMac') || params.get('mac') || '';
       var storedSessionId = '';
+      var storedClientMac = '';
       try {
         storedSessionId = window.localStorage.getItem('portalSessionId')
           || window.sessionStorage.getItem('portalSessionId') || '';
+        storedClientMac = window.localStorage.getItem('portalClientMac')
+          || window.sessionStorage.getItem('portalClientMac') || '';
       } catch (e) { /* storage unavailable */ }
 
       SESSION_ID = urlSessionId || storedSessionId || (CONFIG.sessionId || '');
+      SESSION_ID_FROM_URL = Boolean(urlSessionId);
+      CLIENT_MAC = normalizeMac(urlClientMac) || normalizeMac(storedClientMac) || '';
 
-      // If the ID came from the URL, persist it so later visits without
-      // the query parameter still find the session.
-      if (urlSessionId) {
+      // If the identifiers came from the URL, persist them so later visits
+      // without the query parameters still find the session.
+      if (urlSessionId || CLIENT_MAC) {
         try {
-          window.localStorage.setItem('portalSessionId', urlSessionId);
-          window.sessionStorage.setItem('portalSessionId', urlSessionId);
+          if (urlSessionId) {
+            window.localStorage.setItem('portalSessionId', urlSessionId);
+            window.sessionStorage.setItem('portalSessionId', urlSessionId);
+          }
+          if (CLIENT_MAC) window.localStorage.setItem('portalClientMac', CLIENT_MAC);
         } catch (e) { /* storage unavailable */ }
       }
 
-      if (SESSION_ID) {
+      if (SESSION_ID || CLIENT_MAC) {
         showSection('loading');
-        fetchStatus();
+        fetchStatus(0);
       } else {
         showSection('unknown');
       }

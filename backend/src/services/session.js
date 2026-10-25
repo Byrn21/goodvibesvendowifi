@@ -12,6 +12,8 @@
 
 const { v4: uuidv4 } = require('uuid');
 const omadaService = require('./omada');
+const omadaNorthbound = require('./omada-northbound');
+const { resolveVoucherRateLimit } = require('../utils/qos');
 const { getDb } = require('../db/client');
 
 const DEFAULT_DURATION = parseInt(process.env.DEFAULT_SESSION_DURATION || '60', 10);
@@ -63,7 +65,8 @@ async function validateVoucher(voucher, clientMac) {
   const db = getDb();
 
     const row = await db.getOne(`
-    SELECT id, code, duration_minutes, type, state, used_by_mac, expires_at
+    SELECT id, code, duration_minutes, type, state, used_by_mac, expires_at,
+           down_kbps, up_kbps
     FROM vouchers
     WHERE code = ? 
     LIMIT 1
@@ -105,6 +108,10 @@ async function validateVoucher(voucher, clientMac) {
     id: row.id,
     duration: row.duration_minutes,
     type: row.type || 'standard',
+    // Per-voucher QoS caps (Kbps). NULL/absent means the tier defaults apply —
+    // see utils/qos.js → resolveVoucherRateLimit().
+    downKbps: row.down_kbps,
+    upKbps: row.up_kbps,
     message: 'Voucher accepted.',
   };
 }
@@ -154,6 +161,7 @@ async function consumeVoucher(voucher, clientMac, tx) {
 async function recordSession({
   sessionId, clientMac, clientIp, apMac, ssidName,
   duration, voucherUsed, voucherType, totalDurationSeconds,
+  downKbps, upKbps,
 }, tx) {
   const db = tx || getDb();
   const now = new Date().toISOString();
@@ -162,9 +170,10 @@ async function recordSession({
     await db.run(`
     INSERT INTO sessions (
       session_id, client_mac, client_ip, ap_mac, ssid_name,
-      duration_minutes, voucher_type, total_duration_seconds, started_at, expires_at, state,
+      duration_minutes, voucher_type, down_kbps, up_kbps, total_duration_seconds,
+      started_at, expires_at, state,
       voucher_used, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
   `, [
     sessionId,
     clientMac || '',
@@ -173,6 +182,10 @@ async function recordSession({
     ssidName || '',
     duration,
     voucherType || 'standard',
+    // Bandwidth snapshot (Kbps). Stored with the session so a re-auth or a
+    // premium resume re-applies the same cap without re-reading the voucher.
+    downKbps || null,
+    upKbps || null,
     totalDurationSeconds || null,
     now,
     expiresAt,
@@ -217,6 +230,8 @@ async function loadSession(sessionId) {
     ssidName: row.ssid_name,
         duration: row.duration_minutes,
     voucherType: row.voucher_type || 'standard',
+    downKbps: row.down_kbps,
+    upKbps: row.up_kbps,
     totalDurationSeconds: row.total_duration_seconds,
     startedAt: row.started_at,
     expiresAt: row.expires_at,
@@ -432,7 +447,71 @@ async function resumeSession(sessionId) {
     WHERE session_id = ?
   `, [expiresAt, new Date().toISOString(), sessionId]);
 
+  // Re-apply the bandwidth cap: pause de-authorized the client, and the
+  // controller is not guaranteed to keep a per-client rate limit across that.
+  // Best-effort — the guest is online either way.
+  await applySessionRateLimit(session);
+
     return await getSession(sessionId);
+}
+
+/**
+ * applySessionRateLimit — apply a session's stored bandwidth caps to its client.
+ *
+ * NEVER throws: the guest is already authorized when this runs, so a failed QoS
+ * call must not be turned into a failed login/resume. The caller logs what it
+ * needs from the returned flag.
+ *
+ * The caps come from the session row (copied from the voucher at authorization
+ * time), falling back to the tier rules in utils/qos.js.
+ *
+ * @param {Object} session session object from getSession()/loadSession()
+ * @returns {Promise<{applied: boolean, mock?: boolean, error?: string, customRateLimit?: Object}>}
+ */
+async function applySessionRateLimit(session) {
+  if (!session || !session.clientMac) return { applied: false, error: 'no session/clientMac' };
+
+  const customRateLimit = resolveVoucherRateLimit({
+    downKbps: session.downKbps,
+    upKbps: session.upKbps,
+    voucherType: session.voucherType,
+  });
+
+  try {
+    const result = await omadaNorthbound.applyClientRateLimit(
+      customRateLimit
+        ? { clientMac: session.clientMac, customRateLimit }
+        : { clientMac: session.clientMac }
+    );
+
+    if (result && result.mock) {
+      console.warn(
+        '[session/qos] rate limit NOT applied to ' + session.clientMac +
+        ' — omada-northbound is in MOCK mode (configure OMADA_NORTHBOUND_BASE_URL' +
+        ' / OMADA_NORTHBOUND_REGION + OMADA_CLIENT_ID + OMADA_CLIENT_SECRET)'
+      );
+    } else {
+      console.log(
+        '[session/qos] rate limit applied to ' + session.clientMac +
+        ' (' + (customRateLimit ? 'voucher/premium caps' : 'default caps') + ')' +
+        ' up=' + JSON.stringify(customRateLimit ? [customRateLimit.upUnit, customRateLimit.upLimit] : 'default') +
+        ' down=' + JSON.stringify(customRateLimit ? [customRateLimit.downUnit, customRateLimit.downLimit] : 'default')
+      );
+    }
+
+    return {
+      applied: Boolean(result && result.success),
+      mock: Boolean(result && result.mock),
+      customRateLimit,
+    };
+  } catch (err) {
+    console.error(
+      '[session/qos] authorized but rate limit failed for ' + session.clientMac +
+      ': ' + ((err && err.message) || String(err)) +
+      ' — the guest is online but UNCAPPED; re-apply the cap manually or retry'
+    );
+    return { applied: false, error: (err && err.message) || String(err), customRateLimit };
+  }
 }
 
 /**
@@ -488,6 +567,11 @@ async function reauthorizeSession(sessionId) {
     console.error('[reauthorizeSession] Omada auth failed:', err.message);
     throw err;
   }
+
+  // A re-authorized client must come back at the speed it paid for. The caps
+  // are the ones stored on the session when it was created, so a voucher whose
+  // row was edited afterwards cannot silently change a live session.
+  await applySessionRateLimit(session);
 
   return { session, remainingSeconds };
 }
@@ -775,4 +859,5 @@ module.exports = {
   getPauseRemaining,
   isPausableVoucherType,
   getSessionByVoucher,
+  applySessionRateLimit,
 };

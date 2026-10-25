@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS vouchers (
     type            VARCHAR(16) NOT NULL DEFAULT 'standard', -- 'standard' | 'premium'
     duration_minutes INTEGER NOT NULL DEFAULT 60,
     price           INTEGER, -- fixed price in centavos; NULL = use dynamic pricing
+    down_kbps       INTEGER, -- per-voucher download cap in Kbps; NULL = tier/default caps
+    up_kbps         INTEGER, -- per-voucher upload cap in Kbps; NULL = tier/default caps
     state           VARCHAR(16) NOT NULL DEFAULT 'active', -- 'active' | 'claimed' | 'used' | 'expired'
     assigned_ref_no VARCHAR(64), -- full payment ref_no this voucher was claimed for; NULL = unclaimed (see migrate_add_voucher_ref.js)
     used_by_mac     VARCHAR(32),
@@ -38,6 +40,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     ssid_name           VARCHAR(64),
     duration_minutes    INTEGER NOT NULL DEFAULT 60,
     voucher_type        VARCHAR(16) NOT NULL DEFAULT 'standard', -- 'standard' | 'premium'
+    -- Bandwidth snapshot taken from the voucher at authorization time, in Kbps.
+    -- Kept on the session so a re-authorization / resume re-applies exactly the
+    -- cap the guest paid for, even if the voucher row changes afterwards.
+    down_kbps           INTEGER,
+    up_kbps             INTEGER,
     total_duration_seconds INTEGER, -- preserves original duration for premium remaining-time tracking
     started_at          TIMESTAMP,
     expires_at          TIMESTAMP,

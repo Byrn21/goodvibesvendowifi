@@ -837,6 +837,71 @@ async function setClientRateLimit(ctx) {
 }
 
 /**
+ * How long to wait before the single retry of a rejected rate-limit call.
+ *
+ * The cloud indexes a freshly authorized client asynchronously: an immediate
+ * PATCH can be answered as if the client did not exist yet. The payment routes
+ * avoid that by ALWAYS sleeping AUTHORIZE_INDEX_DELAY_MS before the call; the
+ * voucher flow cannot afford that delay on every login, so it retries once
+ * instead — only when the first attempt actually fails.
+ */
+const RATE_LIMIT_RETRY_DELAY_MS = 2000;
+
+// Failures that are OUR fault (bad input, unusable configuration) — retrying
+// them just doubles the time to surface the same error.
+const NO_RETRY_RATE_LIMIT_CODES = new Set([
+  'OMADA_NORTHBOUND_INVALID_MAC',
+  'OMADA_NORTHBOUND_MISSING_FIELD',
+  'OMADA_NORTHBOUND_INVALID_LIMIT',
+  'OMADA_NORTHBOUND_CONFIG_ERROR',
+]);
+
+/** Promise-based sleep (local; keeps the retry awaitable). */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Apply a bandwidth cap, retrying once when the controller rejects the first
+ * attempt because the client is not indexed yet.
+ *
+ * Thin wrapper around setClientRateLimit() for callers that authorize a guest
+ * and cap it in the same request (the voucher login and the session re-auth /
+ * resume paths). Payment routes keep their own upfront index delay.
+ *
+ * @param {Object} ctx  same shape as setClientRateLimit()
+ * @returns {Promise<Object>} { success, clientMac, applied, retried?, mock? }
+ * @throws the controller/config error when the retry also fails
+ */
+async function applyClientRateLimit(ctx) {
+  logResolvedConfig();
+
+  // setClientRateLimit() answers { success, applied } WITHOUT touching the
+  // network when the module is in mock mode (no base URL / MOCK=true), so a
+  // caller must be able to tell "capped" apart from "pretended to cap".
+  const mocked = resolveConfig().mock;
+
+  const attempt = async (retried) => {
+    const result = await setClientRateLimit(ctx);
+    return Object.assign({}, result, mocked ? { mock: true } : {}, { retried });
+  };
+
+  try {
+    return await attempt(false);
+  } catch (err) {
+    if (err && NO_RETRY_RATE_LIMIT_CODES.has(err.code)) throw err;
+
+    console.warn(
+      '[omada-nb] rate limit rejected for ' + String(ctx && ctx.clientMac) +
+      ' (' + ((err && err.message) || 'unknown error') + ') — retrying in ' +
+      RATE_LIMIT_RETRY_DELAY_MS + 'ms after the cloud finishes indexing the client'
+    );
+    await sleep(RATE_LIMIT_RETRY_DELAY_MS);
+    return attempt(true);
+  }
+}
+
+/**
  * Resolve the site list — used once during setup to obtain the numeric siteId.
  *
  * @returns {Promise<Array<{siteId:string,name:string}>>}
@@ -871,6 +936,7 @@ module.exports = {
   // Supporting calls
   extendClientPeriod,
   setClientRateLimit,
+  applyClientRateLimit,
   getAuthedRecords,
   findAuthRecordByMac,
   listSites,

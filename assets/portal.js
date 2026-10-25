@@ -586,6 +586,16 @@
           resolve({
             redirectUrl: data.redirectUrl || ctx.redirectUrl,
             sessionId: data.sessionId,
+            // Session timing echoed by POST /api/auth from the committed row.
+            // Carried to success.html so the "time remaining" box renders the
+            // real value immediately instead of waiting on a status poll.
+            clientMac:       data.clientMac || '',
+            startedAt:       data.startedAt || '',
+            expiresAt:       data.expiresAt || '',
+            durationMinutes: data.durationMinutes || 0,
+            totalSeconds:    data.totalSeconds || 0,
+            remainingSeconds: (data.session && data.session.remainingSeconds) || 0,
+            voucherType:     (data.session && data.session.voucherType) || '',
             // Set when the backend resumed a paused Premium session instead of
             // redeeming a fresh voucher (login-with-existing-voucher flow).
             resumed: data.resumed === true,
@@ -659,15 +669,30 @@
       // live session page. Its countdown reads the remaining time the backend
       // just re-authorized, so the timer continues from where it left off.
       var statusPage = CONFIG.statusPage || 'status.html';
-      target = statusPage + '?sessionId=' + encodeURIComponent(result.sessionId);
+      target = statusPage + '?sessionId=' + encodeURIComponent(result.sessionId) +
+        (queryParams.clientMac
+          ? '&clientMac=' + encodeURIComponent(normalizeMac(queryParams.clientMac) || queryParams.clientMac)
+          : '');
     } else {
       // Build success URL with redirect and session info
       var params = new URLSearchParams();
       if (result.redirectUrl) params.set('redirectUrl', encodeURIComponent(result.redirectUrl));
       if (result.sessionId)   params.set('sessionId', result.sessionId);
-      if (queryParams.clientMac) {
-        params.set('clientMac', normalizeMac(queryParams.clientMac) || queryParams.clientMac);
-      }
+      var mac = queryParams.clientMac
+        ? (normalizeMac(queryParams.clientMac) || queryParams.clientMac)
+        : (result.clientMac || '');
+      if (mac) params.set('clientMac', mac);
+
+      // Session timing: success.html renders its countdown from these, so the
+      // page agrees with the row POST /api/auth just committed. `duration` is
+      // minutes (used only when no absolute expiry is available); `expiresAt`
+      // is the authoritative ISO timestamp.
+      if (result.expiresAt) params.set('expiresAt', result.expiresAt);
+      if (result.startedAt) params.set('startedAt', result.startedAt);
+      if (result.durationMinutes) params.set('duration', String(result.durationMinutes));
+      if (result.totalSeconds) params.set('totalSeconds', String(result.totalSeconds));
+      if (result.remainingSeconds) params.set('remaining', String(result.remainingSeconds));
+      if (result.voucherType) params.set('voucherType', result.voucherType);
       params.set('countdown', '3');
 
       // Carry Omada's originUrl (the URL the guest first tried to open) through
@@ -2248,6 +2273,13 @@
       var params = new URLSearchParams();
       params.set('sessionId', data.sessionId);
       params.set('clientMac', normalizeMac(clientMac) || clientMac);
+      // Remaining/expiry come straight from the re-authorized session so the
+      // success page's countdown matches the database instead of showing “—”.
+      if (data.expiresAt) params.set('expiresAt', data.expiresAt);
+      if (typeof data.remainingSeconds === 'number') {
+        params.set('remaining', String(data.remainingSeconds));
+      }
+      if (data.voucherType) params.set('voucherType', data.voucherType);
       params.set('countdown', '3');
       var target = (CONFIG.successPage || 'success.html') + '?' + params.toString();
 
