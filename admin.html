@@ -97,8 +97,11 @@
             <h3>Recent Transactions</h3>
             <button type="button" class="btn btn--danger" id="transactions-clear-all">Clear All</button>
           </div>
-          <div class="admin-table-container" id="transactions-table">
-            <p class="muted">Loading&hellip;</p>
+          <div class="admin-table-container" id="transactions-table" aria-busy="true">
+            <div class="loading-container" role="status" aria-live="polite">
+              <div class="spinner" aria-hidden="true"></div>
+              <p class="muted">Loading&hellip;</p>
+            </div>
           </div>
           <div class="admin-pagination" id="transactions-pagination">
             <button type="button" class="btn btn--secondary" id="transactions-prev" disabled>Previous</button>
@@ -107,9 +110,12 @@
           </div>
         </div>
 
-        <div id="dashboard-chart">
+        <div id="dashboard-chart" aria-busy="true">
           <h3>Voucher Status Breakdown</h3>
-          <canvas id="stats-chart" width="400" height="200"></canvas>
+          <div class="loading-container" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <p class="muted">Loading dashboard&hellip;</p>
+          </div>
         </div>
       </div>
 
@@ -120,13 +126,23 @@
           <button type="button" class="btn btn--danger" id="btn-delete-all" disabled>Delete All Vouchers</button>
         </div>
         <div id="delete-all-msg"></div>
-        <div id="tab-vouchers"></div>
+        <div id="tab-vouchers" aria-busy="true">
+          <div class="loading-container" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <p class="muted">Loading&hellip;</p>
+          </div>
+        </div>
       </div>
 
       <!-- Sessions Section -->
       <div class="admin-card content-section" id="section-sessions">
         <h2>Sessions</h2>
-        <div id="tab-sessions"></div>
+        <div id="tab-sessions" aria-busy="true">
+          <div class="loading-container" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <p class="muted">Loading&hellip;</p>
+          </div>
+        </div>
       </div>
 
       <!-- Import Section -->
@@ -359,16 +375,18 @@
 
       function loadVouchers() {
         if (!els.tabVouchers) return;
-        els.tabVouchers.innerHTML = '<p class="muted">Loadingâ€¦</p>';
+        setTableLoading(els.tabVouchers, 'Loading vouchers\u2026');
         api('/api/admin/vouchers')
           .then(function (res) {
             if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load vouchers');
             var vouchers = res.data.vouchers || [];
             els.tabVouchers.innerHTML = renderVouchers(vouchers);
+            setTableReady(els.tabVouchers);
             updateDeleteAllState(vouchers.length);
           })
           .catch(function (err) {
-            els.tabVouchers.innerHTML = '<p class="error-msg">' + err.message + '</p>';
+            els.tabVouchers.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
+            setTableReady(els.tabVouchers);
             updateDeleteAllState(0);
           });
       }
@@ -410,7 +428,7 @@
         if (!els.deleteAllConfirm || els.deleteAllConfirm.disabled) return;
         // Loading state - prevents double clicks while the request runs
         els.deleteAllConfirm.disabled = true;
-        els.deleteAllConfirm.textContent = 'Deletingâ€¦';
+        els.deleteAllConfirm.textContent = 'Deleting\u2026';
         if (els.deleteAllError) {
           els.deleteAllError.hidden = true;
         }
@@ -475,7 +493,7 @@
         if (!confirm('Are you sure you want to delete this voucher? This action cannot be undone.')) return;
         if (btn) {
           btn.classList.add('btn--danger--loading');
-          btn.textContent = 'Deletingâ€¦';
+          btn.textContent = 'Deleting\u2026';
           btn.disabled = true;
         }
         api('/api/admin/vouchers/' + id, { method: 'DELETE' })
@@ -502,15 +520,17 @@
 
       function loadSessions() {
         if (!els.tabSessions) return;
-        els.tabSessions.innerHTML = '<p class="muted">Loadingâ€¦</p>';
+        setTableLoading(els.tabSessions, 'Loading sessions\u2026');
         api('/api/admin/sessions')
           .then(function (res) {
             if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load sessions');
             var sessions = res.data.sessions || [];
             els.tabSessions.innerHTML = renderSessions(sessions);
+            setTableReady(els.tabSessions);
           })
           .catch(function (err) {
-            els.tabSessions.innerHTML = '<p class="error-msg">' + err.message + '</p>';
+            els.tabSessions.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
+            setTableReady(els.tabSessions);
           });
       }
 
@@ -539,7 +559,7 @@
         if (!confirm('Expire this session?')) return;
         if (btn) {
           btn.classList.add('btn--expire--loading');
-          btn.textContent = 'Expiringâ€¦';
+          btn.textContent = 'Expiring\u2026';
           btn.disabled = true;
         }
         api('/api/admin/sessions/' + encodeURIComponent(sessionId) + '/expire', { method: 'POST' })
@@ -567,6 +587,29 @@
         if (!str) return '';
         var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
         return String(str).replace(/[&<>"']/g, function (c) { return map[c]; });
+      }
+
+      // ---- Pending state for the admin data containers ----
+      // Every admin view that waits on a /api/admin/... response must clear its
+      // container and show this spinner *before* the request starts. Against the
+      // remote Supabase database the round trip is long enough to be seen, so an
+      // empty or half-written container would flash stale/placeholder markup in
+      // the DOM while the fetch is still pending.
+      function setTableLoading(container, message) {
+        if (!container) return;
+        container.setAttribute('aria-busy', 'true');
+        container.innerHTML =
+          '<div class="loading-container" role="status" aria-live="polite">' +
+            '<div class="spinner" aria-hidden="true"></div>' +
+            '<p class="muted">' + escapeHtml(message || 'Loading\u2026') + '</p>' +
+          '</div>';
+      }
+
+      // Called once the response has been parsed and injected, or an error has
+      // been rendered, so assistive tech stops announcing the container as busy.
+      function setTableReady(container) {
+        if (!container) return;
+        container.removeAttribute('aria-busy');
       }
 
       function formatPrice(amount) {
@@ -708,11 +751,7 @@
         var attempt = 0;
 
         function showLoading(msg) {
-          els.dashboardChart.innerHTML =
-            '<div class="loading-container">' +
-            '<div class="spinner"></div>' +
-            '<p class="muted">' + msg + '</p>' +
-            '</div>';
+          setTableLoading(els.dashboardChart, msg);
         }
 
         function fetchStats() {
@@ -746,6 +785,7 @@
               }
 
               els.dashboardChart.innerHTML = '<canvas id="stats-chart" width="400" height="200"></canvas>';
+              setTableReady(els.dashboardChart);
               var ctx = document.getElementById('stats-chart').getContext('2d');
 
               new Chart(ctx, {
@@ -774,8 +814,10 @@
                   '<p class="muted">The server is busy (rate limited). ' +
                   '<a href="javascript:loadDashboard()">Refresh now</a> ' +
                   'or try again in a few minutes.</p>';
+                setTableReady(els.dashboardChart);
               } else {
                 els.dashboardChart.innerHTML = '<p class="error-msg">Failed to load stats: ' + err.message + '</p>';
+                setTableReady(els.dashboardChart);
               }
             });
         }
@@ -831,7 +873,7 @@
       function loadTransactions(page) {
         page = page || 1;
         if (!els.transactionsTable) return;
-        els.transactionsTable.innerHTML = '<p class="muted">Loading\u2026</p>';
+        setTableLoading(els.transactionsTable, 'Loading transactions\u2026');
         api('/api/admin/transactions?page=' + page + '&limit=' + TRANSACTIONS_LIMIT)
           .then(function (res) {
             if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load transactions');
@@ -841,10 +883,12 @@
             transactionsPage = pagination.currentPage || page;
             transactionsTotalPages = pagination.totalPages || 1;
             els.transactionsTable.innerHTML = renderTransactions(transactions);
+            setTableReady(els.transactionsTable);
             updateTransactionsPagination(transactionsPage, transactionsTotalPages);
           })
           .catch(function (err) {
             els.transactionsTable.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
+            setTableReady(els.transactionsTable);
             transactionsPage = 1;
             transactionsTotalPages = 1;
             updateTransactionsPagination(1, 1);
