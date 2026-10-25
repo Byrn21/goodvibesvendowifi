@@ -459,9 +459,12 @@ describe('QoS transport routing (OMADA_QOS_METHOD)', () => {
   let localSpy;
 
   beforeEach(() => {
-    // A local controller is configured, so 'auto' may use the web-API route.
+    // A local controller is configured WITH an administrator account, so
+    // 'auto' may use the web-API route (it needs site/QoS rights).
     process.env.OMADA_BASE_URL = 'https://192.168.0.253:8043';
     process.env.OMADA_MOCK = 'false';
+    process.env.OMADA_ADMIN_NAME = 'controller-admin';
+    process.env.OMADA_ADMIN_PASSWORD = 'admin-secret';
     delete process.env.OMADA_QOS_METHOD;
     _internal.resetLocalQosBlock();
     localSpy = jest.spyOn(omadaLocal, 'setClientRateLimit');
@@ -472,6 +475,8 @@ describe('QoS transport routing (OMADA_QOS_METHOD)', () => {
     delete process.env.OMADA_QOS_METHOD;
     delete process.env.OMADA_BASE_URL;
     delete process.env.OMADA_MOCK;
+    delete process.env.OMADA_ADMIN_NAME;
+    delete process.env.OMADA_ADMIN_PASSWORD;
     _internal.resetLocalQosBlock();
   });
 

@@ -43,8 +43,9 @@
  *                downEnable, downUnit, downLimit } }   (mode 1 = named profile)
  *      This is the same operation the controller's own UI performs and the
  *      same one the Open API exposes as `updateClientRateLimitSetting` — it
- *      is simply reached through the WEB API with the operator session
- *      (cookie + Csrf-Token) instead of an OAuth access token. That matters
+ *      is simply reached through the WEB API with an ADMINISTRATOR session
+ *      (cookie + Csrf-Token from OMADA_ADMIN_*) instead of an OAuth access
+ *      token — the portal operator account has no site/QoS rights. That matters
  *      because the local Open API route needs controller firmware that
  *      supports it (v5.12+) and an Open API application created ON THE
  *      CONTROLLER; on a stock OC200 the OAuth token endpoint can answer
@@ -52,14 +53,36 @@
  *      under /openapi/v1/... (the Open API router accepting the web session,
  *      exactly as the controller UI calls it) is tried second.
  *
+ * TWO CREDENTIAL SETS (never interchangeable):
+ *
+ *   portal operator (OMADA_PORTAL_OPERATOR_*) — a Hotspot portal operator.
+ *     Logs in through /hotspot/login and may ONLY authorize/de-authorize
+ *     clients on /hotspot/extPortal/*. It holds no site privileges, so
+ *     GET /users/current returns zero sites and the controller answers the
+ *     rate-limit PATCH with a permission error.
+ *
+ *   administrator (OMADA_ADMIN_*) — a controller administrator account.
+ *     Logs in through /login (the controller's own web-UI login) and is the
+ *     ONLY account that may read the site list (GET /sites, /users/current)
+ *     or PATCH a client rate limit. Omada refuses administrator accounts on
+ *     the hotspot portal endpoints, which is why both sets are required.
+ *
+ * Each set keeps its own session (cookie jar + Csrf-Token). Logging in as an
+ * administrator must never displace the portal operator session used for
+ * extPortal/auth, and vice versa.
+ *
  * Configuration (from .env):
  *   OMADA_BASE_URL                  — e.g. https://omada-tunnel.example.com
  *   OMADA_OMADAC_ID                 — controller ID (OMADAC ID)
  *   OMADA_SITE                      — site name (default "Default"); sent in
  *                                     the body of EVERY hotspot call and
  *                                     echoed in the [omada] startup log
- *   OMADA_PORTAL_OPERATOR_NAME      — hotspot portal operator username
+ *   OMADA_PORTAL_OPERATOR_NAME      — hotspot portal operator username; used
+ *                                     ONLY for /hotspot/login + extPortal/*
  *   OMADA_PORTAL_OPERATOR_PASSWORD  — hotspot portal operator password
+ *   OMADA_ADMIN_NAME                — controller administrator username; used
+ *                                     ONLY for site queries and QoS PATCHes
+ *   OMADA_ADMIN_PASSWORD            — controller administrator password
  *   OMADA_AUTH_TIMEOUT              — request timeout ms (default 10000)
  *   OMADA_TLS_REJECT                — "true" enforces full cert validation;
  *                                     default "false" accepts the controller's
@@ -81,8 +104,17 @@ const { normalizeMac: normalizeDeviceMac } = require('../utils/device-id');
 const BASE_URL   = process.env.OMADA_BASE_URL || '';
 const OMADAC_ID  = process.env.OMADA_OMADAC_ID || '';
 const SITE       = process.env.OMADA_SITE     || 'Default';
+// Portal operator — captive-portal authorization ONLY (/hotspot/login and
+// /hotspot/extPortal/*). Never used for site queries or QoS: this account has
+// no site privileges, which is why the controller returns 0 sites for it.
 const OPERATOR_NAME = process.env.OMADA_PORTAL_OPERATOR_NAME || '';
 const OPERATOR_PASSWORD = process.env.OMADA_PORTAL_OPERATOR_PASSWORD || '';
+
+// Controller ADMINISTRATOR — privileged calls ONLY (site list + client
+// rate-limit PATCH). Omada will not accept an administrator on the hotspot
+// portal endpoints, so it cannot replace the operator credentials above.
+const ADMIN_NAME = process.env.OMADA_ADMIN_NAME || '';
+const ADMIN_PASSWORD = process.env.OMADA_ADMIN_PASSWORD || '';
 const TIMEOUT    = parseInt(process.env.OMADA_AUTH_TIMEOUT || '10000', 10);
 // OC200/ER605 controllers present a SELF-SIGNED certificate. From a cloud
 // backend (Render) the default Node TLS behavior rejects it during the
@@ -102,10 +134,22 @@ const CONTROLLER_REFERER = CONTROLLER_ORIGIN + '/';
 // In mock/test mode, simulate controller responses
 const MOCK_MODE = process.env.OMADA_MOCK === 'true' || !BASE_URL;
 
-// ── Controller session state (operator login) ──────────────────────────
-// Cookie + CSRF token are obtained once via hotspot/login and reused;
-// a 401 from the controller invalidates and re-establishes the session.
-let csrfToken = null;
+// ── Controller sessions (one per credential set) ───────────────────────
+// A controller session is a loose cookie store + the CSRF token returned by
+// its login. There is one per credential set, because an administrator login
+// and a hotspot portal login are separate accounts with separate privileges:
+//
+//   portalSession — OMADA_PORTAL_OPERATOR_* (hotspot/login); extPortal/*.
+//   adminSession  — OMADA_ADMIN_* (/login); site queries + QoS PATCHes.
+//
+// Cookie + CSRF token are obtained once per session and reused; a 401 from the
+// controller invalidates and re-establishes THAT session only.
+function createSession(label) {
+  return { label, cookies: new Map(), csrfToken: null };
+}
+
+const portalSession = createSession('portal-operator');
+const adminSession = createSession('admin');
 
 // ── Cookie store (loose mode) ──────────────────────────────────────────
 // The controller is reached through a Cloudflare Tunnel, so the cookie's
@@ -116,15 +160,15 @@ let csrfToken = null;
 // name=value pairs and never validates Domain/Path/Secure — the moral
 // equivalent of tough-cookie's `looseMode` — so a proxied Set-Cookie is
 // always retained and replayed.
-const sessionCookies = new Map();
 
 /**
- * Absorb Set-Cookie response header(s) into the loose cookie store.
+ * Absorb Set-Cookie response header(s) into a session's loose cookie store.
  * Attributes (Domain, Path, Secure, HttpOnly, SameSite, …) are ignored.
  *
+ * @param {Object} session                portalSession | adminSession
  * @param {string|string[]|null} setCookieHeader  res.headers['set-cookie']
  */
-function absorbSetCookie(setCookieHeader) {
+function absorbSetCookie(session, setCookieHeader) {
   if (!setCookieHeader) return;
   const list = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
   for (const entry of list) {
@@ -136,18 +180,19 @@ function absorbSetCookie(setCookieHeader) {
     const value = pair.slice(eq + 1).trim();
     if (!name) continue;
     // An empty value is how the controller clears a cookie (Max-Age=0/Expires past).
-    if (!value) sessionCookies.delete(name);
-    else sessionCookies.set(name, value);
+    if (!value) session.cookies.delete(name);
+    else session.cookies.set(name, value);
   }
 }
 
 /**
- * Build the Cookie request header from the stored pairs.
+ * Build the Cookie request header from a session's stored pairs.
+ * @param {Object} session  portalSession | adminSession
  * @returns {string|null}
  */
-function cookieHeaderValue() {
-  if (sessionCookies.size === 0) return null;
-  return Array.from(sessionCookies.entries())
+function cookieHeaderValue(session) {
+  if (session.cookies.size === 0) return null;
+  return Array.from(session.cookies.entries())
     .map(([name, value]) => name + '=' + value)
     .join('; ');
 }
@@ -170,20 +215,21 @@ function minutesToTime(minutes) {
 }
 
 /**
- * Perform hotspot operator login. Establishes the controller session
- * (cookie) and stores the CSRF token from result.token.
+ * Perform a controller login that establishes a session (cookie jar + CSRF
+ * token) for the given credential set.
  *
+ * @param {Object} session      portalSession | adminSession
+ * @param {string} path         login path (differs per credential set)
+ * @param {string} body         JSON credentials body
+ * @param {string} label        human-readable account kind for errors
  * @returns {Promise<void>} resolves on success, throws on failure
  */
-async function operatorLogin() {
-  const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/hotspot/login';
-  const body = JSON.stringify({ name: OPERATOR_NAME, password: OPERATOR_PASSWORD });
-
-  const response = await omadaRequest(path, 'POST', body, { skipAuth: true });
+async function performLogin(session, path, body, label) {
+  const response = await omadaRequest(path, 'POST', body, { skipAuth: true, session });
 
   if (response.statusCode !== 200 || !response.body || response.body.errorCode !== 0) {
     const err = new Error(
-      'Omada hotspot operator login failed: ' +
+      'Omada ' + label + ' login failed: ' +
       (response.body && (response.body.msg || response.body.message) || ('HTTP ' + response.statusCode))
     );
     err.code = 'OMADA_LOGIN_FAILED';
@@ -191,30 +237,82 @@ async function operatorLogin() {
     throw err;
   }
 
-  // The login cookie was already absorbed into the loose cookie store by
-  // omadaRequest (see absorbSetCookie); only the CSRF token is kept here.
-  csrfToken = response.body.result && response.body.result.token;
-  if (!csrfToken) {
-    const err = new Error('Omada hotspot login response missing result.token');
+  // The login cookie was already absorbed into this session's loose cookie
+  // store by omadaRequest (see absorbSetCookie); only the CSRF token is kept
+  // here. It is stored PER SESSION: the two logins return different tokens.
+  session.csrfToken = response.body.result && response.body.result.token;
+  if (!session.csrfToken) {
+    const err = new Error('Omada ' + label + ' login response missing result.token');
     err.code = 'OMADA_LOGIN_FAILED';
     throw err;
   }
 }
 
-/** Invalidate the cached controller session (forces re-login next call). */
-function invalidateSession() {
-  sessionCookies.clear();
-  csrfToken = null;
+/**
+ * Log in as the hotspot PORTAL OPERATOR.
+ * Establishes portalSession (cookie) and stores its CSRF token.
+ *
+ * This credential set is used ONLY for /hotspot/extPortal/* calls: it has no
+ * site privileges, so it cannot read the site list or set bandwidth caps.
+ *
+ * @returns {Promise<void>} resolves on success, throws on failure
+ */
+async function operatorLogin() {
+  const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/hotspot/login';
+  const body = JSON.stringify({ name: OPERATOR_NAME, password: OPERATOR_PASSWORD });
+  await performLogin(portalSession, path, body, 'hotspot operator');
 }
 
 /**
- * Ensure a valid controller session exists, logging in if necessary.
+ * Log in as the controller ADMINISTRATOR through the web-UI login endpoint.
+ * Establishes adminSession (cookie) and stores its CSRF token.
+ *
+ * Administrator rights are required for EVERY privileged call: reading the
+ * site list and PATCHing a client rate limit. Omada refuses administrator
+ * accounts on the hotspot portal endpoints, hence a separate session.
+ *
+ * @returns {Promise<void>} resolves on success, throws on failure
+ */
+async function adminLogin() {
+  if (!ADMIN_NAME || !ADMIN_PASSWORD) {
+    throw configError(
+      'OMADA_ADMIN_NAME / OMADA_ADMIN_PASSWORD are not configured — the site ' +
+      'list and bandwidth caps require a controller administrator account ' +
+      '(the portal operator has no site/QoS privileges)'
+    );
+  }
+  const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/login';
+  const body = JSON.stringify({ username: ADMIN_NAME, password: ADMIN_PASSWORD });
+  await performLogin(adminSession, path, body, 'administrator');
+}
+
+/**
+ * Invalidate one controller session (forcing a re-login on next use).
+ * With no argument, both sessions are cleared (per-credential-set invalidation
+ * happens on a 401 so the other session's cookie is never thrown away).
+ *
+ * @param {Object} [session]  portalSession | adminSession
+ */
+function invalidateSession(session) {
+  for (const target of (session ? [session] : [portalSession, adminSession])) {
+    target.cookies.clear();
+    target.csrfToken = null;
+  }
+}
+
+/**
+ * Ensure a valid controller session exists for a credential set, logging in
+ * if it is missing (or unconditionally with { force: true }).
+ *
+ * @param {Object} session  portalSession | adminSession
+ * @param {Object} [opts]   { force } — re-login even when a session exists
  * @returns {Promise<void>}
  */
-async function ensureSession() {
-  if (sessionCookies.size === 0 || !csrfToken) {
-    await operatorLogin();
-  }
+async function ensureSession(session, opts) {
+  const force = Boolean(opts && opts.force);
+  if (!force && session.cookies.size > 0 && session.csrfToken) return;
+  if (session === adminSession) await adminLogin();
+  else await operatorLogin();
 }
 
 /**
@@ -303,7 +401,7 @@ async function authenticateClient(ctx) {
 
   let response;
   try {
-    response = await withSession(() => omadaRequest(path, 'POST', body));
+    response = await requestWithSession(portalSession, path, 'POST', body);
   } catch (netErr) {
     // Network / TLS / timeout — log the EXACT reason for the Render logs,
     // including the body that was sent (connection type / site / time), then
@@ -388,7 +486,7 @@ async function unauthenticateClient(ctx) {
 
   let unauthOk = false;
   try {
-    const response = await withSession(() => omadaRequest(unauthPath, 'POST', body));
+    const response = await requestWithSession(portalSession, unauthPath, 'POST', body);
     unauthOk = response.statusCode === 200 && response.body && response.body.errorCode === 0;
     console.log(
       '[omada] extPortal/unauth for ' + ctx.clientMac + ' → ' +
@@ -451,7 +549,7 @@ async function queryClientStatus(ctx) {
     site: SITE,
   });
 
-  const response = await withSession(() => omadaRequest(path, 'POST', body));
+  const response = await requestWithSession(portalSession, path, 'POST', body);
   if (response.statusCode !== 200 || !response.body || response.body.errorCode !== 0) {
     return null;
   }
@@ -488,7 +586,7 @@ async function timeOneFallback(ctx) {
   const body = JSON.stringify(fallbackBody);
 
   try {
-    const response = await withSession(() => omadaRequest(path, 'POST', body));
+    const response = await requestWithSession(portalSession, path, 'POST', body);
     const ok = response.statusCode === 200 && response.body && response.body.errorCode === 0;
     console.log('[omada] time=1 fallback for ' + ctx.clientMac + ' → ' + (ok ? 'accepted' : 'rejected'));
     return ok;
@@ -499,20 +597,24 @@ async function timeOneFallback(ctx) {
 }
 
 /**
- * Run a controller request with session handling: ensures login, and on
- * a 401 invalidates the session and retries once with a fresh login.
+ * Run a controller request on a specific credential set's session: ensures
+ * that session's login, and on a 401 invalidates and retries once with a
+ * fresh login — without touching the other credential set's session.
  *
- * @param {Function} fn  () => omadaRequest(...)
+ * @param {Object} session  portalSession (extPortal/*) | adminSession (QoS, sites)
+ * @param {string} path
+ * @param {string} method
+ * @param {string} [body]
  * @returns {Promise<Object>} omadaRequest response
  */
-async function withSession(fn) {
-  await ensureSession();
-  let response = await fn();
+async function requestWithSession(session, path, method, body) {
+  await ensureSession(session);
+  let response = await omadaRequest(path, method, body, { session });
   if (response.statusCode === 401) {
-    console.warn('[omada] controller session expired — re-logging in');
-    invalidateSession();
-    await ensureSession();
-    response = await fn();
+    console.warn('[omada] ' + session.label + ' session expired — re-logging in');
+    invalidateSession(session);
+    await ensureSession(session);
+    response = await omadaRequest(path, method, body, { session });
   }
   return response;
 }
@@ -728,7 +830,8 @@ function logResolvedConfig(force) {
     ' timeUnit=' + OMADA_TIME_UNIT +
     ' timeout=' + TIMEOUT + 'ms' +
     ' tlsRejectUnauthorized=' + TLS_REJECT +
-    ' operator=' + (OPERATOR_NAME || '(unset)')
+    ' operator=' + (OPERATOR_NAME || '(unset)') +
+    ' admin=' + (ADMIN_NAME || '(unset)')
   );
 
   if (MOCK_MODE) {
@@ -750,6 +853,9 @@ function logResolvedConfig(force) {
   if (!OPERATOR_NAME || !OPERATOR_PASSWORD) {
     problems.push('OMADA_PORTAL_OPERATOR_NAME/PASSWORD unset — hotspot login will fail');
   }
+  if (!ADMIN_NAME || !ADMIN_PASSWORD) {
+    problems.push('OMADA_ADMIN_NAME/PASSWORD unset — site queries and bandwidth caps will fail');
+  }
   if (/example\.com/i.test(BASE_URL) || /your-/i.test(OMADAC_ID)) {
     problems.push('a value is still the .env.example placeholder (base=' +
       maskHost(BASE_URL) + ' omadacId=' + (OMADAC_ID || '(unset)') + ')');
@@ -759,7 +865,7 @@ function logResolvedConfig(force) {
   }
 
   if (problems.length) {
-    console.error('[omada] CONFIG PROBLEMS (' + problems.length + ') — extPortal/auth will likely fail:');
+    console.error('[omada] CONFIG PROBLEMS (' + problems.length + ') — Omada calls will likely fail:');
     problems.forEach((p) => console.error('[omada]   - ' + p));
   } else {
     console.log('[omada] config looks complete');
@@ -795,6 +901,12 @@ function logControllerRequest(method, path, body, opts) {
 // Internal: HTTP request to Omada controller (session-aware)
 // ================================================================
 function omadaRequest(path, method, body, opts) {
+  // Which credential set carries this request. Every privileged call (site
+  // queries, QoS) passes adminSession explicitly; hotspot calls pass
+  // portalSession. The default stays the portal session so an unannotated
+  // hotspot call can never accidentally run as the administrator.
+  const session = (opts && opts.session) || portalSession;
+
   return new Promise((resolve, reject) => {
     if (!BASE_URL) {
       reject(configError('OMADA_BASE_URL is not configured'));
@@ -836,12 +948,12 @@ function omadaRequest(path, method, body, opts) {
     // OMADAC_ID) into the logs, so the Render output shows what was sent.
     logControllerRequest(method, path, body, opts);
 
-    // Attach controller session (cookie) and CSRF token when present.
-    // Login itself (opts.skipAuth) carries no session credentials.
+    // Attach THIS session's cookie and CSRF token when present. Login itself
+    // (opts.skipAuth) carries no session credentials.
     if (!(opts && opts.skipAuth)) {
-      const cookie = cookieHeaderValue();
+      const cookie = cookieHeaderValue(session);
       if (cookie) options.headers['Cookie'] = cookie;
-      if (csrfToken) options.headers['Csrf-Token'] = csrfToken;
+      if (session.csrfToken) options.headers['Csrf-Token'] = session.csrfToken;
     }
 
     const req = client.request(options, (res) => {
@@ -854,11 +966,12 @@ function omadaRequest(path, method, body, opts) {
         } catch {
           parsedBody = { raw: data };
         }
-        // Capture the controller session cookie for subsequent requests.
-        // Stored in loose mode: Domain/Path from the tunneled response are
-        // not enforced, so the cookie survives the host mismatch.
+        // Capture the cookie for THIS session only. Stored in loose mode:
+        // Domain/Path from the tunneled response are not enforced, so the
+        // cookie survives the host mismatch. Keeping the jars separate means
+        // an administrator login cannot displace the portal operator cookie.
         const setCookieHeader = res.headers['set-cookie'];
-        absorbSetCookie(setCookieHeader);
+        absorbSetCookie(session, setCookieHeader);
         resolve({
           statusCode: res.statusCode,
           body: parsedBody,
@@ -893,7 +1006,7 @@ function omadaRequest(path, method, body, opts) {
 }
 
 // ================================================================
-// QoS — per-client bandwidth cap through the WEB API (operator session)
+// QoS — per-client bandwidth cap through the WEB API (ADMIN session)
 // ================================================================
 // The Open API route (services/omada-northbound.js) needs a controller that
 // ships Open API (v5.12+) AND an Open API application created on the
@@ -902,10 +1015,15 @@ function omadaRequest(path, method, body, opts) {
 // so no cap is ever applied and every guest runs uncapped.
 //
 // The cap itself is not an Open API-only feature: the controller's UI sets it
-// through the v2 web API, authenticated by the SAME kind of session this
-// module already uses for extPortal/auth (cookie + Csrf-Token from the
-// hotspot operator login). That route works on any firmware that has the
-// feature at all, so it is what this module exposes for QoS.
+// through the v2 web API, authenticated by a session cookie + Csrf-Token.
+//
+// That session MUST belong to a controller ADMINISTRATOR (OMADA_ADMIN_*),
+// never to the hotspot portal operator: the operator account has no site
+// privileges, so GET /users/current returns 0 sites and the PATCH is refused
+// (the exact failure this module used to hit). Omada also refuses admin
+// accounts on /hotspot/extPortal/auth, which is why the two sessions exist.
+// The cap is therefore applied on a freshly-obtained admin session, while
+// guest authorization stays on the portal operator session.
 
 /**
  * Routes performing the same operation, tried in order.
@@ -966,6 +1084,10 @@ function siteEntries(response) {
 /**
  * Resolve OMADA_SITE (a name) to the site key/id the v2 client paths embed.
  *
+ * Runs on the ADMINISTRATOR session: only an account with site privileges is
+ * returned a non-empty site list by GET /users/current (or /sites). Using the
+ * portal operator here is what produced "0 sites".
+ *
  * Cached per process: the mapping only changes when the controller's site is
  * renamed, and a changed OMADA_SITE invalidates the cache (the cached name no
  * longer matches).
@@ -985,7 +1107,7 @@ async function resolveSiteKey() {
   let sites = [];
   for (const path of endpoints) {
     try {
-      const response = await withSession(() => omadaRequest(path, 'GET'));
+      const response = await requestWithSession(adminSession, path, 'GET');
       sites = siteEntries(response);
       if (sites.length) break;
     } catch (err) {
@@ -1002,7 +1124,10 @@ async function resolveSiteKey() {
   if (!key) {
     const err = new Error(
       'OMADA_SITE "' + SITE + '" did not match any site the controller returned (' +
-      sites.length + ' site(s)); the bandwidth cap cannot address a site'
+      sites.length + ' site(s)); the bandwidth cap cannot address a site' +
+      (sites.length === 0
+        ? ' — 0 sites usually means OMADA_ADMIN_NAME/OMADA_ADMIN_PASSWORD are not a controller administrator (the portal operator has no site privileges)'
+        : '')
     );
     err.code = 'OMADA_SITE_NOT_FOUND';
     err.omadaResponse = sites;
@@ -1036,9 +1161,12 @@ function rateLimitRejected(route, response) {
 /**
  * Apply a per-client bandwidth cap through the controller's web API.
  *
- * Runs on the hotspot operator session that already authorizes guests, so it
- * needs no Open API / OAuth credentials. Both routes perform the same
- * operation; the first accepted one is remembered and tried first afterwards.
+ * Privileged operation: it runs on a FRESH administrator session
+ * (OMADA_ADMIN_*), obtained at the start of every call, so a stale or
+ * operator-level cookie can never reach the PATCH. The portal operator
+ * session is deliberately not touched here — guest authorization keeps
+ * using it. Both routes perform the same operation; the first accepted one is
+ * remembered and tried first afterwards.
  *
  * @param {Object} ctx
  * @param {string} ctx.clientMac  Client MAC, any common format
@@ -1063,6 +1191,12 @@ async function setClientRateLimit(ctx) {
   }
   if (!OMADAC_ID) throw configError('OMADA_OMADAC_ID is not configured');
 
+  // Requirement for every privileged call: log in as the ADMINISTRATOR and
+  // use THAT cookie + Csrf-Token. Forced here (not merely "if missing") so a
+  // cached session that the controller has since demoted or expired cannot
+  // be the one that signs the PATCH. resolveSiteKey() reuses this session.
+  await ensureSession(adminSession, { force: true });
+
   const siteKey = await resolveSiteKey();
   // Path segments carry the hyphen-separated MAC (AA-BB-…) the controller's
   // URLs use; the BODY of a hotspot call uses colons, the path does not.
@@ -1082,8 +1216,9 @@ async function setClientRateLimit(ctx) {
 
     let response;
     try {
-      // PATCH — the verb the UI uses for a client-config change.
-      response = await withSession(() => omadaRequest(path, 'PATCH', body));
+      // PATCH — the verb the UI uses for a client-config change. Runs on the
+      // administrator session established above (fresh admin cookie + token).
+      response = await requestWithSession(adminSession, path, 'PATCH', body);
     } catch (err) {
       failures.push({ route: route.name, error: err });
       console.error('[omada/qos] ' + route.name + ' request failed for ' + canonical + ': ' + err.message);
@@ -1160,7 +1295,11 @@ module.exports = {
   _internal: {
     minutesToTime,
     operatorLogin,
+    adminLogin,
+    ensureSession,
     invalidateSession,
+    adminSession: () => adminSession,
+    portalSession: () => portalSession,
     RATE_LIMIT_ROUTES,
     siteEntries,
     rateLimitRejected,

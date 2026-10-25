@@ -83,10 +83,12 @@
  *   Integration → Open API). On a stock OC200 the OAuth token request can
  *   answer HTTP 500, so `updateClientRateLimitSetting` is unreachable and
  *   every guest stays uncapped. The SAME operation is available through the
- *   controller's web API on the hotspot operator session the backend already
- *   holds (services/omada.js → setClientRateLimit), which needs no OAuth at
- *   all. 'auto' therefore tries the web API first, then the Open API, and
- *   remembers a route that works.
+ *   controller's web API (services/omada.js → setClientRateLimit), which needs
+ *   no OAuth at all — but it requires a controller ADMINISTRATOR session
+ *   (OMADA_ADMIN_NAME / OMADA_ADMIN_PASSWORD), not the hotspot portal
+ *   operator: an operator account holds no site privileges (0 sites, no QoS
+ *   PATCH). 'auto' therefore tries the web API first when admin credentials
+ *   are configured, then the Open API, and remembers a route that works.
  */
 
 'use strict';
@@ -95,8 +97,9 @@ const https = require('https');
 const http = require('http');
 
 const { normalizeMac } = require('../utils/device-id');
-// The hotspot operator session client. It also owns the web-API bandwidth cap
-// (setClientRateLimit), which is the reliable route for a local controller.
+// The local controller web-API client: hotspot portal operator session for
+// guest authorization, administrator session for the bandwidth cap
+// (setClientRateLimit) — the reliable route for a local controller.
 const omadaLocal = require('./omada');
 
 // ── Regional API hosts (confirmed: the three published Northbound regions) ──
@@ -327,7 +330,12 @@ function logResolvedConfig(force) {
     if (localQosConfigured()) {
       console.warn(
         '[omada-nb] QoS (bandwidth caps) is applied through the controller web API at ' +
-        maskHost(env('OMADA_BASE_URL')) + ' — no OpenAPI credentials are needed'
+        maskHost(env('OMADA_BASE_URL')) + ' on the OMADA_ADMIN_* session — no OpenAPI credentials are needed'
+      );
+    } else if (env('OMADA_BASE_URL') && env('OMADA_MOCK') !== 'true') {
+      console.warn(
+        '[omada-nb] OMADA_BASE_URL is set but OMADA_ADMIN_NAME / OMADA_ADMIN_PASSWORD are not —' +
+        ' the local QoS route (site query + rate-limit PATCH) needs a controller administrator'
       );
     }
     return;
@@ -1034,9 +1042,19 @@ async function setClientRateLimitOpenApi(mac, body, siteId) {
 const LOCAL_QOS_BLOCK_MS = 10 * 60 * 1000;
 let localQosBlockedUntil = 0;
 
-/** Is a local web-API QoS attempt even possible for this deployment? */
+/**
+ * Is a local web-API QoS attempt even possible for this deployment?
+ *
+ * A reachable controller is not enough: the cap runs on a controller
+ * ADMINISTRATOR session (services/omada.js), and the hotspot portal operator
+ * account cannot read sites or set rate limits. Without admin credentials the
+ * local route would only fail, so it is not attempted.
+ */
 function localQosConfigured() {
-  return Boolean(env('OMADA_BASE_URL')) && env('OMADA_MOCK') !== 'true';
+  return Boolean(env('OMADA_BASE_URL')) &&
+    env('OMADA_MOCK') !== 'true' &&
+    Boolean(env('OMADA_ADMIN_NAME')) &&
+    Boolean(env('OMADA_ADMIN_PASSWORD'));
 }
 
 /** Definitive (non-transient) local failure — worth remembering. */
@@ -1079,9 +1097,10 @@ function qosMethodOrder() {
  * Apply a bandwidth (QoS) limit to a client.
  *
  * Routes the SAME operation through the most reliable transport for this
- * deployment: the controller's web API on the existing operator session
- * (services/omada.js) first, then the Open API with OAuth credentials. See the
- * module header for why the Open API alone is not dependable on a local OC200.
+ * deployment: the controller's web API on a fresh ADMINISTRATOR session
+ * (services/omada.js, OMADA_ADMIN_*) first, then the Open API with OAuth
+ * credentials. See the module header for why the Open API alone is not
+ * dependable on a local OC200.
  *
  * @param {Object} ctx  see buildRateLimitPayload() plus:
  * @param {string} ctx.clientMac
@@ -1124,7 +1143,8 @@ async function setClientRateLimit(ctx) {
             '[omada-nb] local web-API QoS unavailable (' + ((err && err.message) || err) + ')' +
             ' — using the Open API for the next ' + Math.round(LOCAL_QOS_BLOCK_MS / 60000) + ' min.' +
             ' Enable Open API on the controller (Settings → Platform Integration → Open API,' +
-            ' controller v5.12+) or grant the operator account site QoS rights'
+            ' controller v5.12+) or set OMADA_ADMIN_NAME / OMADA_ADMIN_PASSWORD to a controller' +
+            ' administrator (the portal operator account has no site/QoS rights)'
           );
         }
       }

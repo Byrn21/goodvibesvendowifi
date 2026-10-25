@@ -5,13 +5,17 @@
  * The Open API route needs a controller with Open API (v5.12+) and an Open API
  * application created on the controller; a stock OC200 answers the OAuth token
  * request with HTTP 500 and every guest stayed uncapped. The same operation
- * (`updateClientRateLimitSetting`) is available on the hotspot operator session
- * the backend already holds, so that is the primary QoS route.
+ * (`updateClientRateLimitSetting`) is available through the controller web API,
+ * but ONLY to a controller ADMINISTRATOR: the hotspot portal operator account
+ * returns 0 sites and cannot set rate limits.
  *
  * Covers:
- *   - operator login → site key resolution → PATCH …/clients/{MAC}/ratelimit
- *     with the exact body, Csrf-Token, cookie and Omada-Request-Source header
- *   - fallback to the /openapi/v1/… route (web session) when the v2 route is
+ *   - a FRESH administrator login (OMADA_ADMIN_*) → site key resolution →
+ *     PATCH …/clients/{MAC}/ratelimit with the exact body, Csrf-Token, cookie
+ *     and Omada-Request-Source header
+ *   - the administrator and portal operator sessions stay separate
+ *   - missing administrator credentials fail loud before any PATCH
+ *   - fallback to the /openapi/v1/… route (admin session) when the v2 route is
  *     rejected
  *   - the route that worked is remembered
  *   - OMADA_SITE → site key resolution (privilege.sites, then /sites)
@@ -27,6 +31,9 @@ process.env.OMADA_OMADAC_ID = 'TESTOMADAC123';
 process.env.OMADA_SITE = 'Default';
 process.env.OMADA_PORTAL_OPERATOR_NAME = 'vendo_byron';
 process.env.OMADA_PORTAL_OPERATOR_PASSWORD = 'operator-secret';
+// Privileged calls run as a controller administrator, never the operator.
+process.env.OMADA_ADMIN_NAME = 'controller-admin';
+process.env.OMADA_ADMIN_PASSWORD = 'admin-secret';
 
 const https = require('https');
 const omada = require('../src/services/omada');
@@ -85,10 +92,10 @@ function installTransport() {
   };
 }
 
-/** login + site lookup responses (the two calls before every cap attempt). */
+/** admin login + site lookup responses (the two calls before every cap attempt). */
 function queueSession(sitesBody) {
-  queueResponse(200, { errorCode: 0, result: { token: 'csrf-1' } }, {
-    'set-cookie': ['TPOMADA_SESSIONID=abc123; Path=/; HttpOnly'],
+  queueResponse(200, { errorCode: 0, result: { token: 'admin-csrf' } }, {
+    'set-cookie': ['TPOMADA_SESSIONID=admin123; Path=/; HttpOnly'],
   });
   queueResponse(200, sitesBody || {
     errorCode: 0,
@@ -111,7 +118,7 @@ afterAll(() => {
 });
 
 describe('local web-API rate limit', () => {
-  test('PATCHes the v2 client ratelimit route on the operator session', async () => {
+  test('PATCHes the v2 client ratelimit route on a fresh administrator session', async () => {
     queueSession();
     queueResponse(200, { errorCode: 0, msg: 'Success' });
 
@@ -120,19 +127,110 @@ describe('local web-API rate limit', () => {
     expect(result).toMatchObject({ success: true, route: 'v2' });
     expect(result.applied).toEqual(PAYLOAD);
 
-    // 0: hotspot/login, 1: users/current (site key), 2: the cap itself.
-    expect(calls[0].path).toBe('/TESTOMADAC123/api/v2/hotspot/login');
+    // 0: administrator /login, 1: users/current (site key), 2: the cap itself.
+    expect(calls[0].path).toBe('/TESTOMADAC123/api/v2/login');
+    expect(JSON.parse(calls[0].body)).toEqual({
+      username: 'controller-admin',
+      password: 'admin-secret',
+    });
+    // The login itself must carry no session credentials.
+    expect(calls[0].headers.Cookie).toBeUndefined();
     expect(calls[1].path).toBe('/TESTOMADAC123/api/v2/users/current');
+
+    // The PORTAL OPERATOR account must never authenticate a privileged call.
+    expect(calls.some((c) => c.path.includes('/hotspot/login'))).toBe(false);
 
     const patch = calls[2];
     expect(patch.method).toBe('PATCH');
     expect(patch.path).toBe(PATCH_V2);
     expect(JSON.parse(patch.body)).toEqual(PAYLOAD);
-    expect(patch.headers['Csrf-Token']).toBe('csrf-1');
-    expect(patch.headers.Cookie).toContain('TPOMADA_SESSIONID=abc123');
+    expect(patch.headers['Csrf-Token']).toBe('admin-csrf');
+    expect(patch.headers.Cookie).toContain('TPOMADA_SESSIONID=admin123');
     expect(patch.headers['Omada-Request-Source']).toBe('web-local');
     expect(patch.headers.Origin).toBe('https://192.168.0.253:8043');
     expect(patch.headers.Referer).toBe('https://192.168.0.253:8043/');
+  });
+
+  test('re-logs in as the administrator before each cap (fresh session cookie)', async () => {
+    queueSession();
+    queueResponse(200, { errorCode: 0 });
+    await omada.setClientRateLimit({ clientMac: MAC, payload: PAYLOAD });
+
+    const before = calls.length;
+    queueSession();
+    queueResponse(200, { errorCode: 0 });
+    await omada.setClientRateLimit({ clientMac: MAC, payload: PAYLOAD });
+
+    // Each cap starts with a NEW admin login, then reuses the cached site key.
+    expect(calls.length).toBe(before + 2);
+    expect(calls[before].path).toBe('/TESTOMADAC123/api/v2/login');
+    expect(calls[before + 1].method).toBe('PATCH');
+  });
+
+  test('keeps the portal operator session separate from the administrator session', async () => {
+    // Portal operator login + guest authorization (hotspot endpoints).
+    queueResponse(200, { errorCode: 0, result: { token: 'portal-csrf' } }, {
+      'set-cookie': ['TPOMADA_SESSIONID=portal123; Path=/; HttpOnly'],
+    });
+    queueResponse(200, { errorCode: 0 });
+    // Administrator login + site lookup + cap.
+    queueSession();
+    queueResponse(200, { errorCode: 0 });
+
+    await omada.authenticateClient({
+      clientMac: MAC,
+      apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GuestWiFi',
+      radioId: 0,
+      durationMinutes: 30,
+    });
+
+    expect(calls[0].path).toBe('/TESTOMADAC123/api/v2/hotspot/login');
+    expect(JSON.parse(calls[0].body)).toEqual({ name: 'vendo_byron', password: 'operator-secret' });
+    expect(calls[1].path).toBe('/TESTOMADAC123/api/v2/hotspot/extPortal/auth');
+    expect(calls[1].headers['Csrf-Token']).toBe('portal-csrf');
+
+    await omada.setClientRateLimit({ clientMac: MAC, payload: PAYLOAD });
+
+    expect(calls[2].path).toBe('/TESTOMADAC123/api/v2/login');
+    const patch = calls[4];
+    expect(patch.method).toBe('PATCH');
+    expect(patch.headers['Csrf-Token']).toBe('admin-csrf');
+    expect(patch.headers.Cookie).toContain('admin123');
+    expect(patch.headers.Cookie).not.toContain('portal123');
+
+    // The administrator login did not displace the portal session: a second
+    // authorization still uses the portal cookie and token, with no new login.
+    queueResponse(200, { errorCode: 0 });
+    await omada.authenticateClient({
+      clientMac: MAC,
+      apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GuestWiFi',
+      radioId: 0,
+      durationMinutes: 30,
+    });
+    expect(calls[5].path).toBe('/TESTOMADAC123/api/v2/hotspot/extPortal/auth');
+    expect(calls[5].headers['Csrf-Token']).toBe('portal-csrf');
+    expect(calls[5].headers.Cookie).toContain('portal123');
+    expect(calls[5].headers.Cookie).not.toContain('admin123');
+  });
+
+  test('fails loud without administrator credentials (never uses the operator)', async () => {
+    jest.resetModules();
+    const savedName = process.env.OMADA_ADMIN_NAME;
+    const savedPassword = process.env.OMADA_ADMIN_PASSWORD;
+    delete process.env.OMADA_ADMIN_NAME;
+    delete process.env.OMADA_ADMIN_PASSWORD;
+    try {
+      const fresh = require('../src/services/omada');
+      await expect(fresh.setClientRateLimit({ clientMac: MAC, payload: PAYLOAD }))
+        .rejects.toMatchObject({ code: 'OMADA_CONFIG_ERROR' });
+      expect(calls).toHaveLength(0);
+    } finally {
+      process.env.OMADA_ADMIN_NAME = savedName;
+      process.env.OMADA_ADMIN_PASSWORD = savedPassword;
+      delete require.cache[require.resolve('../src/services/omada')];
+    }
   });
 
   test('falls back to the OpenAPI route on the web session when v2 is rejected', async () => {
@@ -144,9 +242,9 @@ describe('local web-API rate limit', () => {
 
     expect(result.route).toBe('openapi-session');
     expect(patchCalls().map((c) => c.path)).toEqual([PATCH_V2, PATCH_OPENAPI]);
-    // The fallback still authenticates with the session, never an OAuth token.
+    // The fallback still authenticates with the admin session, never an OAuth token.
     expect(calls[3].headers.Authorization).toBeUndefined();
-    expect(calls[3].headers['Csrf-Token']).toBe('csrf-1');
+    expect(calls[3].headers['Csrf-Token']).toBe('admin-csrf');
   });
 
   test('remembers the route that worked and tries it first next time', async () => {
@@ -158,19 +256,24 @@ describe('local web-API rate limit', () => {
     expect(omada._internal.preferredRateLimitRoute()).toBe('openapi-session');
 
     const before = calls.length;
+    // A fresh admin login is made for the second cap; the site key is cached.
+    queueResponse(200, { errorCode: 0, result: { token: 'admin-csrf-2' } }, {
+      'set-cookie': ['TPOMADA_SESSIONID=admin456; Path=/'],
+    });
     queueResponse(200, { errorCode: 0 });
     const second = await omada.setClientRateLimit({ clientMac: MAC, payload: PAYLOAD });
 
     expect(second.route).toBe('openapi-session');
-    // Session and site key are cached, so the cap is the ONLY new request —
-    // and it goes straight to the remembered route.
-    expect(calls.length).toBe(before + 1);
-    expect(calls[before].path).toBe(PATCH_OPENAPI);
+    // The site key is cached but the admin session is refreshed, so the cap is
+    // a login followed by the PATCH — straight to the remembered route.
+    expect(calls.length).toBe(before + 2);
+    expect(calls[before].path).toBe('/TESTOMADAC123/api/v2/login');
+    expect(calls[before + 1].path).toBe(PATCH_OPENAPI);
   });
 
   test('resolves the site key from /sites when /users/current is not available', async () => {
-    queueResponse(200, { errorCode: 0, result: { token: 'csrf-1' } }, {
-      'set-cookie': ['TPOMADA_SESSIONID=abc123; Path=/'],
+    queueResponse(200, { errorCode: 0, result: { token: 'admin-csrf' } }, {
+      'set-cookie': ['TPOMADA_SESSIONID=admin123; Path=/'],
     });
     queueResponse(200, { errorCode: -1200, msg: 'no privilege' });                    // users/current
     queueResponse(200, { errorCode: 0, result: { data: [{ id: 'S2', name: 'Default' }] } }); // /sites

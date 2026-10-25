@@ -18,6 +18,10 @@ process.env.OMADA_OMADAC_ID = 'TESTOMADAC123';
 process.env.OMADA_SITE = 'Default';
 process.env.OMADA_PORTAL_OPERATOR_NAME = 'portal-operator';
 process.env.OMADA_PORTAL_OPERATOR_PASSWORD = 'portal-secret';
+// Privileged credentials exist in this deployment — they must still never be
+// used for captive-portal authorization.
+process.env.OMADA_ADMIN_NAME = 'controller-admin';
+process.env.OMADA_ADMIN_PASSWORD = 'admin-secret';
 process.env.OMADA_TIME_UNIT = 'ms';
 
 const omada = require('../src/services/omada');
@@ -454,6 +458,48 @@ describe('operator login', () => {
       expect(cookie).not.toContain('Domain=');
       expect(cookie).not.toContain('Path=');
       expect(cookie).not.toContain('HttpOnly');
+    } finally {
+      uninstall();
+    }
+  });
+});
+
+// ================================================================
+// dual credentials — portal operator vs administrator
+// ================================================================
+describe('portal operator credentials are used only for hotspot calls', () => {
+  test('authenticateClient logs in at /hotspot/login, never as the administrator', async () => {
+    const captured = [];
+    const uninstall = mockHttpTransport((options, req, cb) => {
+      options.written = req.written; // same array the request body lands in
+      captured.push(options);
+      if (options.path.includes('/extPortal/auth')) {
+        respondJson(req, cb, 200, { errorCode: 0 });
+        return;
+      }
+      respondJson(req, cb, 200, { errorCode: 0, result: { token: 'portal-token' } }, {
+        'set-cookie': ['TPOMADA_SESSION=portal-cookie'],
+      });
+    });
+
+    try {
+      await omada.authenticateClient({
+        clientMac: 'AA:BB:CC:DD:EE:FF',
+        apMac: 'AA:AA:AA:AA:AA:AA',
+        ssidName: 'GuestWiFi',
+        radioId: 0,
+        durationMinutes: 30,
+      });
+
+      expect(captured[0].path).toBe('/TESTOMADAC123/api/v2/hotspot/login');
+      expect(JSON.parse(captured[0].written.join(''))).toEqual({
+        name: 'portal-operator',
+        password: 'portal-secret',
+      });
+      // The administrator login endpoint is never touched by portal auth.
+      expect(captured.some((o) => o.path === '/TESTOMADAC123/api/v2/login')).toBe(false);
+      expect(captured[1].headers['Csrf-Token']).toBe('portal-token');
+      expect(captured[1].headers.Cookie).toContain('TPOMADA_SESSION=portal-cookie');
     } finally {
       uninstall();
     }

@@ -324,13 +324,15 @@ dashboard → Environment** (or `render.yaml`) for production.
 | `OMADA_BASE_URL` | `server.js`, `services/omada.js` | *(empty)* | Base URL the backend uses to reach the Omada controller API. When unset, Omada runs in mock mode and the session-expiration worker is disabled. |
 | `OMADA_OMADAC_ID` | `services/omada.js` | *(empty)* | Omada controller ID (OMADAC ID) used in API paths. |
 | `OMADA_SITE` | `services/omada.js`, `services/omada-northbound.js`, `routes/payment.js` | `Default` | Omada site name. The Northbound (InstaPay) client resolves it to its numeric site ID via `GET /openapi/v1/{omadacId}/sites` on first use and caches the result. |
-| `OMADA_PORTAL_OPERATOR_NAME` | `services/omada.js` | *(empty)* | Hotspot portal operator username (for `POST /{OMADAC_ID}/api/v2/hotspot/login`). |
+| `OMADA_PORTAL_OPERATOR_NAME` | `services/omada.js` | *(empty)* | Hotspot portal operator username (for `POST /{OMADAC_ID}/api/v2/hotspot/login`). Used **only** for captive-portal authorization (`/hotspot/extPortal/*`); this account has no site privileges. |
 | `OMADA_PORTAL_OPERATOR_PASSWORD` | `services/omada.js` | *(empty)* | Hotspot portal operator password. |
+| `OMADA_ADMIN_NAME` | `services/omada.js` | *(empty)* | Controller **administrator** username (for `POST /{OMADAC_ID}/api/v2/login`). Used **only** for privileged calls: site-list lookup and the per-client rate-limit `PATCH`. Required for bandwidth caps; Omada refuses admin accounts on the hotspot portal endpoints, hence the separate credentials. |
+| `OMADA_ADMIN_PASSWORD` | `services/omada.js` | *(empty)* | Controller administrator password. |
 | `OMADA_AUTH_TIMEOUT` | `services/omada.js` | `10000` | Controller request timeout (ms). |
 | `OMADA_TLS_REJECT` | `services/omada.js` | `false` | Default accepts the controller's self-signed cert (OC200/ER605). Set to `true` only when the controller has a publicly-trusted certificate. |
 | `OMADA_NORTHBOUND_BASE_URL` | `services/omada-northbound.js` | *(resolved from `OMADA_NORTHBOUND_REGION`)* | Base URL for the OpenAPI (`authClient`, `updateClientRateLimitSetting`). A **private/loopback** host that names no port automatically uses the controller's Open API port `8043` — port 443 is the web-UI/tunnel front, which does not serve `/openapi`. |
 | `OMADA_NORTHBOUND_TLS_REJECT` | `services/omada-northbound.js` | `false` for a LAN host (falls back to `OMADA_TLS_REJECT`) | Certificate verification for the OpenAPI calls. Relaxed automatically when the base URL is a LAN/loopback controller (its certificate cannot chain to a public CA); set `true` to force verification. |
-| `OMADA_QOS_METHOD` | `services/omada-northbound.js` | `auto` | Which transport applies bandwidth caps: `auto` = the controller web API on the operator session (`OMADA_BASE_URL`) first, then the Open API; `local` = web API only; `openapi` = Open API only. See “Per-voucher bandwidth caps”. |
+| `OMADA_QOS_METHOD` | `services/omada-northbound.js` | `auto` | Which transport applies bandwidth caps: `auto` = the controller web API on the fresh **administrator** session (`OMADA_BASE_URL` + `OMADA_ADMIN_*`) first, then the Open API; `local` = web API only; `openapi` = Open API only. See “Per-voucher bandwidth caps”. |
 | `OMADA_MOCK` | `services/omada.js` | `false` | `true` bypasses the controller entirely (mock mode). |
 | `OMADA_TIME_UNIT` | `config/index.js` | `ms` | Unit (`ms`, `us`, or `s`) for the Omada `time` field; depends on controller firmware. |
 
@@ -408,11 +410,15 @@ reached two ways, and `services/omada-northbound.js` routes between them:
 
 1. **Controller web API** (`OMADA_QOS_METHOD=local`, and the first attempt for
    `auto`) — `PATCH /{omadacId}/api/v2/sites/{siteKey}/clients/{MAC}/ratelimit`
-   on the hotspot operator session the backend already holds
-   (`OMADA_BASE_URL` + `OMADA_PORTAL_OPERATOR_NAME/PASSWORD`). This is the same
-   call the controller UI makes, so it needs **no OAuth credentials**; a
-   fallback under `/openapi/v1/…` with the same session is tried if the firmware
-   does not expose the `/api/v2` route.
+   on a **fresh administrator session** obtained at the start of every call
+   from `OMADA_ADMIN_NAME` / `OMADA_ADMIN_PASSWORD` (`OMADA_BASE_URL`). The
+   hotspot **portal operator** account cannot be used here: it holds no site
+   privileges, so the site query returns 0 sites and the cap is rejected. This
+   is the same call the controller UI makes, so it needs **no OAuth
+   credentials**; a fallback under `/openapi/v1/…` with the same admin session
+   is tried if the firmware does not expose the `/api/v2` route. Captive-portal
+   authorization keeps using the separate portal operator session
+   (`OMADA_PORTAL_OPERATOR_*`), which Omada requires for `/hotspot/extPortal/*`.
 2. **Open API** (`OMADA_QOS_METHOD=openapi`) — the documented
    `updateClientRateLimitSetting` operation with an OAuth client-credentials
    token (`OMADA_NORTHBOUND_BASE_URL`/`OMADA_NORTHBOUND_REGION` +
