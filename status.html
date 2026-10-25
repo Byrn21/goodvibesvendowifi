@@ -21,6 +21,32 @@
       margin-top: 18px;
     }
 
+    /* ---- Pause / Resume button centering ----
+       assets/style.css defines `.btn` twice: the portal rule (inline-flex,
+       align-items:center, height:52px, padding:0 28px) and a later admin rule
+       further down the same file (display:inline-block, padding:6px 14px).
+       Both are plain `.btn`, so the admin one wins on equal specificity and the
+       52px-tall button ends up as inline-block with 6px of top padding — which
+       parks the icon + label at the top instead of centering them.
+       ID specificity here restores flex centering and even padding without
+       touching the shared stylesheet (and therefore the admin panel). ---- */
+    #btn-pause,
+    #btn-resume {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      /* Symmetric padding: no leftover 6px top / bottom asymmetry. */
+      padding: 0 20px;
+      line-height: 1.15;
+    }
+
+    /* Keep the icon optical with the label now that the button is a flex row. */
+    #btn-pause .btn-icon,
+    #btn-resume .btn-icon {
+      margin-right: 8px;
+    }
+
     /* ---- Centered not-found / error state ---- */
     .notfound-icon {
       display: flex;
