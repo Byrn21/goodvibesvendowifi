@@ -374,8 +374,9 @@ the controller.
 |---|---|---|---|
 | `INSTAPAY_WEBHOOK_SECRET` | `routes/webhook.js` | `MACRODROID_WEBHOOK_SECRET` | Shared secret for the InstaPay/PESONet webhook. |
 | `PREMIUM_AMOUNTS_PESOS` | `routes/webhook.js` | `25,45,80` | Comma-separated payment amounts (Pesos) treated as the premium tier. |
-| `PREMIUM_DOWN_MBPS` | `routes/webhook.js` | *(empty → default caps)* | Premium download cap (Mbps). Unset/out-of-range falls back to the default caps. |
-| `PREMIUM_UP_KBPS` | `routes/webhook.js` | *(empty → default caps)* | Premium upload cap (Kbps). Unset/out-of-range falls back to the default caps. |
+| `PREMIUM_DOWN_MBPS` | `utils/qos.js` | *(empty → `PREMIUM_DOWN_KBPS`, else default caps)* | Premium download cap (Mbps). Unset/out-of-range falls back to the default caps. |
+| `PREMIUM_DOWN_KBPS` | `utils/qos.js` | *(empty → default caps)* | Alias for the premium download cap expressed in Kbps (≤1024 stays Kbps, above converts to Mbps). Used only when `PREMIUM_DOWN_MBPS` is unset/invalid. |
+| `PREMIUM_UP_KBPS` | `utils/qos.js` | *(empty → default caps)* | Premium upload cap (Kbps). Unset/out-of-range falls back to the default caps. |
 | `VOUCHER_DEFAULT_DOWN_MBPS` | `services/omada-northbound.js` | *(empty → error)* | Default download cap (Mbps) for non-premium amounts. |
 | `VOUCHER_DEFAULT_UP_KBPS` | `services/omada-northbound.js` | *(empty → error)* | Default upload cap (Kbps) for non-premium amounts. |
 
@@ -395,9 +396,18 @@ Resolution order for a redeemed voucher (`utils/qos.js` →
 1. `vouchers.down_kbps` / `vouchers.up_kbps` — per-voucher caps, stored in Kbps
    (5 Mbps = 5000). Values above 1024 Kbps are converted to Mbps for the
    controller, which accepts 1–1024 per unit (unit 1 = Kbps, unit 2 = Mbps).
-2. Premium vouchers (`type = 'premium'`) → `PREMIUM_DOWN_MBPS` /
-   `PREMIUM_UP_KBPS`.
+2. Premium vouchers (`type = 'premium'`) → `PREMIUM_DOWN_MBPS` (or
+   `PREMIUM_DOWN_KBPS`) / `PREMIUM_UP_KBPS`.
 3. Everything else → `VOUCHER_DEFAULT_DOWN_MBPS` / `VOUCHER_DEFAULT_UP_KBPS`.
+
+The tier is read from `vouchers.type` (the row is selected with that column in
+`services/session.js` → `validateVoucher`) and normalized through
+`utils/qos.js` → `normalizeVoucherType` (trim + lowercase), so a row stored as
+`Premium`/`PREMIUM`/` premium ` still resolves to the premium tier. A premium
+session whose `PREMIUM_*` caps cannot be resolved logs
+`[session/qos] PREMIUM session … has NO premium caps` and is capped with the
+`VOUCHER_DEFAULT_*` values — that log line is the signal that the premium
+variables are missing or misnamed, not that the voucher was misread.
 
 Both per-voucher caps must be set together; a half-configured row is treated as
 unset so one direction can never be left on the default by accident. The caps

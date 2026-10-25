@@ -18,6 +18,11 @@
  *
  * Units mirror services/omada-northbound.js: down is Mbps (downUnit 2) and up
  * is Kbps (upUnit 1).
+ *
+ * The plan tier itself comes from vouchers.type ('standard' | 'premium'). It is
+ * never trusted verbatim: normalizeVoucherType() trims/lowercases it first, so a
+ * row holding 'Premium'/'PREMIUM'/' premium ' still resolves to the premium
+ * tier instead of silently falling back to the standard defaults.
  */
 
 // Premium plan prices (Pesos) used when PREMIUM_AMOUNTS_PESOS is unset.
@@ -64,18 +69,75 @@ function toRateLimitUnit(kbps) {
 }
 
 /**
+ * normalizeVoucherType — canonical plan tier for a vouchers.type value.
+ *
+ * The tier decides the bandwidth cap (and whether Pause/Resume is allowed), so
+ * it must not depend on how the row was typed. Rows entered by hand in Supabase
+ * or imported from another system can hold 'premium', 'Premium', 'PREMIUM' or
+ * ' premium '; trimming/lowercasing here makes every one of them the same tier.
+ * An empty/absent value is 'standard' (the column default).
+ *
+ * @param {*} value
+ * @returns {string} the lowercased tier, or 'standard'
+ */
+function normalizeVoucherType(value) {
+  if (value === undefined || value === null) return 'standard';
+  const tier = String(value).trim().toLowerCase();
+  return tier || 'standard';
+}
+
+/**
+ * isPremiumVoucherType — true when a vouchers.type value is the premium tier.
+ * Case- and whitespace-insensitive; the single check used by the QoS and
+ * pause/resume rules so they can never disagree about a plan.
+ *
+ * @param {*} value
+ * @returns {boolean}
+ */
+function isPremiumVoucherType(value) {
+  return normalizeVoucherType(value) === 'premium';
+}
+
+/**
+ * resolvePremiumDown — premium DOWNLOAD cap as an Omada {unit, limit}.
+ *
+ * PREMIUM_DOWN_MBPS is the documented variable (1–1024 Mbps). Deployments that
+ * configure the premium cap in Kbps instead — PREMIUM_DOWN_KBPS, mirroring
+ * PREMIUM_UP_KBPS/VOUCHER_DEFAULT_UP_KBPS — are honoured too, converted to the
+ * unit Omada accepts. Without this alias a PREMIUM_DOWN_KBPS-only deployment
+ * silently lost the premium tier and capped premium guests at the standard
+ * VOUCHER_DEFAULT_* speed.
+ *
+ * @returns {{unit: 1|2, limit: number}|undefined}
+ */
+function resolvePremiumDown() {
+  const downMbps = parseInt(process.env.PREMIUM_DOWN_MBPS, 10);
+  if (Number.isInteger(downMbps) && downMbps >= 1 && downMbps <= 1024) {
+    return { unit: 2, limit: downMbps }; // Mbps
+  }
+
+  const downKbps = normalizeBandwidthKbps(process.env.PREMIUM_DOWN_KBPS);
+  if (downKbps) return toRateLimitUnit(downKbps);
+
+  return undefined;
+}
+
+/**
  * resolvePremiumRateLimit — the PREMIUM_* operator caps as a customRateLimit.
  *
- * Returns undefined when either premium value is unset or out of range, which
- * makes setClientRateLimit() fall back to the VOUCHER_DEFAULT_* caps so a
- * premium guest is still capped rather than left unlimited.
+ * Download comes from PREMIUM_DOWN_MBPS (or its PREMIUM_DOWN_KBPS alias), upload
+ * from PREMIUM_UP_KBPS. Returns undefined when either surviving value is unset
+ * or out of range, which makes setClientRateLimit() fall back to the
+ * VOUCHER_DEFAULT_* caps so a premium guest is still capped rather than left
+ * unlimited — callers log that fallback (see applySessionRateLimit) so a
+ * misnamed variable does not masquerade as a standard voucher.
  *
  * @returns {Object|undefined}
  */
 function resolvePremiumRateLimit() {
-  const downMbps = parseInt(process.env.PREMIUM_DOWN_MBPS, 10);
+  const down = resolvePremiumDown();
   const upKbps = parseInt(process.env.PREMIUM_UP_KBPS, 10);
-  if (!Number.isInteger(downMbps) || downMbps < 1 || downMbps > 1024) return undefined;
+  if (!down) return undefined;
   if (!Number.isInteger(upKbps) || upKbps < 1 || upKbps > 1024) return undefined;
 
   return {
@@ -83,8 +145,8 @@ function resolvePremiumRateLimit() {
     upUnit: 1,      // 1 = Kbps
     upLimit: upKbps,
     downEnable: true,
-    downUnit: 2,    // 2 = Mbps
-    downLimit: downMbps,
+    downUnit: down.unit,
+    downLimit: down.limit,
   };
 }
 
@@ -127,7 +189,7 @@ function resolveVoucherRateLimit(voucher) {
     };
   }
 
-  if (voucher && voucher.voucherType === 'premium') {
+  if (isPremiumVoucherType(voucher && voucher.voucherType)) {
     return resolvePremiumRateLimit();
   }
 
@@ -190,6 +252,8 @@ function resolveCustomRateLimit(amount) {
 module.exports = {
   DEFAULT_PREMIUM_AMOUNTS_PESOS,
   MAX_BANDWIDTH_KBPS,
+  normalizeVoucherType,
+  isPremiumVoucherType,
   normalizeBandwidthKbps,
   toRateLimitUnit,
   resolvePremiumAmountsPesos,

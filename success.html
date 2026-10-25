@@ -471,8 +471,9 @@
   </div>
 
   <!-- Redirect logic: reads URL params for destination and session ID, wires
-       the "Continue to website" button, and after a short settling delay
-       performs one connectivity probe so the captive mini-browser can close.
+       the "Continue to website" button, tries to close the captive sheet
+       (window.close()), and after a short settling delay performs one
+       connectivity probe so the captive mini-browser can close.
        Both the button and the probe exit to a NON-whitelisted external host
        (never the Render portal URL), because the OS only detects that the
        firewall opened when a request reaches a host outside Omada's
@@ -507,12 +508,16 @@
       // back to (or off) Render produces no network-state change and the
       // captive mini-browser never closes.
       //
-      // Plain-HTTP fallback on purpose: an HTTPS exit can drop its TLS
-      // handshake while Omada is still reprogramming firewall rules and surface
-      // as net::ERR_CONNECTION_CLOSED.
+      // The fallback is a high-availability HTTPS host: once the firewall is
+      // open, a TLS handshake to a well-known site is the clearest "the network
+      // is really online" signal the OS can get. (The redirect only fires after
+      // PROBE_DELAY_MS below — Omada has finished reprogramming by then, so it
+      // will not surface as net::ERR_CONNECTION_CLOSED.)
       //   Alternative OS-probe endpoint:
       //     'http://connectivitycheck.gstatic.com/generate_204'
-      var EXTERNAL_FALLBACK = 'http://neverssl.com/';
+      //   Alternative high-availability host:
+      //     'https://1.1.1.1/'
+      var EXTERNAL_FALLBACK = 'https://www.google.com/';
 
       // Hosts that must NEVER be used as the exit destination. Reaching one of
       // these produces no network-state change (they are pre-auth whitelisted
@@ -555,8 +560,8 @@
 
       // Try the guest's original URL first, then the controller's redirectUrl,
       // but accept a value ONLY when it is a genuine external host. A Render
-      // URL (or an empty / non-http value) is rejected and forced to the HTTP
-      // fallback.
+      // URL (or an empty / non-http value) is rejected and forced to the
+      // high-availability fallback above.
       var candidates = [originUrl, destination];
       var exitUrl = EXTERNAL_FALLBACK;
       for (var i = 0; i < candidates.length; i++) {
@@ -579,8 +584,51 @@
       // the phone (or the captive mini-browser) attempts a real connection.
       var PROBE_DELAY_MS = 7000;
 
+      // ---- Closing the captive sheet --------------------------------------
+      // An iOS/Android captive sheet is dismissed by the OS, never by this
+      // page, so the page can only nudge it twice:
+      //
+      //   1. window.close(). A script may only close windows that IT opened, so
+      //      iOS (Captive Network Assistant) and most Android sign-in views
+      //      ignore the call — but some builds honour it, and a closed window is
+      //      the cleanest exit. Retried a few times because some webviews drop
+      //      the first call while the page is still settling.
+      //   2. The navigation scheduled below, to a host that is NOT on Omada's
+      //      Pre-Authentication Access list. That request makes the OS re-run
+      //      its connectivity check, which sees the network is genuinely open
+      //      and auto-dismisses the sheet.
+      //
+      // Attempting close() first is also what makes the plain-browser case
+      // pleasant: a tab cannot close itself, so nothing happens and the guest
+      // keeps the confirmation page (the redirect still fires afterwards — the
+      // button cancels it).
+      var CNA_CLOSE_RETRY_MS = 600;
+      var CNA_CLOSE_ATTEMPTS = 3;
+
+      function closeCaptiveBrowser(attempt) {
+        try {
+          window.close();
+        } catch (e) {
+          // Some embedded browsers throw when close() is blocked. Harmless:
+          // the external redirect below is the fallback that always exists.
+        }
+        if (attempt + 1 < CNA_CLOSE_ATTEMPTS) {
+          window.setTimeout(function () {
+            closeCaptiveBrowser(attempt + 1);
+          }, CNA_CLOSE_RETRY_MS);
+        }
+      }
+
       var notice = document.getElementById('connect-notice');
       if (notice) notice.textContent = 'Finalizing your connection\u2026';
+
+      // Ask the captive sheet to go away as soon as the success card has
+      // actually painted (250 ms is enough for one frame, and short enough that
+      // the guest never notices the wait). Closing synchronously here would
+      // sometimes beat the first paint in a script-opened window.
+      window.setTimeout(function () {
+        closeCaptiveBrowser(0);
+      }, 250);
 
       var probeTimer = window.setTimeout(function () {
         window.location.href = exitUrl;

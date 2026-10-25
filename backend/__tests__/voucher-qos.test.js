@@ -131,6 +131,32 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
     expect(resolveVoucherRateLimit({ voucherType: 'standard' })).toBeUndefined();
   });
 
+  test('recognises the premium tier whatever the stored casing/whitespace', () => {
+    const premium = {
+      upEnable: true, upUnit: 1, upLimit: 1024,
+      downEnable: true, downUnit: 2, downLimit: 50,
+    };
+    expect(resolveVoucherRateLimit({ voucherType: 'Premium' })).toEqual(premium);
+    expect(resolveVoucherRateLimit({ voucherType: 'PREMIUM' })).toEqual(premium);
+    expect(resolveVoucherRateLimit({ voucherType: ' premium ' })).toEqual(premium);
+  });
+
+  test('PREMIUM_DOWN_KBPS is accepted when PREMIUM_DOWN_MBPS is unset', () => {
+    const savedMbps = process.env.PREMIUM_DOWN_MBPS;
+    try {
+      delete process.env.PREMIUM_DOWN_MBPS;
+      process.env.PREMIUM_DOWN_KBPS = '20000';
+      expect(resolveVoucherRateLimit({ voucherType: 'premium' })).toEqual({
+        upEnable: true, upUnit: 1, upLimit: 1024,
+        downEnable: true, downUnit: 2, downLimit: 20,
+      });
+    } finally {
+      delete process.env.PREMIUM_DOWN_KBPS;
+      if (savedMbps === undefined) delete process.env.PREMIUM_DOWN_MBPS;
+      else process.env.PREMIUM_DOWN_MBPS = savedMbps;
+    }
+  });
+
   test('a half-configured pair is ignored rather than capping one direction only', () => {
     expect(resolveVoucherRateLimit({ downKbps: 20000, upKbps: null, voucherType: 'standard' }))
       .toBeUndefined();
@@ -196,6 +222,46 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
         downEnable: true, downUnit: 2, downLimit: 50,
       },
     });
+  });
+
+  test('a voucher stored as "Premium" (mixed case) still gets the premium caps', async () => {
+    await seedVoucher('444555', 'Premium');
+
+    const res = await authRequest({ voucher: '444555' });
+
+    expect(res.status).toBe(200);
+    expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({
+      clientMac: MAC,
+      customRateLimit: {
+        upEnable: true, upUnit: 1, upLimit: 1024,
+        downEnable: true, downUnit: 2, downLimit: 50,
+      },
+    });
+  });
+
+  test('a premium voucher with no premium caps logs the fallback instead of failing silently', async () => {
+    const savedDown = process.env.PREMIUM_DOWN_MBPS;
+    const savedUp = process.env.PREMIUM_UP_KBPS;
+    delete process.env.PREMIUM_DOWN_MBPS;
+    delete process.env.PREMIUM_DOWN_KBPS;
+    delete process.env.PREMIUM_UP_KBPS;
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await seedVoucher('666777', 'premium');
+
+      await authRequest({ voucher: '666777' });
+
+      expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+      const warned = warn.mock.calls.map((c) => c.join(' ')).join('\n');
+      expect(warned).toContain('PREMIUM session');
+      expect(warned).toContain('PREMIUM_DOWN_MBPS');
+    } finally {
+      warn.mockRestore();
+      if (savedDown === undefined) delete process.env.PREMIUM_DOWN_MBPS;
+      else process.env.PREMIUM_DOWN_MBPS = savedDown;
+      if (savedUp === undefined) delete process.env.PREMIUM_UP_KBPS;
+      else process.env.PREMIUM_UP_KBPS = savedUp;
+    }
   });
 
   test('a failed cap does NOT fail the login and is reported in the response', async () => {

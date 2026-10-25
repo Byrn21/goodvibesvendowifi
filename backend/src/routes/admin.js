@@ -25,7 +25,11 @@ const router = express.Router();
 const { getDb } = require('../db/client');
 const { expireSession } = require('../services/session');
 const { parsePriceToCentavos } = require('../utils/price');
-const { normalizeBandwidthKbps, MAX_BANDWIDTH_KBPS } = require('../utils/qos');
+const {
+  normalizeBandwidthKbps,
+  normalizeVoucherType,
+  MAX_BANDWIDTH_KBPS,
+} = require('../utils/qos');
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
@@ -155,7 +159,10 @@ router.post('/vouchers', async (req, res, next) => {
       upKbps = null,
     } = req.body;
 
-    if (type !== 'standard' && type !== 'premium') {
+    // Stored canonical (lowercase): the QoS and pause rules compare the tier,
+    // so 'Premium' must not become a third, uncapped tier in the database.
+    const tier = normalizeVoucherType(type);
+    if (tier !== 'standard' && tier !== 'premium') {
       return res.status(400).json({ success: false, error: 'type must be "standard" or "premium"' });
     }
     if (!durationMinutes || durationMinutes < 1) {
@@ -181,7 +188,7 @@ router.post('/vouchers', async (req, res, next) => {
       await db.run(`
         INSERT INTO vouchers (code, type, duration_minutes, price, down_kbps, up_kbps, state, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, 'active', ?)
-      `, [code, type, durationMinutes, price, caps.down, caps.up, expiresAt]);
+      `, [code, tier, durationMinutes, price, caps.down, caps.up, expiresAt]);
       created.push(code);
     }
 
@@ -216,8 +223,12 @@ router.put('/vouchers/:id', async (req, res, next) => {
       params.push(state);
     }
     if (type !== undefined) {
+      const tier = normalizeVoucherType(type);
+      if (tier !== 'standard' && tier !== 'premium') {
+        return res.status(400).json({ success: false, error: 'type must be "standard" or "premium"' });
+      }
       fields.push('type = ?');
-      params.push(type);
+      params.push(tier);
     }
     if (durationMinutes !== undefined) {
       fields.push('duration_minutes = ?');

@@ -13,7 +13,11 @@
 const { v4: uuidv4 } = require('uuid');
 const omadaService = require('./omada');
 const omadaNorthbound = require('./omada-northbound');
-const { resolveVoucherRateLimit } = require('../utils/qos');
+const {
+  resolveVoucherRateLimit,
+  normalizeVoucherType,
+  isPremiumVoucherType,
+} = require('../utils/qos');
 const { getDb } = require('../db/client');
 
 const DEFAULT_DURATION = parseInt(process.env.DEFAULT_SESSION_DURATION || '60', 10);
@@ -34,10 +38,14 @@ const PAUSABLE_VOUCHER_TYPES = ['premium'];
 
 /**
  * isPausableVoucherType — true when a plan tier may pause/resume.
+ *
+ * The tier is normalized first, so a row stored as 'Premium' is treated exactly
+ * like 'premium' here and in the QoS rules (utils/qos.js).
+ *
  * @param {string} voucherType  e.g. 'standard' | 'premium'
  */
 function isPausableVoucherType(voucherType) {
-  return PAUSABLE_VOUCHER_TYPES.indexOf(voucherType) !== -1;
+  return PAUSABLE_VOUCHER_TYPES.indexOf(normalizeVoucherType(voucherType)) !== -1;
 }
 
 /**
@@ -107,7 +115,9 @@ async function validateVoucher(voucher, clientMac) {
     valid: true,
     id: row.id,
     duration: row.duration_minutes,
-    type: row.type || 'standard',
+    // Canonical tier: the QoS/pause rules compare this value, so the row's
+    // casing ('Premium') must not decide the guest's bandwidth.
+    type: normalizeVoucherType(row.type),
     // Per-voucher QoS caps (Kbps). NULL/absent means the tier defaults apply —
     // see utils/qos.js → resolveVoucherRateLimit().
     downKbps: row.down_kbps,
@@ -234,7 +244,7 @@ async function loadSession(sessionId) {
     apMac: row.ap_mac,
     ssidName: row.ssid_name,
         duration: row.duration_minutes,
-    voucherType: row.voucher_type || 'standard',
+    voucherType: normalizeVoucherType(row.voucher_type),
     downKbps: row.down_kbps,
     upKbps: row.up_kbps,
     totalDurationSeconds: row.total_duration_seconds,
@@ -490,11 +500,25 @@ async function resumeSession(sessionId) {
 async function applySessionRateLimit(session) {
   if (!session || !session.clientMac) return { applied: false, error: 'no session/clientMac' };
 
+  const premiumTier = isPremiumVoucherType(session.voucherType);
   const customRateLimit = resolveVoucherRateLimit({
     downKbps: session.downKbps,
     upKbps: session.upKbps,
     voucherType: session.voucherType,
   });
+
+  // A premium session that resolves no caps used to look identical, in the
+  // logs, to a standard one — the guest just ran at VOUCHER_DEFAULT_* speed.
+  // Say so explicitly: either the PREMIUM_* variables are unset/misnamed or
+  // omitted the download cap, and that is the only reason a premium plan gets
+  // the standard cap.
+  if (premiumTier && !customRateLimit) {
+    console.warn(
+      '[session/qos] PREMIUM session for ' + session.clientMac + ' has NO premium caps —' +
+      ' set PREMIUM_DOWN_MBPS (or PREMIUM_DOWN_KBPS) and PREMIUM_UP_KBPS;' +
+      ' falling back to VOUCHER_DEFAULT_* (standard speed) for this guest'
+    );
+  }
 
   try {
     const result = await omadaNorthbound.applyClientRateLimit(
@@ -515,7 +539,9 @@ async function applySessionRateLimit(session) {
       console.log(
         '[session/qos] rate limit applied to ' + session.clientMac +
         ' via ' + ((result && result.method) || (result && result.route) || 'unknown') +
-        ' (' + (customRateLimit ? 'voucher/premium caps' : 'default caps') + ')' +
+        ' (' + (customRateLimit
+          ? (premiumTier ? 'premium caps' : 'voucher caps')
+          : (premiumTier ? 'default caps — premium cap unavailable' : 'default caps')) + ')' +
         ' up=' + JSON.stringify(customRateLimit ? [customRateLimit.upUnit, customRateLimit.upLimit] : 'default') +
         ' down=' + JSON.stringify(customRateLimit ? [customRateLimit.downUnit, customRateLimit.downLimit] : 'default')
       );

@@ -25,6 +25,7 @@ const {
 const omadaService = require('../services/omada');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
+const { normalizeVoucherType } = require('../utils/qos');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 
 // ── GET /api/session/status ──────────────────────────────────
@@ -412,7 +413,7 @@ async function handleVoucherStatus(req, res, voucher) {
       state: 'expired',
       remainingSeconds: 0,
       expiresAt: voucherExpiresAt,
-      voucherType: row.type || 'standard',
+      voucherType: normalizeVoucherType(row.type),
     });
   }
 
@@ -424,7 +425,7 @@ async function handleVoucherStatus(req, res, voucher) {
       state: 'unused',
       remainingSeconds: durationSeconds,
       expiresAt: voucherExpiresAt,
-      voucherType: row.type || 'standard',
+      voucherType: normalizeVoucherType(row.type),
       durationMinutes: row.duration_minutes || 60,
     });
   }
@@ -442,7 +443,7 @@ async function handleVoucherStatus(req, res, voucher) {
       sessionId: session.sessionId,
       remainingSeconds: computeRemaining(session, serverTime),
       expiresAt: session.expiresAt,
-      voucherType: session.voucherType || row.type || 'standard',
+      voucherType: normalizeVoucherType(session.voucherType || row.type),
     });
   }
 
@@ -455,7 +456,7 @@ async function handleVoucherStatus(req, res, voucher) {
       sessionId: session.sessionId,
       remainingSeconds: computeRemaining(session, serverTime),
       expiresAt: session.expiresAt,
-      voucherType: session.voucherType || row.type || 'standard',
+      voucherType: normalizeVoucherType(session.voucherType || row.type),
     });
   }
 
@@ -468,7 +469,7 @@ async function handleVoucherStatus(req, res, voucher) {
       sessionId: session.sessionId,
       remainingSeconds: computeRemaining(session, serverTime),
       expiresAt: session.expiresAt,
-      voucherType: session.voucherType || row.type || 'standard',
+      voucherType: normalizeVoucherType(session.voucherType || row.type),
     });
   }
 
@@ -481,7 +482,7 @@ async function handleVoucherStatus(req, res, voucher) {
     state: (session && session.state) || 'expired',
     remainingSeconds: 0,
     expiresAt: (session && session.expiresAt) || voucherExpiresAt,
-    voucherType: (session && session.voucherType) || row.type || 'standard',
+    voucherType: normalizeVoucherType((session && session.voucherType) || row.type),
   });
 }
 
