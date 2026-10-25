@@ -63,29 +63,90 @@ app.use(helmet({
 // with the Host it actually arrived on (directly or through the tunnel's
 // X-Forwarded-Host). That is what makes a new Termux LAN IP or a rotating
 // Cloudflare quick-tunnel hostname work with no allowlist edit.
-const PRIVATE_ORIGIN_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$/i;
+//
+// Origins are parsed with the WHATWG URL parser rather than matched against an
+// anchored regex: a regex rejects harmless variants browsers/proxies emit
+// (trailing slash, uppercase host, an origin that carries a path), which is how
+// a perfectly legitimate http://192.168.0.4:3000 ends up 403'd.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
 
-function originHost(origin) {
-  try { return new URL(origin).host.toLowerCase(); } catch (err) { return ''; }
+function isPrivateIPv4(host) {
+  const parts = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!parts) return false;
+  const [a, b] = [Number(parts[1]), Number(parts[2])];
+  if (parts.slice(1).some(n => Number(n) > 255)) return false;
+  if (a === 10) return true;                        // 10.0.0.0/8
+  if (a === 127) return true;                       // loopback
+  if (a === 192 && b === 168) return true;          // 192.168.0.0/16
+  if (a === 172 && b >= 16 && b <= 31) return true;  // 172.16.0.0/12
+  if (a === 169 && b === 254) return true;          // link-local (Android hotspot fallback)
+  return false;
+}
+
+function isPrivateHostname(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return false;
+  if (LOOPBACK_HOSTS.has(host)) return true;
+  if (host.endsWith('.localhost') || host.endsWith('.local')) return true;  // mDNS
+  if (host.includes(':')) return host === '::1' || /^f[cd][0-9a-f]{2}:/.test(host);  // IPv6 ULA
+  return isPrivateIPv4(host);
+}
+
+// "host[:port]" with default ports removed, so http://x, http://x:80 and the
+// Host header "x" all compare equal. Accepts a bare host, host:port or URL.
+function normalizeHost(value) {
+  const raw = String(value || '').split(',')[0].trim().toLowerCase();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw.includes('://') ? raw : 'http://' + raw);
+    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    const port = url.port === '80' || url.port === '443' ? '' : url.port;
+    return hostname + (port ? ':' + port : '');
+  } catch (err) {
+    return '';
+  }
+}
+
+// Origin as a canonical "scheme://host[:port]" string, or '' when unparseable.
+function normalizeOrigin(origin) {
+  try {
+    const url = new URL(String(origin).trim());
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+    return url.protocol + '//' + normalizeHost(url.host);
+  } catch (err) {
+    return '';
+  }
 }
 
 function isAllowedOrigin(origin, req) {
   // Allow requests with no origin (mobile captive portals)
   if (!origin) return true;
   // Allow null origin (file:// protocol for admin.html)
-  if (origin === 'null') return true;
-  // Allow localhost / private LAN (admin panel access from a phone on the same Wi-Fi)
-  if (PRIVATE_ORIGIN_RE.test(origin)) return true;
+  if (String(origin).trim() === 'null') return true;
+
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+
+  // Allow localhost / private LAN, on any port (admin panel and portal from a
+  // phone on the same Wi-Fi: http://192.168.0.4:3000, http://10.0.0.5:8080, …)
+  try {
+    if (isPrivateHostname(new URL(normalized).hostname)) return true;
+  } catch (err) {
+    return false;
+  }
+
   // Allow same-origin requests (this backend also serves the portal pages)
-  const host = String(req.headers.host || '').toLowerCase();
-  if (host && originHost(origin) === host) return true;
-  const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim().toLowerCase();
-  if (forwardedHost && originHost(origin) === forwardedHost) return true;
+  const originHost = normalizeHost(normalized);
+  if (originHost && originHost === normalizeHost(req.headers.host)) return true;
+  if (originHost && originHost === normalizeHost(req.headers['x-forwarded-host'])) return true;
+
+  // Allow the configured allowlist (compared canonically so a trailing slash
+  // in CORS_ORIGINS does not silently fail).
   const allowed = (process.env.CORS_ORIGINS || FRONTEND_ORIGIN)
     .split(',')
-    .map(s => s.trim())
+    .map(s => normalizeOrigin(s.trim()))
     .filter(Boolean);
-  return allowed.includes(origin);
+  return allowed.includes(normalized);
 }
 
 const corsOptions = {
@@ -98,7 +159,17 @@ const corsOptions = {
 };
 
 app.use(cors((req, cb) => {
-  if (isAllowedOrigin(req.headers.origin, req)) return cb(null, corsOptions);
+  const origin = req.headers.origin;
+  if (isAllowedOrigin(origin, req)) return cb(null, corsOptions);
+  // Log the headers the decision was made from: without them a rejection only
+  // says "origin not allowed" and the offending origin is a guessing game.
+  // Primitive-only, same as the global error handler.
+  console.warn(
+    '[cors] rejected origin=' + JSON.stringify(String(origin)) +
+    ' host=' + JSON.stringify(String(req.headers.host || '')) +
+    ' x-forwarded-host=' + JSON.stringify(String(req.headers['x-forwarded-host'] || '')) +
+    ' method=' + String(req.method) + ' path=' + String(req.path)
+  );
   const err = new Error('CORS: origin not allowed');
   err.status = 403;
   err.code = 'CORS_FORBIDDEN';
