@@ -6,10 +6,10 @@
  * the public GitHub repository while still rendering on the live site.
  *
  * Placeholders replaced (see the PLACEHOLDERS table below):
- *   __STORE_LOCATION__      <- STORE_LOCATION      (index.html — HTML text)
- *   __FACEBOOK_PAGE_NAME__  <- FACEBOOK_PAGE_NAME  (index.html, error.html, status.html)
- *   __FACEBOOK_URL__        <- FACEBOOK_URL        (index.html, error.html, status.html)
- *   __CONTACT_NUMBER__      <- CONTACT_NUMBER      (index.html, error.html, status.html)
+ *   __STORE_LOCATION__      <- STORE_LOCATION      (index.html, success.html — HTML text)
+ *   __FACEBOOK_PAGE_NAME__  <- FACEBOOK_PAGE_NAME  (index.html, success.html, error.html)
+ *   __FACEBOOK_URL__        <- FACEBOOK_URL        (index.html, success.html, error.html)
+ *   __CONTACT_NUMBER__      <- CONTACT_NUMBER      (index.html, success.html, error.html)
  *   __SUPPORT_EMAIL__       <- SUPPORT_EMAIL       (all four pages)
  *
  * One page may hold both kinds of token: index.html renders the store location
@@ -114,9 +114,11 @@ const PLACEHOLDERS = [
 const TARGETS = [
   // Store hours are HTML text; the Contact Support modal config is JS.
   { name: 'index.html', context: { default: 'js', '__STORE_LOCATION__': 'html' } },
-  { name: 'success.html', context: 'html' },
+  // Same split: the store location is HTML text, the modal config is JS.
+  { name: 'success.html', context: { default: 'js', '__STORE_LOCATION__': 'html' } },
   { name: 'error.html', context: 'js' },
-  { name: 'status.html', context: 'js' },
+  // Polling logic is JS; the footer's support link sits in an HTML href.
+  { name: 'status.html', context: { default: 'js', '__SUPPORT_EMAIL__': 'html' } },
 ];
 
 /**

@@ -352,6 +352,13 @@
       <footer class="portal-footer" role="contentinfo">
         <p id="last-updated" class="last-updated">Loading…</p>
         <p id="polling-status" class="polling-status" aria-live="polite"></p>
+        <!-- Support contact row. The href is injected at build time by
+             inject-secrets.js as a full mailto: URL (or '#' when unset, in
+             which case the script below hides this row). -->
+        <p class="support-info" id="support-info">
+          Need help?
+          <a class="support-link" id="support-link" href="__SUPPORT_EMAIL__">Email support</a>
+        </p>
       </footer>
     </main>
   </div>
@@ -744,6 +751,27 @@
           fetchStatus();
         }
       });
+    })();
+  </script>
+
+  <script>
+    // Hide the "Need help?" line when no support email was injected at build
+    // time — inject-secrets.js writes href="#" in that case, so a fallback is
+    // never rendered as a broken mailto: link.
+    (function () {
+      'use strict';
+      var link = document.getElementById('support-link');
+      if (!link) return;
+
+      var href = link.getAttribute('href') || '';
+      if (/^mailto:[^@\s]+@[^@\s]+$/.test(href)) return;
+
+      var row = document.getElementById('support-info');
+      if (row) {
+        row.style.display = 'none';
+      } else {
+        link.style.display = 'none';
+      }
     })();
   </script>
 </body>

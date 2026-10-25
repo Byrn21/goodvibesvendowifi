@@ -409,7 +409,7 @@
           </span>
           <div>
             <span class="support-row__label">Location</span>
-            <span class="support-row__value">Blk 34 Lot 1 Eucalyptus Street, Phase 5, Mabuhay City Subdivision</span>
+            <span class="support-row__value">__STORE_LOCATION__</span>
           </div>
         </div>
 
@@ -423,6 +423,43 @@
           <div>
             <span class="support-row__label">Hours</span>
             <span class="support-row__value">Open Daily, 8:00 AM to 8:00 PM</span>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M13.5 21v-7h2.4l.4-3h-2.8V9.1c0-.9.3-1.5 1.6-1.5h1.3V4.9c-.3 0-1.1-.1-2-.1-2 0-3.4 1.2-3.4 3.5V11H8.5v3H11v7h2.5z"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Facebook Page</span>
+            <a class="support-row__value" id="support-facebook" href="#" target="_blank" rel="noopener noreferrer"></a>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Contact Number</span>
+            <a class="support-row__value" id="support-phone" href="#"></a>
+          </div>
+        </div>
+
+        <div class="support-row">
+          <span class="support-row__icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="16" rx="2"/>
+              <path d="m22 7-10 6L2 7"/>
+            </svg>
+          </span>
+          <div>
+            <span class="support-row__label">Email</span>
+            <a class="support-row__value" id="support-email" href="#"></a>
           </div>
         </div>
       </div>
@@ -609,6 +646,50 @@
           lastFocused.focus();
         }
       }
+
+      // Contact details for this page. Injected at build time by
+      // inject-secrets.js; a row is hidden when its value was not configured,
+      // so the modal never renders a raw token or a broken tel:/mailto: link.
+      var SUPPORT_CONFIG = {
+        facebookName: '__FACEBOOK_PAGE_NAME__',
+        facebookUrl:  '__FACEBOOK_URL__',
+        phone:        '__CONTACT_NUMBER__',
+        email:        '__SUPPORT_EMAIL__'
+      };
+
+      function fillSupportRow(id, text, href) {
+        var link = document.getElementById(id);
+        if (!link) return;
+
+        var row = link.closest ? link.closest('.support-row') : link.parentNode;
+        var value = String(text || '').trim();
+
+        if (!value) {
+          if (row) row.style.display = 'none';
+          return;
+        }
+
+        link.textContent = value;
+
+        if (href && href !== '#') {
+          link.href = href;
+        } else {
+          link.removeAttribute('href');
+          link.removeAttribute('target');
+        }
+      }
+
+      fillSupportRow('support-facebook', SUPPORT_CONFIG.facebookName, SUPPORT_CONFIG.facebookUrl);
+      fillSupportRow(
+        'support-phone',
+        SUPPORT_CONFIG.phone,
+        SUPPORT_CONFIG.phone ? 'tel:' + SUPPORT_CONFIG.phone.replace(/[^+0-9]/g, '') : ''
+      );
+      fillSupportRow(
+        'support-email',
+        SUPPORT_CONFIG.email,
+        SUPPORT_CONFIG.email ? 'mailto:' + SUPPORT_CONFIG.email : ''
+      );
 
       if (trigger) trigger.addEventListener('click', openModal);
       closeX.addEventListener('click', closeModal);
