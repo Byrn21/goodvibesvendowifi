@@ -327,16 +327,26 @@ async function expireSession(sessionId, reason = 'time_expired', loaded) {
     WHERE session_id = ?
   `, [now, reason || 'unknown', now, sessionId]);
 
-  // Call Omada unauth only if session was active or paused
+  // Kick the client off the controller only if the session was active or
+  // paused. unauthenticateClient() uses the administrator session (site web
+  // API) first and the portal operator endpoint only as a fallback; a
+  // success:false means NO route was accepted, so the guest may still be
+  // online — that must be visible in the logs, never swallowed.
   if (prevState === 'active' || prevState === 'paused') {
     try {
-      await omadaService.unauthenticateClient({
+      const result = await omadaService.unauthenticateClient({
         clientMac: session.clientMac,
         apMac: session.apMac,
         ssidName: session.ssidName,
       });
+      if (!result || result.success === false) {
+        console.error(
+          '[expireSession] Omada did NOT revoke access for ' + session.clientMac +
+          ' (path=' + (result && result.path) + ') — the client may stay online'
+        );
+      }
     } catch (err) {
-      console.warn('[expireSession] Omada unauth failed:', err.message);
+      console.error('[expireSession] Omada unauth failed:', err.message);
     }
   }
 

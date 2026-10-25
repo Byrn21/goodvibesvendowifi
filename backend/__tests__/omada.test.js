@@ -60,6 +60,63 @@ function respondJson(req, cb, statusCode, body, headers) {
   res.emit('end');
 }
 
+/**
+ * Path-aware controller transport: each route is answered by its path, so a
+ * test never depends on the global order of calls (logins, site lookup, the
+ * administrator kick routes, the operator fallback and its verification).
+ *
+ * Defaults describe a controller that serves the hotspot endpoints but NOT
+ * the administrator site routes: those answer errorCode -1600 ("Unsupported
+ * request path."), exactly like the build that left expired guests online.
+ *
+ * @param {Object} [overrides] { adminUnauth, records, disconnect, unauth,
+ *                               status, timeOne, any } path → handler
+ * @returns {Function} uninstall
+ */
+function controllerTransport(overrides) {
+  const o = overrides || {};
+  const json = (req, cb, body) => respondJson(req, cb, 200, body);
+  const loginOk = (req, cb) => respondJson(req, cb, 200,
+    { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+  const unsupported = (req, cb) => json(req, cb, { errorCode: -1600, msg: 'Unsupported request path.' });
+
+  return mockHttpTransport((options, req, cb) => {
+    const path = options.path;
+    if (o.any) return o.any(options, req, cb);
+
+    if (path.endsWith('/api/v2/login') || path.includes('/hotspot/login')) return loginOk(req, cb);
+    if (path.includes('/users/current')) {
+      return json(req, cb, {
+        errorCode: 0,
+        result: { privilege: { sites: [{ name: 'Default', key: 'site-1' }] } },
+      });
+    }
+    // Administrator kick routes (site-scoped).
+    if (path.includes('/hotspot/clients/')) {
+      return o.adminUnauth ? o.adminUnauth(options, req, cb) : unsupported(req, cb);
+    }
+    if (path.includes('/hotspot/authed-records')) {
+      if (path.includes('/disconnect')) {
+        return o.disconnect ? o.disconnect(options, req, cb) : unsupported(req, cb);
+      }
+      return o.records ? o.records(options, req, cb) : unsupported(req, cb);
+    }
+    // Portal operator endpoints.
+    if (path.includes('/extPortal/auth')) {
+      return o.timeOne ? o.timeOne(options, req, cb) : json(req, cb, { errorCode: 0 });
+    }
+    if (path.includes('/extPortal/unauth')) {
+      return o.unauth ? o.unauth(options, req, cb) : json(req, cb, { errorCode: 0 });
+    }
+    if (path.includes('/extPortal/session')) {
+      return o.status
+        ? o.status(options, req, cb)
+        : json(req, cb, { errorCode: 0, result: { authorized: false } });
+    }
+    return json(req, cb, { errorCode: 0 });
+  });
+}
+
 beforeEach(() => {
   _internal.invalidateSession();
 });
@@ -543,24 +600,13 @@ describe('session expiry retry', () => {
 // ================================================================
 // unauthenticateClient — verify + fallback chain
 // ================================================================
-describe('unauthenticateClient (unauth → verify → time=1 fallback)', () => {
-  function chainHandler(script) {
-    let i = 0;
-    return function (options, req, cb) {
-      const step = script[Math.min(i, script.length - 1)];
-      i += 1;
-      step(options, req, cb);
-    };
-  }
-  const loginOk = (req, cb) =>
-    respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
+describe('unauthenticateClient (operator fallback → verify → time=1 fallback)', () => {
+  // These tests exercise the OPERATOR fallback: the path-aware transport below
+  // answers every administrator kick route with -1600 (unsupported), so the
+  // flow falls through to extPortal/unauth exactly as it did historically.
 
-  test('verified revocation: unauth accepted + session query says not authorized', async () => {
-    const uninstall = mockHttpTransport(chainHandler([
-      (o, req, cb) => loginOk(req, cb),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0 }),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0, result: { authorized: false } }),
-    ]));
+  test('verified revocation: operator unauth accepted + session query says not authorized', async () => {
+    const uninstall = controllerTransport();
     try {
       const result = await omada.unauthenticateClient({ clientMac: 'AA:BB:CC:DD:EE:FF' });
       expect(result).toMatchObject({ success: true, verified: true, path: 'unauth' });
@@ -570,29 +616,28 @@ describe('unauthenticateClient (unauth → verify → time=1 fallback)', () => {
   });
 
   test('time=1 fallback when client still authorized after unauth', async () => {
-    const uninstall = mockHttpTransport(chainHandler([
-      (o, req, cb) => loginOk(req, cb),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0 }),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0, result: { authorized: true } }),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0 }),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0, result: { authorized: false } }),
-    ]));
+    let statusCalls = 0;
+    const uninstall = controllerTransport({
+      status: (options, req, cb) => {
+        statusCalls += 1;
+        respondJson(req, cb, 200, { errorCode: 0, result: { authorized: statusCalls === 1 } });
+      },
+    });
     try {
       const result = await omada.unauthenticateClient({ clientMac: 'AA:BB:CC:DD:EE:FF' });
       expect(result).toMatchObject({ success: true, verified: true, path: 'time=1' });
+      expect(statusCalls).toBe(2);
     } finally {
       uninstall();
     }
   });
 
   test('returns success:false when client STILL authorized after time=1 fallback', async () => {
-    const uninstall = mockHttpTransport(chainHandler([
-      (o, req, cb) => loginOk(req, cb),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0 }),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0, result: { authorized: true } }),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0 }),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0, result: { authorized: true } }),
-    ]));
+    const uninstall = controllerTransport({
+      status: (options, req, cb) => {
+        respondJson(req, cb, 200, { errorCode: 0, result: { authorized: true } });
+      },
+    });
     try {
       const result = await omada.unauthenticateClient({ clientMac: 'AA:BB:CC:DD:EE:FF' });
       expect(result.success).toBe(false);
@@ -602,11 +647,9 @@ describe('unauthenticateClient (unauth → verify → time=1 fallback)', () => {
   });
 
   test('degrades gracefully when the undocumented session endpoint is missing (HTTP 404)', async () => {
-    const uninstall = mockHttpTransport(chainHandler([
-      (o, req, cb) => loginOk(req, cb),
-      (o, req, cb) => respondJson(req, cb, 200, { errorCode: 0 }),
-      (o, req, cb) => respondJson(req, cb, 404, { errorCode: -1 }),
-    ]));
+    const uninstall = controllerTransport({
+      status: (options, req, cb) => respondJson(req, cb, 404, { errorCode: -1 }),
+    });
     try {
       const result = await omada.unauthenticateClient({ clientMac: 'AA:BB:CC:DD:EE:FF' });
       // unauth was accepted → success true, but NOT verified (no status proof)
@@ -745,21 +788,16 @@ describe('Omada site / OMADAC id logging', () => {
     // The handler runs BEFORE req.write(), so the body is parsed after the
     // await completes (same pattern as the other body-shape tests).
     let fallbackReq = null;
-    let i = 0;
-    const uninstall = mockHttpTransport((options, req, cb) => {
-      i += 1;
-      if (i === 1) {
-        respondJson(req, cb, 200, { errorCode: 0, result: { token: 'tok' } }, { 'set-cookie': ['S=1'] });
-      } else if (i === 2) {
-        respondJson(req, cb, 200, { errorCode: 0 });       // unauth accepted
-      } else if (i === 3) {
-        respondJson(req, cb, 200, { errorCode: 0, result: { authorized: true } }); // still authorized
-      } else if (i === 4) {
+    let statusCalls = 0;
+    const uninstall = controllerTransport({
+      status: (options, req, cb) => {
+        statusCalls += 1;                                   // still authorized, then revoked
+        respondJson(req, cb, 200, { errorCode: 0, result: { authorized: statusCalls === 1 } });
+      },
+      timeOne: (options, req, cb) => {
         fallbackReq = req;                                  // time=1 fallback
         respondJson(req, cb, 200, { errorCode: 0 });
-      } else {
-        respondJson(req, cb, 200, { errorCode: 0, result: { authorized: false } });
-      }
+      },
     });
     try {
       const result = await omada.unauthenticateClient({

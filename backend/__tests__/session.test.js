@@ -196,6 +196,35 @@ describe('Session State Machine', () => {
     expect(row.expire_reason).toBe('time_expired');
   });
 
+  test('expireSession surfaces an Omada kick that was not applied', async () => {
+    const omadaService = require('../src/services/omada');
+    const kick = jest.spyOn(omadaService, 'unauthenticateClient')
+      .mockResolvedValue({ success: false, verified: false, path: 'unauth' });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await sessionService.recordSession({
+        sessionId: 'sess_kick_fail',
+        clientMac: 'aa:bb:cc:dd:ee:ff',
+        duration: 60,
+      });
+
+      // Same path the expiration worker takes for a timed-out active row.
+      await sessionService.expireSession('sess_kick_fail', 'time_expired');
+
+      expect(kick).toHaveBeenCalledWith(expect.objectContaining({
+        clientMac: 'aa:bb:cc:dd:ee:ff',
+      }));
+      const line = errSpy.mock.calls
+        .map((c) => c.join(' '))
+        .find((l) => l.includes('did NOT revoke access'));
+      expect(line).toBeTruthy();
+      expect(line).toContain('aa:bb:cc:dd:ee:ff');
+    } finally {
+      kick.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
+
   test('pause rejects non-active session', async () => {
     await expect(sessionService.pauseSession('nonexistent')).rejects.toThrow('Session not found');
   });

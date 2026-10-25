@@ -33,9 +33,15 @@
  *      v6.2.10+ guide and the cross-verified working implementations.
  *
  *   3. Client de-authorization (pause / expiration):
- *      try POST /{OMADAC_ID}/api/v2/hotspot/extPortal/unauth first
- *      (undocumented), then VERIFY actual revocation, falling back to a
- *      time=1 re-authorization if the client is still authorized.
+ *      POST /{OMADAC_ID}/api/v2/sites/{siteKey}/hotspot/clients/{MAC}/unauth
+ *      on an ADMINISTRATOR session, then VERIFY revocation against the site's
+ *      authorized-client records (…/hotspot/authed-records); an /openapi/v1/…
+ *      unauth and the authed-record disconnect are tried next. The
+ *      undocumented extPortal/unauth (portal operator) is only a LAST RESORT:
+ *      many builds answer it with errorCode -1600 "Unsupported request path."
+ *      and the guest stays online after expiry. The site routes need the
+ *      administrator because they are site-scoped and the portal operator
+ *      holds no site privileges.
  *
  *   4. Per-client bandwidth cap (QoS):
  *        PATCH /{OMADAC_ID}/api/v2/sites/{siteKey}/clients/{MAC}/ratelimit
@@ -56,16 +62,18 @@
  * TWO CREDENTIAL SETS (never interchangeable):
  *
  *   portal operator (OMADA_PORTAL_OPERATOR_*) — a Hotspot portal operator.
- *     Logs in through /hotspot/login and may ONLY authorize/de-authorize
- *     clients on /hotspot/extPortal/*. It holds no site privileges, so
+ *     Logs in through /hotspot/login and may ONLY authorize clients on
+ *     /hotspot/extPortal/* (its undocumented unauth/session endpoints are
+ *     attempted as a fallback). It holds no site privileges, so
  *     GET /users/current returns zero sites and the controller answers the
  *     rate-limit PATCH with a permission error.
  *
  *   administrator (OMADA_ADMIN_*) — a controller administrator account.
  *     Logs in through /login (the controller's own web-UI login) and is the
- *     ONLY account that may read the site list (GET /sites, /users/current)
- *     or PATCH a client rate limit. Omada refuses administrator accounts on
- *     the hotspot portal endpoints, which is why both sets are required.
+ *     ONLY account that may read the site list (GET /sites, /users/current),
+ *     PATCH a client rate limit, or kick an authorized client off a site
+ *     (…/hotspot/clients/{MAC}/unauth). Omada refuses administrator accounts
+ *     on the hotspot portal endpoints, which is why both sets are required.
  *
  * Each set keeps its own session (cookie jar + Csrf-Token). Logging in as an
  * administrator must never displace the portal operator session used for
@@ -81,7 +89,8 @@
  *                                     ONLY for /hotspot/login + extPortal/*
  *   OMADA_PORTAL_OPERATOR_PASSWORD  — hotspot portal operator password
  *   OMADA_ADMIN_NAME                — controller administrator username; used
- *                                     ONLY for site queries and QoS PATCHes
+ *                                     ONLY for site queries, QoS PATCHes and
+ *                                     client deauthorization
  *   OMADA_ADMIN_PASSWORD            — controller administrator password
  *   OMADA_AUTH_TIMEOUT              — request timeout ms (default 10000)
  *   OMADA_TLS_REJECT                — "true" enforces full cert validation;
@@ -110,9 +119,10 @@ const SITE       = process.env.OMADA_SITE     || 'Default';
 const OPERATOR_NAME = process.env.OMADA_PORTAL_OPERATOR_NAME || '';
 const OPERATOR_PASSWORD = process.env.OMADA_PORTAL_OPERATOR_PASSWORD || '';
 
-// Controller ADMINISTRATOR — privileged calls ONLY (site list + client
-// rate-limit PATCH). Omada will not accept an administrator on the hotspot
-// portal endpoints, so it cannot replace the operator credentials above.
+// Controller ADMINISTRATOR — privileged calls ONLY (site list, client
+// rate-limit PATCH, and kicking a client off the site). Omada will not accept
+// an administrator on the hotspot portal endpoints, so it cannot replace the
+// operator credentials above.
 const ADMIN_NAME = process.env.OMADA_ADMIN_NAME || '';
 const ADMIN_PASSWORD = process.env.OMADA_ADMIN_PASSWORD || '';
 const TIMEOUT    = parseInt(process.env.OMADA_AUTH_TIMEOUT || '10000', 10);
@@ -140,7 +150,8 @@ const MOCK_MODE = process.env.OMADA_MOCK === 'true' || !BASE_URL;
 // and a hotspot portal login are separate accounts with separate privileges:
 //
 //   portalSession — OMADA_PORTAL_OPERATOR_* (hotspot/login); extPortal/*.
-//   adminSession  — OMADA_ADMIN_* (/login); site queries + QoS PATCHes.
+//   adminSession  — OMADA_ADMIN_* (/login); site queries, QoS PATCHes and
+//                    kicking a client off the site.
 //
 // Cookie + CSRF token are obtained once per session and reused; a 401 from the
 // controller invalidates and re-establishes THAT session only.
@@ -440,18 +451,257 @@ async function authenticateClient(ctx) {
   return { success: true, raw: response.body };
 }
 
+// ================================================================
+// Deauthorization — kick a client off the controller (ADMIN session)
+// ================================================================
+// /hotspot/extPortal/unauth is UNDOCUMENTED and many controller builds do not
+// serve it: they answer HTTP 200 with errorCode -1600 ("Unsupported request
+// path."), the backend logs a rejection, and the guest keeps internet access
+// after its voucher expired. The same kick is a SITE operation, so it needs an
+// ADMINISTRATOR session — the portal operator holds no site privileges (it is
+// the same account that returned 0 sites for the QoS PATCH).
+//
+// Routes performing the kick, tried in order on adminSession:
+//   v2-unauth       — the web-API path the controller UI uses.
+//   openapi-session — the Open API router reached with the web session (how the
+//                     controller UI itself calls the Open API on a local box).
+//   authed-record   — disconnect by the site's own authentication record, for
+//                     builds that expose no MAC-level unauth path.
+//
+// Acceptance is verified from the site's authorized-client records: a MAC with
+// no record (or with an expired one) is no longer authorized.
+const DEAUTH_ROUTES = [
+  {
+    name: 'v2-unauth',
+    path: (omadacId, siteKey, mac) => '/' + encodeURIComponent(omadacId) +
+      '/api/v2/sites/' + encodeURIComponent(siteKey) +
+      '/hotspot/clients/' + encodeURIComponent(mac) + '/unauth',
+  },
+  {
+    name: 'openapi-session',
+    path: (omadacId, siteKey, mac) => '/openapi/v1/' + encodeURIComponent(omadacId) +
+      '/sites/' + encodeURIComponent(siteKey) +
+      '/hotspot/clients/' + encodeURIComponent(mac) + '/unauth',
+  },
+  {
+    name: 'authed-record',
+    needsRecord: true,
+    path: (omadacId, siteKey, mac, recordId) => '/' + encodeURIComponent(omadacId) +
+      '/api/v2/sites/' + encodeURIComponent(siteKey) +
+      '/hotspot/authed-records/' + encodeURIComponent(recordId) + '/disconnect',
+  },
+];
+
+// The kick route that last worked (see DEAUTH_ROUTES). Process-local.
+let preferredDeauthRoute = null;
+
+/**
+ * Describe a controller rejection as one log/error line.
+ *
+ * @param {{statusCode:number, body:Object}} response
+ * @returns {string}
+ */
+function describeRejection(response) {
+  const body = (response && response.body) || {};
+  let reason = body.msg || body.message || ('HTTP ' + (response && response.statusCode));
+  if (body.errorCode !== undefined) reason += ' (errorCode=' + body.errorCode + ')';
+  if (body.errorCode === -1600) reason += ' — this controller build does not serve that path';
+  return reason;
+}
+
+/**
+ * Extract the authorized-client records from a controller response.
+ *
+ * @param {Object} response omadaRequest result
+ * @returns {Array<Object>|null} records, or null when the call did not succeed
+ */
+function authedRecords(response) {
+  if (!response || response.statusCode !== 200 || !response.body || response.body.errorCode !== 0) {
+    return null;
+  }
+  const result = response.body.result;
+  if (!result) return null;
+  const data = Array.isArray(result) ? result : (result.data || result.records);
+  return Array.isArray(data) ? data : null;
+}
+
+/**
+ * List the site's authorized clients on the ADMINISTRATOR session.
+ *
+ * @param {string} siteKey
+ * @returns {Promise<Array<Object>|null>} null when no route answers
+ */
+async function listAuthedRecords(siteKey) {
+  const paths = [
+    '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/sites/' + encodeURIComponent(siteKey) +
+      '/hotspot/authed-records?page=1&pageSize=200',
+    '/openapi/v1/' + encodeURIComponent(OMADAC_ID) + '/sites/' + encodeURIComponent(siteKey) +
+      '/hotspot/authed-records?page=1&pageSize=200',
+  ];
+
+  for (const path of paths) {
+    try {
+      const records = authedRecords(await requestWithSession(adminSession, path, 'GET'));
+      if (records) return records;
+    } catch (err) {
+      console.warn('[omada] authed-records lookup via ' + path + ' failed: ' + err.message);
+    }
+  }
+  return null;
+}
+
+/**
+ * Find a MAC's authentication record in a records list.
+ *
+ * @param {Array<Object>|null} records
+ * @param {string} clientMac canonical AA:BB:CC:DD:EE:FF
+ * @returns {Object|null}
+ */
+function recordFor(records, clientMac) {
+  if (!Array.isArray(records)) return null;
+  return records.find((r) => normalizeDeviceMac(r && (r.mac || r.clientMac)) === clientMac) || null;
+}
+
+/**
+ * Whether an authentication record still grants access.
+ *
+ * An entry with no validity information counts as authorized (the caller only
+ * reaches this with a record the controller returned for the MAC).
+ *
+ * @param {Object|null} record
+ * @returns {boolean}
+ */
+function isRecordAuthorized(record) {
+  if (!record) return false;
+  if (typeof record.valid === 'boolean') return record.valid;
+  if (typeof record.authorized === 'boolean') return record.authorized;
+
+  const raw = record.end !== undefined
+    ? record.end
+    : (record.endTime !== undefined ? record.endTime : record.expireTime);
+  if (raw !== undefined && raw !== null && raw !== '') {
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) {
+      // Some builds report seconds, others milliseconds.
+      const at = numeric < 1e11 ? numeric * 1000 : numeric;
+      return at > Date.now();
+    }
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed > Date.now();
+  }
+  return true;
+}
+
+/**
+ * Whether the controller still authorizes a client on the site.
+ *
+ * @param {string} siteKey
+ * @param {string} clientMac canonical AA:BB:CC:DD:EE:FF
+ * @returns {Promise<boolean|null>} null when the record list is unavailable
+ */
+async function isClientStillAuthorized(siteKey, clientMac) {
+  const records = await listAuthedRecords(siteKey);
+  if (!records) return null;
+  return isRecordAuthorized(recordFor(records, clientMac));
+}
+
+/**
+ * Kick a client off the controller on the ADMINISTRATOR session.
+ *
+ * Each route is accepted only after the controller answers errorCode 0 AND the
+ * client no longer appears as authorized; a still-authorized client falls
+ * through to the next route. The first route that works is remembered.
+ *
+ * @param {string} clientMac canonical AA:BB:CC:DD:EE:FF
+ * @returns {Promise<{success:boolean, verified?:boolean, route?:string, failures?:Array}>}
+ * @throws when the administrator login or the site lookup fails
+ */
+async function deauthenticateClientAsAdmin(clientMac) {
+  await ensureSession(adminSession);
+  const siteKey = await resolveSiteKey();
+  // Path segments carry the hyphen-separated MAC the controller's URLs use.
+  const pathMac = clientMac.replace(/:/g, '-');
+
+  const routes = preferredDeauthRoute
+    ? [
+        ...DEAUTH_ROUTES.filter((r) => r.name === preferredDeauthRoute),
+        ...DEAUTH_ROUTES.filter((r) => r.name !== preferredDeauthRoute),
+      ]
+    : DEAUTH_ROUTES;
+
+  const failures = [];
+  for (const route of routes) {
+    let recordId = null;
+    if (route.needsRecord) {
+      const records = await listAuthedRecords(siteKey);
+      const record = recordFor(records, clientMac);
+      recordId = record && (record.id || record.recordId);
+      if (!recordId) {
+        failures.push({ route: route.name, reason: 'no authentication record for this MAC' });
+        continue;
+      }
+    }
+
+    const path = route.path(OMADAC_ID, siteKey, pathMac, recordId);
+
+    let response;
+    try {
+      // POST with an empty JSON object: the action endpoints expect a body,
+      // and an empty one keeps the request identical to the controller UI's.
+      response = await requestWithSession(adminSession, path, 'POST', '{}');
+    } catch (err) {
+      failures.push({ route: route.name, reason: err.message });
+      console.error('[omada] deauth ' + route.name + ' request failed for ' + clientMac + ': ' + err.message);
+      continue;
+    }
+
+    if (response.statusCode !== 200 || !response.body || response.body.errorCode !== 0) {
+      const reason = describeRejection(response);
+      failures.push({ route: route.name, reason });
+      console.warn('[omada] deauth ' + route.name + ' rejected for ' + clientMac + ' — ' + reason);
+      continue;
+    }
+
+    // Accepted — prove it actually revoked access before reporting success.
+    const stillAuthorized = await isClientStillAuthorized(siteKey, clientMac);
+    if (stillAuthorized === true) {
+      failures.push({
+        route: route.name,
+        reason: 'controller accepted the call but the client is still authorized',
+      });
+      console.warn(
+        '[omada] deauth ' + route.name + ' accepted for ' + clientMac +
+        ' but the client is STILL authorized — trying the next route'
+      );
+      continue;
+    }
+
+    preferredDeauthRoute = route.name;
+    console.log(
+      '[omada] kicked ' + clientMac + ' via ' + route.name + ' (POST ' + path + ')' +
+      (stillAuthorized === false ? ' — revocation verified' : ' — not verified (record list unavailable)')
+    );
+    return { success: true, verified: stillAuthorized === false, route: route.name };
+  }
+
+  return { success: false, failures };
+}
+
 /**
  * De-authorize a client (pause / expiration).
  *
  * Flow:
- *   1. POST /{omadacId}/api/v2/hotspot/extPortal/unauth  (undocumented — attempt first)
- *   2. Verify actual revocation via the status call (see the NOTE on
+ *   1. Kick through the ADMINISTRATOR session (see DEAUTH_ROUTES); a route is
+ *      accepted only once the site's authed-records no longer list the MAC.
+ *   2. Fall back to the operator's extPortal/unauth (undocumented; answers
+ *      errorCode -1600 where unsupported).
+ *   3. Verify actual revocation via the status call (see the NOTE on
  *      queryClientStatus below for its own verification status)
  *      ├─ revoked            → success
  *      ├─ still authorized   → time=1 fallback re-auth, then re-verify
  *      └─ status call failed → WARN "verification unavailable", do NOT
  *         fail the revoke (avoid false failures); deauth_verified=false
- *   3. If STILL authorized after the time=1 fallback → log ERROR and
+ *   4. If STILL authorized after the time=1 fallback → log ERROR and
  *      return { success: false, verified: false } so callers can surface it.
  *
  * @param {Object} ctx
@@ -475,7 +725,33 @@ async function unauthenticateClient(ctx) {
     throw err;
   }
 
-  // ── Step 1: undocumented unauth endpoint (attempt first) ──
+  // ── Step 1: privileged kick on the ADMINISTRATOR session ──
+  // This is the path that actually disconnects a guest on a build that does
+  // not serve extPortal/unauth. A failure here is NOT fatal: the operator
+  // endpoint below is still tried, because some firmware serves only that.
+  const canonical = normalizeDeviceMac(ctx.clientMac);
+  if (canonical && ADMIN_NAME && ADMIN_PASSWORD) {
+    try {
+      const kicked = await deauthenticateClientAsAdmin(canonical);
+      if (kicked.success) {
+        console.log(
+          '[omada] unauth for ' + canonical + ' → accepted via ' + kicked.route +
+          (kicked.verified
+            ? ' (revocation verified)'
+            : ' (revocation NOT verified — the record list is unavailable)')
+        );
+        return { success: true, verified: kicked.verified, path: kicked.route };
+      }
+      console.warn(
+        '[omada] administrator deauth for ' + canonical + ' failed on every site route: ' +
+        kicked.failures.map((f) => f.route + ': ' + f.reason).join(' | ')
+      );
+    } catch (err) {
+      console.error('[omada] administrator deauth for ' + canonical + ' failed: ' + err.message);
+    }
+  }
+
+  // ── Step 2: operator extPortal/unauth (fallback for older firmware) ──
   const unauthPath = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/hotspot/extPortal/unauth';
   const body = JSON.stringify({
     clientMac: ctx.clientMac,
@@ -493,11 +769,17 @@ async function unauthenticateClient(ctx) {
       (unauthOk ? 'accepted' : 'rejected (HTTP ' + response.statusCode + ', errorCode=' +
         (response.body && response.body.errorCode) + ')')
     );
+    if (!unauthOk && response.body && response.body.errorCode === -1600) {
+      console.error(
+        '[omada] extPortal/unauth is not served by this controller build (errorCode -1600, ' +
+        '"Unsupported request path.") — a kick must go through the administrator site routes'
+      );
+    }
   } catch (err) {
     console.error('[omada] extPortal/unauth request failed for ' + ctx.clientMac + ':', err.message);
   }
 
-  // ── Step 2: verify actual revocation, fall back if needed ──
+  // ── Step 3: verify actual revocation, fall back if needed ──
   const status = await queryClientStatus(ctx).catch(() => null);
 
   if (status && status.authorized === false) {
@@ -854,7 +1136,7 @@ function logResolvedConfig(force) {
     problems.push('OMADA_PORTAL_OPERATOR_NAME/PASSWORD unset — hotspot login will fail');
   }
   if (!ADMIN_NAME || !ADMIN_PASSWORD) {
-    problems.push('OMADA_ADMIN_NAME/PASSWORD unset — site queries and bandwidth caps will fail');
+    problems.push('OMADA_ADMIN_NAME/PASSWORD unset — site queries, bandwidth caps and client deauthorization will fail (expired guests stay online)');
   }
   if (/example\.com/i.test(BASE_URL) || /your-/i.test(OMADAC_ID)) {
     problems.push('a value is still the .env.example placeholder (base=' +
@@ -1301,6 +1583,18 @@ module.exports = {
     adminSession: () => adminSession,
     portalSession: () => portalSession,
     RATE_LIMIT_ROUTES,
+    DEAUTH_ROUTES,
+    deauthenticateClientAsAdmin,
+    listAuthedRecords,
+    authedRecords,
+    recordFor,
+    isRecordAuthorized,
+    isClientStillAuthorized,
+    describeRejection,
+    resetDeauthState: () => {
+      preferredDeauthRoute = null;
+    },
+    preferredDeauthRoute: () => preferredDeauthRoute,
     siteEntries,
     rateLimitRejected,
     resetRateLimitState: () => {
