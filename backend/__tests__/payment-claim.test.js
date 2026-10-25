@@ -403,18 +403,45 @@ describe('POST /api/payment/claim', () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const [url, init] = fetchMock.mock.calls[0];
-      expect(url).toBe(SMS_URL);
+      // No request body: every value travels in the URL query string so the
+      // MacroDroid variable whitelist can extract it.
+      expect(init.body).toBeUndefined();
       expect(init.method).toBe('POST');
-      expect(init.headers['Content-Type']).toBe('application/json');
-      expect(JSON.parse(init.body)).toEqual({
+
+      const parsed = new URL(url);
+      expect(parsed.origin + parsed.pathname).toBe(SMS_URL);
+      expect(Object.fromEntries(parsed.searchParams)).toEqual({
         target_number: MOBILE,
         voucher_code: '898989',
         ref_suffix: '0001',
         ref_no: 'REF-SMS0001',
-        authorized: true,
-        minutes: 5,
+        authorized: 'true',
+        minutes: '5',
         status_link: 'https://goodvibes.example.com/status.html',
       });
+    });
+
+    test('appends the parameters when MACRODROID_SMS_WEBHOOK_URL already has a query string', async () => {
+      process.env.MACRODROID_SMS_WEBHOOK_URL = SMS_URL + '?secret=abc';
+      delete process.env.BASE_URL;
+      const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+      global.fetch = fetchMock;
+
+      await seedUnclaimed('REF-SMS0004', 50);
+      await seedVoucher('929292', 5000);
+
+      const res = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0004', mobile_number: MOBILE, client_mac: MAC });
+      expect(res.status).toBe(200);
+
+      const [url] = fetchMock.mock.calls[0];
+      const parsed = new URL(url);
+      expect(parsed.searchParams.get('secret')).toBe('abc');
+      expect(parsed.searchParams.get('target_number')).toBe(MOBILE);
+      expect(parsed.searchParams.get('voucher_code')).toBe('929292');
+      // BASE_URL is unset, so status_link must be absent rather than "undefined".
+      expect(parsed.searchParams.has('status_link')).toBe(false);
     });
 
     test('does not call the SMS webhook when MACRODROID_SMS_WEBHOOK_URL is unset', async () => {

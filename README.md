@@ -356,11 +356,14 @@ dashboard → Environment** (or `render.yaml`) for production.
 `MACRODROID_SMS_WEBHOOK_URL` is optional and the call is **fire-and-forget**:
 it is dispatched without blocking the response and any failure is logged only,
 so an unreachable SMS endpoint can never turn a successful claim into an error.
-The body is JSON: `{ target_number, voucher_code, ref_suffix, ref_no,
-authorized, minutes, status_link? }` — `target_number` is the customer's
-11-digit mobile, `voucher_code` is the 6-digit code they need (with
-`ref_suffix` kept for correlation), and `status_link` (`BASE_URL` +
-`/status.html`) is included only when `BASE_URL` is set.
+The request is a `POST` with **no body**: every value is appended to
+`MACRODROID_SMS_WEBHOOK_URL` as a URL query parameter, so a MacroDroid
+variable whitelist can extract it straight from the request URL —
+`?target_number=…&voucher_code=…&ref_suffix=…&ref_no=…&authorized=…&minutes=…`.
+`target_number` is the customer's 11-digit mobile, `voucher_code` is the
+6-digit code they need (with `ref_suffix` kept for correlation), and
+`status_link` (`BASE_URL` + `/status.html`) is included only when `BASE_URL`
+is set. A query string already present on the configured URL is preserved.
 
 ### InstaPay / PESONet webhook + tiered QoS
 

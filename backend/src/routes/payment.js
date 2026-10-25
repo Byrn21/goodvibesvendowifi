@@ -105,16 +105,29 @@ function delay(ms) {
  * (without the destination number — that is customer PII and does not belong in
  * application logs).
  *
- * @param {Object} payload JSON body for the MacroDroid SMS macro
+ * Every field travels in the URL query string (there is NO request body), so a
+ * MacroDroid macro can pull the values straight out of the request URL for its
+ * variable whitelist. Undefined/null fields are omitted entirely rather than
+ * serialised as "undefined"/"null".
+ *
+ * @param {Object} payload fields to encode into the query string
  */
 function fireSmsWebhook(payload) {
-  const url = process.env.MACRODROID_SMS_WEBHOOK_URL;
-  if (!url) return;
+  const baseUrl = process.env.MACRODROID_SMS_WEBHOOK_URL;
+  if (!baseUrl) return;
   try {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(payload)) {
+      if (value === undefined || value === null) continue;
+      params.append(key, String(value));
+    }
+    // Keep any query string the operator already configured on the endpoint
+    // (e.g. ?secret=abc) and append ours after it.
+    const separator = !baseUrl.includes('?') ? '?' : /[?&]$/.test(baseUrl) ? '' : '&';
+    const url = baseUrl + separator + params.toString();
+
     fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
     }).then((res) => {
       if (res && res.ok) {
         console.log('[payment/claim] SMS webhook accepted for ref ' + payload.ref_no);
@@ -486,7 +499,7 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // about 2 s sooner. It reports whether the device was authorized; the
     // bandwidth cap applied afterwards is not part of the customer's message.
     //
-    // NOTE ON THE PAYLOAD: `voucher_code` carries the REAL 6-digit voucher code
+    // NOTE ON THE QUERY PARAMETERS: `voucher_code` carries the REAL 6-digit voucher code
     // (the thing the customer needs), not the 4-digit ref_suffix — `ref_suffix`
     // is included separately for correlation. Both are present, so a MacroDroid
     // macro expecting either key works.
