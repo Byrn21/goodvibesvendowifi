@@ -164,8 +164,13 @@ async function recordSession({
   downKbps, upKbps,
 }, tx) {
   const db = tx || getDb();
-  const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + duration * 60 * 1000).toISOString();
+  // One instant for both columns so the duration is exact, expressed as UTC
+  // (ISO-8601 with `Z`). db/client.js reads such values back as UTC, so
+  // started_at / expires_at mean the same instant on every host, whatever the
+  // server's or the database's TimeZone happens to be.
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const expiresAt = new Date(nowMs + duration * 60 * 1000).toISOString();
 
     await db.run(`
     INSERT INTO sessions (

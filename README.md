@@ -328,6 +328,8 @@ dashboard → Environment** (or `render.yaml`) for production.
 | `OMADA_PORTAL_OPERATOR_PASSWORD` | `services/omada.js` | *(empty)* | Hotspot portal operator password. |
 | `OMADA_AUTH_TIMEOUT` | `services/omada.js` | `10000` | Controller request timeout (ms). |
 | `OMADA_TLS_REJECT` | `services/omada.js` | `false` | Default accepts the controller's self-signed cert (OC200/ER605). Set to `true` only when the controller has a publicly-trusted certificate. |
+| `OMADA_NORTHBOUND_BASE_URL` | `services/omada-northbound.js` | *(resolved from `OMADA_NORTHBOUND_REGION`)* | Base URL for the OpenAPI (`authClient`, `updateClientRateLimitSetting`). A **private/loopback** host that names no port automatically uses the controller's Open API port `8043` — port 443 is the web-UI/tunnel front, which does not serve `/openapi`. |
+| `OMADA_NORTHBOUND_TLS_REJECT` | `services/omada-northbound.js` | `false` for a LAN host (falls back to `OMADA_TLS_REJECT`) | Certificate verification for the OpenAPI calls. Relaxed automatically when the base URL is a LAN/loopback controller (its certificate cannot chain to a public CA); set `true` to force verification. |
 | `OMADA_MOCK` | `services/omada.js` | `false` | `true` bypasses the controller entirely (mock mode). |
 | `OMADA_TIME_UNIT` | `config/index.js` | `ms` | Unit (`ms`, `us`, or `s`) for the Omada `time` field; depends on controller firmware. |
 

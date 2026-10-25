@@ -45,6 +45,12 @@
  * call instead of requiring a restart):
  *   OMADA_NORTHBOUND_BASE_URL   — explicit API host, e.g.
  *                                 https://use1-omada-northbound.tplinkcloud.com
+ *                                 or the controller's own Open API on the LAN,
+ *                                 e.g. https://192.168.0.253. A PRIVATE /
+ *                                 loopback host that omits a port automatically
+ *                                 gets the controller's HTTPS Open API port
+ *                                 (8043) — 443 serves the controller's web UI /
+ *                                 tunnel front, not /openapi.
  *   OMADA_NORTHBOUND_REGION     — 'us' | 'eu' | 'ap' — resolves the base URL
  *                                 above when BASE_URL is unset
  *   OMADA_CLIENT_ID             — Open API app Client ID
@@ -56,6 +62,11 @@
  *                                 GET /openapi/v1/{omadacId}/sites and the
  *                                 resulting ID is cached (see resolveSiteId()).
  *   OMADA_AUTH_TIMEOUT          — request timeout ms (default 10000)
+ *   OMADA_NORTHBOUND_TLS_REJECT — 'false' accepts an untrusted (self-signed)
+ *                                 certificate. Falls back to OMADA_TLS_REJECT.
+ *                                 Unset = verify every certificate EXCEPT for a
+ *                                 private/loopback base URL, whose certificate
+ *                                 can never chain to a public CA.
  *   OMADA_NORTHBOUND_MOCK       — 'true' to bypass the cloud entirely
  *
  *   The historical OMADA_NORTHBOUND_CLIENT_ID / OMADA_NORTHBOUND_CLIENT_SECRET
@@ -68,6 +79,9 @@
 
 'use strict';
 
+const https = require('https');
+const http = require('http');
+
 const { normalizeMac } = require('../utils/device-id');
 
 // ── Regional API hosts (confirmed: the three published Northbound regions) ──
@@ -76,6 +90,93 @@ const REGION_BASE_URLS = {
   eu: 'https://euw1-omada-northbound.tplinkcloud.com',
   ap: 'https://aps1-omada-northbound.tplinkcloud.com',
 };
+
+// HTTPS port of the controller's OWN Open API (Tomcat), reached directly on the
+// LAN. Port 443 is the controller's web-UI / reverse-proxy front, which does not
+// serve /openapi — sending an OpenAPI path there fails at the transport layer.
+const LOCAL_CONTROLLER_PORT = 8043;
+
+/**
+ * Is this hostname a LAN / loopback address (a controller on site, never a
+ * public cloud endpoint)?
+ *
+ * @param {string} hostname
+ * @returns {boolean}
+ */
+function isLocalHost(hostname) {
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return false;
+  if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home')) {
+    return true;
+  }
+
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return false;
+
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if ([a, b, Number(m[3]), Number(m[4])].some((n) => n > 255)) return false;
+
+  return a === 10 ||                                  // 10.0.0.0/8
+    a === 127 ||                                      // loopback
+    (a === 192 && b === 168) ||                       // 192.168.0.0/16
+    (a === 172 && b >= 16 && b <= 31) ||              // 172.16.0.0/12
+    (a === 169 && b === 254);                         // link-local
+}
+
+/**
+ * Normalize a configured base URL.
+ *
+ * The only rewrite performed is adding the controller's Open API port for a
+ * LAN/loopback host that names no port: without it the request goes to 443,
+ * where nothing answers /openapi, and surfaces as an opaque
+ * "fetch failed"/"ECONNREFUSED". Public hosts are left exactly as configured.
+ *
+ * @param {string} raw
+ * @returns {string} trailing slash removed
+ */
+function normalizeBaseUrl(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+
+  let url;
+  try {
+    url = new URL(value);
+  } catch (_) {
+    return value.replace(/\/+$/, ''); // left as-is; requestToken reports it
+  }
+
+  if (!url.port && (url.protocol === 'https:' || url.protocol === 'http:') && isLocalHost(url.hostname)) {
+    url.port = String(LOCAL_CONTROLLER_PORT);
+  }
+
+  return url.toString().replace(/\/+$/, '');
+}
+
+/** Values accepted as an explicit "do not verify the certificate". */
+const FALSEY = /^(false|0|no|off)$/i;
+
+/**
+ * Decide whether the TLS certificate must be verified.
+ *
+ * An explicit OMADA_NORTHBOUND_TLS_REJECT / OMADA_TLS_REJECT always wins. When
+ * neither is set, verification stays ON for a public host (the Cloud API) and
+ * is relaxed for a LAN controller, whose self-signed certificate can never
+ * chain to a public CA — rejecting it would fail every QoS call.
+ *
+ * @param {string} baseUrl
+ * @returns {boolean}
+ */
+function resolveTlsVerify(baseUrl) {
+  const explicit = env('OMADA_NORTHBOUND_TLS_REJECT') || env('OMADA_TLS_REJECT');
+  if (explicit) return !FALSEY.test(explicit);
+
+  try {
+    return !isLocalHost(new URL(baseUrl).hostname);
+  } catch (_) {
+    return true;
+  }
+}
 
 /**
  * Read a trimmed string from the environment. All configuration flows through
@@ -103,13 +204,13 @@ function env(name) {
  */
 function resolveConfig() {
   const region = env('OMADA_NORTHBOUND_REGION').toLowerCase();
-  const baseUrl = (env('OMADA_NORTHBOUND_BASE_URL') || REGION_BASE_URLS[region] || '')
-    .replace(/\/+$/, '');
+  const baseUrl = normalizeBaseUrl(env('OMADA_NORTHBOUND_BASE_URL') || REGION_BASE_URLS[region] || '');
   const timeoutMs = parseInt(env('OMADA_AUTH_TIMEOUT') || '10000', 10);
 
   return {
     region,
     baseUrl,
+    tlsVerify: resolveTlsVerify(baseUrl),
     clientId: env('OMADA_CLIENT_ID') || env('OMADA_NORTHBOUND_CLIENT_ID'),
     clientSecret: env('OMADA_CLIENT_SECRET') || env('OMADA_NORTHBOUND_CLIENT_SECRET'),
     omadacId: env('OMADA_OMADAC_ID'),
@@ -188,7 +289,7 @@ let lastConfigSignature = null;
  */
 function logResolvedConfig(force) {
   const cfg = resolveConfig();
-  const signature = [cfg.mock, cfg.baseUrl, cfg.region, cfg.omadacId, cfg.siteName, cfg.clientId ? 'id' : ''].join('|');
+  const signature = [cfg.mock, cfg.baseUrl, cfg.region, cfg.omadacId, cfg.siteName, cfg.clientId ? 'id' : '', cfg.tlsVerify].join('|');
   if (signature === lastConfigSignature && !force) return;
   lastConfigSignature = signature;
 
@@ -199,6 +300,7 @@ function logResolvedConfig(force) {
     ' omadacId=' + (cfg.omadacId || '(unset)') +
     ' site=' + (cfg.siteName || '(unset)') +
     ' timeout=' + cfg.timeoutMs + 'ms' +
+    ' tls=' + (cfg.tlsVerify ? 'verify' : 'NO-VERIFY') +
     ' clientId=' + (cfg.clientId ? cfg.clientId.slice(0, 6) + '…' : '(unset)')
   );
 
@@ -208,6 +310,14 @@ function logResolvedConfig(force) {
       (cfg.baseUrl ? ' (OMADA_NORTHBOUND_MOCK=true)' : ' (no base URL configured)')
     );
     return;
+  }
+
+  if (!cfg.tlsVerify) {
+    console.warn(
+      '[omada-nb] TLS certificate verification is DISABLED for ' + maskHost(cfg.baseUrl) +
+      ' — expected for a controller with a self-signed certificate' +
+      ' (set OMADA_NORTHBOUND_TLS_REJECT=true to re-enable it)'
+    );
   }
 
   const problems = [];
@@ -298,53 +408,108 @@ async function resolveSiteId(explicit) {
 // Transport
 // ================================================================
 
+// Transport-level failure codes mapped to the likely cause, so one log line is
+// actionable (the same idea as NETWORK_ERROR_HINTS in services/omada.js).
+const NETWORK_ERROR_HINTS = {
+  ECONNREFUSED: 'nothing is listening on that host/port — a LAN controller answers /openapi on 8043, not 443',
+  ECONNRESET: 'connection reset mid-request — usually a dropped TLS handshake',
+  ETIMEDOUT: 'no response before the socket timeout',
+  EHOSTUNREACH: 'host unreachable from this network',
+  ENETUNREACH: 'network unreachable from this network',
+  ENOTFOUND: 'DNS lookup failed for the base URL host',
+  EAI_AGAIN: 'DNS lookup temporarily failed for the base URL host',
+  DEPTH_ZERO_SELF_SIGNED_CERT: 'self-signed certificate rejected — set OMADA_NORTHBOUND_TLS_REJECT=false',
+  SELF_SIGNED_CERT_IN_CHAIN: 'self-signed certificate in the chain — set OMADA_NORTHBOUND_TLS_REJECT=false',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'untrusted certificate — set OMADA_NORTHBOUND_TLS_REJECT=false',
+  ERR_TLS_CERT_ALTNAME_INVALID: 'certificate hostname does not match the base URL host',
+  CERT_HAS_EXPIRED: 'the controller certificate has expired',
+  EPROTO: 'TLS handshake failed — the certificate was likely rejected',
+};
+
 /**
- * Minimal JSON fetch with a hard timeout. Uses the global fetch (Node 18+;
- * this project requires Node >= 22), so no HTTP dependency is added.
+ * Minimal JSON request with a hard timeout, built on node:https / node:http.
+ *
+ * `fetch`/undici is deliberately not used: its certificate verification cannot
+ * be relaxed per request without an extra dependency, and a LAN controller
+ * serves a self-signed certificate. `rejectUnauthorized` carries that decision
+ * (see resolveTlsVerify).
  *
  * @param {string} url
  * @param {Object} opts  { method, headers, body }
  * @returns {Promise<{status:number, body:Object}>}
  */
-async function httpJson(url, opts) {
-  if (typeof fetch !== 'function') {
-    throw configError('global fetch is unavailable — Node 18+ is required');
-  }
+function httpJson(url, opts) {
+  const cfg = resolveConfig();
+  const o = opts || {};
 
-  const timeoutMs = resolveConfig().timeoutMs;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  let res;
+  let target;
   try {
-    res = await fetch(url, {
-      method: opts.method || 'GET',
-      headers: opts.headers,
-      body: opts.body,
-      signal: controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    const timeout = err && (err.name === 'AbortError' || err.code === 'ABORT_ERR');
-    const e = new Error(
-      timeout
-        ? 'Omada Northbound request timed out after ' + timeoutMs + 'ms'
-        : 'Omada Northbound request failed: ' + ((err && err.message) || String(err))
-    );
-    e.code = timeout ? 'OMADA_NORTHBOUND_TIMEOUT' : 'OMADA_NORTHBOUND_NETWORK';
-    e.cause = err;
-    throw e;
-  }
-  clearTimeout(timer);
-
-  const text = await res.text();
-  let body;
-  try {
-    body = text ? JSON.parse(text) : {};
+    target = new URL(url);
   } catch (_) {
-    body = { raw: text };
+    return Promise.reject(configError('Omada Northbound request URL is invalid: ' + maskHost(url)));
   }
-  return { status: res.status, body };
+
+  const isHttps = target.protocol !== 'http:';
+  const client = isHttps ? https : http;
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn(value);
+    };
+
+    const req = client.request(url, {
+      method: o.method || 'GET',
+      headers: o.headers,
+      // Only meaningful for https; a plain-http base URL ignores it.
+      rejectUnauthorized: cfg.tlsVerify,
+    }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => {
+        let body;
+        try {
+          body = text ? JSON.parse(text) : {};
+        } catch (_) {
+          body = { raw: text };
+        }
+        finish(resolve, { status: res.statusCode, body });
+      });
+    });
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      // Settle BEFORE destroying: destroy() makes the request emit 'error',
+      // which the handler below must ignore so the timeout is what surfaces.
+      settled = true;
+      const e = new Error('Omada Northbound request timed out after ' + cfg.timeoutMs + 'ms');
+      e.code = 'OMADA_NORTHBOUND_TIMEOUT';
+      reject(e);
+      req.destroy();
+    }, cfg.timeoutMs);
+
+    req.on('error', (err) => {
+      if (settled) return; // already failed via the timeout above
+      const code = err && err.code;
+      const hint = code ? NETWORK_ERROR_HINTS[code] : null;
+      const e = new Error(
+        'Omada Northbound request failed: ' + ((err && err.message) || String(err)) +
+        (code ? ' [' + code + (hint ? ' — ' + hint : '') + ']' : '')
+      );
+      e.code = 'OMADA_NORTHBOUND_NETWORK';
+      e.cause = err;
+      finish(reject, e);
+    });
+
+    if (o.body !== undefined) req.write(o.body);
+    req.end();
+  });
 }
 
 // ================================================================
@@ -945,6 +1110,10 @@ module.exports = {
   // Exposed for testing
   _internal: {
     REGION_BASE_URLS,
+    LOCAL_CONTROLLER_PORT,
+    isLocalHost,
+    normalizeBaseUrl,
+    resolveTlsVerify,
     TOKEN_EXPIRY_BUFFER_MS,
     TOKEN_ERROR_CODES,
     minutesToMs,

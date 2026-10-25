@@ -2,11 +2,11 @@
  * __tests__/omada-northbound.test.js — unit tests for
  * services/omada-northbound.js
  *
- * The Omada Cloud is never contacted: global fetch is stubbed, so these tests
+ * No request leaves the process: node:https.request is stubbed, so these tests
  * assert the exact request contract the Northbound OpenAPI requires —
  * the token URL/grant/body, the `Authorization: AccessToken=` header, the
  * hyphen-separated MAC path segment, and the empty body of the auth/unauth
- * calls.
+ * calls — plus the base-URL/TLS rules for a LAN controller.
  *
  * Covers:
  *   - MAC formatting (AA:BB:CC:DD:EE:FF → AA-BB-CC-DD-EE-FF) and validation
@@ -38,6 +38,9 @@ process.env.VOUCHER_DEFAULT_DOWN_MBPS = '10';
 process.env.VOUCHER_DEFAULT_UP_KBPS = '512';
 delete process.env.OMADA_NORTHBOUND_MOCK;
 
+const https = require('https');
+const { EventEmitter } = require('events');
+
 const nb = require('../src/services/omada-northbound');
 const { _internal } = nb;
 
@@ -46,38 +49,60 @@ const SITE_ID = '6918c72f0abcdef123456789';
 const TOKEN_RESPONSE = { errorCode: 0, result: { accessToken: 'tok-1', expiresIn: 7200 } };
 const SITES_RESPONSE = { errorCode: 0, result: { data: [{ siteId: SITE_ID, name: 'Default' }] } };
 
-// ── fetch stub ──────────────────────────────────────────────
-const realFetch = global.fetch;
+// ── https.request stub ──────────────────────────────────────
+// services/omada-northbound.js requests through node:https (not fetch) so it
+// can relax certificate verification for a self-signed LAN controller.
+const realHttpsRequest = https.request;
 let calls = [];
 let queue = [];
 
-/** Queue one response for the next fetch call. */
+/** Queue one response for the next HTTP call. */
 function queueJson(status, body) {
   queue.push({ status, body });
 }
 
-function installFetch() {
+function installTransport() {
   calls = [];
   queue = [];
-  global.fetch = jest.fn(async (url, opts) => {
-    const entry = { url, method: (opts && opts.method) || 'GET', headers: (opts && opts.headers) || {}, body: opts && opts.body };
-    calls.push(entry);
-    const next = queue.shift() || { status: 200, body: { errorCode: 0 } };
-    return {
-      status: next.status,
-      text: async () => JSON.stringify(next.body),
+  https.request = jest.fn((url, opts, callback) => {
+    const options = opts || {};
+    const entry = {
+      url,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+      body: undefined,
+      tlsVerify: options.rejectUnauthorized,
     };
+    calls.push(entry);
+
+    const req = new EventEmitter();
+    // Capture the payload exactly as the module passed it (undefined = none).
+    req.write = (chunk) => { entry.body = chunk; };
+    req.end = () => {
+      const next = queue.shift() || { status: 200, body: { errorCode: 0 } };
+      const res = new EventEmitter();
+      res.statusCode = next.status;
+      res.headers = {};
+      res.setEncoding = () => {};
+      setImmediate(() => {
+        callback(res);
+        res.emit('data', JSON.stringify(next.body));
+        res.emit('end');
+      });
+    };
+    req.destroy = () => {};
+    return req;
   });
 }
 
 beforeEach(() => {
-  installFetch();
+  installTransport();
   _internal.invalidateToken();
   _internal.resetSiteId();
 });
 
 afterAll(() => {
-  global.fetch = realFetch;
+  https.request = realHttpsRequest;
 });
 
 // ================================================================
@@ -442,6 +467,65 @@ describe('extendClientPeriod', () => {
 // ================================================================
 // Site resolution — OMADA_SITE name → numeric site ID
 // ================================================================
+// ================================================================
+// Base URL → controller port + TLS verification
+// ================================================================
+describe('base URL and TLS for a LAN controller', () => {
+  const CLOUD_URL = 'https://use1-omada-northbound.tplinkcloud.com';
+
+  function withBaseUrl(value, fn) {
+    const previous = process.env.OMADA_NORTHBOUND_BASE_URL;
+    process.env.OMADA_NORTHBOUND_BASE_URL = value;
+    return Promise.resolve()
+      .then(fn)
+      .finally(() => { process.env.OMADA_NORTHBOUND_BASE_URL = previous; });
+  }
+
+  test('a LAN base URL without a port inherits the controller Open API port 8043', () => {
+    expect(_internal.normalizeBaseUrl('https://192.168.0.253')).toBe('https://192.168.0.253:8043');
+    expect(_internal.normalizeBaseUrl('https://controller.local')).toBe('https://controller.local:8043');
+    expect(_internal.normalizeBaseUrl('http://127.0.0.1')).toBe('http://127.0.0.1:8043');
+  });
+
+  test('an explicit port and a public host are left untouched', () => {
+    expect(_internal.normalizeBaseUrl('https://192.168.0.253:8443')).toBe('https://192.168.0.253:8443');
+    expect(_internal.normalizeBaseUrl(CLOUD_URL)).toBe(CLOUD_URL);
+    expect(_internal.normalizeBaseUrl('https://omada.example.com')).toBe('https://omada.example.com');
+  });
+
+  test('sends the token request to the controller port and accepts its self-signed certificate', async () => {
+    await withBaseUrl('https://192.168.0.253', async () => {
+      queueJson(200, TOKEN_RESPONSE);
+      await nb.getOmadaToken();
+
+      expect(calls[0].url).toBe(
+        'https://192.168.0.253:8043/openapi/authorize/token?grant_type=client_credentials'
+      );
+      // A LAN controller certificate can never chain to a public CA.
+      expect(calls[0].tlsVerify).toBe(false);
+    });
+  });
+
+  test('keeps certificate verification ON for the public Cloud API host', async () => {
+    queueJson(200, TOKEN_RESPONSE);
+    await nb.getOmadaToken();
+
+    expect(calls[0].url).toBe(CLOUD_URL + '/openapi/authorize/token?grant_type=client_credentials');
+    expect(calls[0].tlsVerify).toBe(true);
+  });
+
+  test('honours an explicit OMADA_NORTHBOUND_TLS_REJECT', async () => {
+    process.env.OMADA_NORTHBOUND_TLS_REJECT = 'false';
+    try {
+      queueJson(200, TOKEN_RESPONSE);
+      await nb.getOmadaToken();
+      expect(calls[0].tlsVerify).toBe(false);
+    } finally {
+      delete process.env.OMADA_NORTHBOUND_TLS_REJECT;
+    }
+  });
+});
+
 describe('OMADA_SITE resolution', () => {
   test('resolves the site name to its numeric ID and caches it across calls', async () => {
     queueJson(200, TOKEN_RESPONSE);                    // token

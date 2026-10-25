@@ -10,13 +10,57 @@
  */
 
 const Database = require('better-sqlite3');
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
 const path = require('path');
 const fs = require('fs');
 
 const DATABASE_URL = process.env.DATABASE_URL || 'sqlite:./data/portal.db';
 
 let db = null;
+
+// ── Timestamp handling (plain TIMESTAMP columns) ───────────────────────────
+// Every timestamp this app writes is UTC: services/session.js stores
+// `new Date(...).toISOString()` ("2026-10-25T12:00:00.000Z") into
+// `started_at` / `expires_at` / `paused_at`, and PostgreSQL's input function
+// for TIMESTAMP (without time zone) IGNORES the trailing `Z`, so the stored
+// wall clock is the UTC instant — independent of the database's TimeZone
+// setting.
+//
+// node-postgres, however, parses a returned TIMESTAMP using the PROCESS's local
+// timezone. On a host east of UTC that reads every stored expiry as hours in
+// the past: a session created seconds ago comes back already timed out, and the
+// lazy expiry in services/session.js immediately marks it "expired" and calls
+// Omada extPortal/unauth. Parse it here, once, as UTC so the value that is read
+// back is the instant that was written — whatever the process TZ is.
+const PG_TIMESTAMP_OID = 1114;
+
+/**
+ * Parse a PostgreSQL `timestamp without time zone` text value as UTC.
+ *
+ * Values carrying an explicit offset or `Z` (and 'infinity') are handed to the
+ * Date constructor unchanged; a bare "YYYY-MM-DD HH:mm:ss[.ffffff]" is built
+ * with Date.UTC so the ambient timezone cannot shift it.
+ *
+ * @param {string} value
+ * @returns {Date|number|null}
+ */
+function parseUtcTimestamp(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^-?infinity$/i.test(text)) return /^-/.test(text) ? -Infinity : Infinity;
+
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?$/.exec(text);
+  if (!m) return new Date(text); // explicit offset / Z / unexpected format
+
+  const ms = m[7] ? Number((m[7] + '000').slice(0, 3)) : 0;
+  return new Date(Date.UTC(
+    Number(m[1]), Number(m[2]) - 1, Number(m[3]),
+    Number(m[4]), Number(m[5]), Number(m[6]), ms
+  ));
+}
+
+types.setTypeParser(PG_TIMESTAMP_OID, parseUtcTimestamp);
 
 /**
  * Detect database backend from DATABASE_URL.
@@ -81,6 +125,18 @@ function createPgPool() {
   // 'error' event and kills the process, so always listen and keep going.
   pool.on('error', err => {
     console.error('[db] Idle PostgreSQL client error (pool continues):', err.message);
+  });
+
+  // Pin every pooled connection to UTC. Columns DEFAULTed with
+  // CURRENT_TIMESTAMP (created_at / updated_at / used_at) then hold the same
+  // UTC wall clock the application writes explicitly, so all timestamp
+  // columns in a row share one timezone. The statement is queued ahead of any
+  // query the caller issues on this client, and a failure is only logged —
+  // lose the pinning, never the connection.
+  pool.on('connect', client => {
+    client.query("SET TIME ZONE 'UTC'").catch(err => {
+      console.error('[db] could not pin the PostgreSQL session timezone to UTC:', err.message);
+    });
   });
 
   // Verify connection in the background. A failed probe must NOT terminate the
@@ -284,4 +340,5 @@ module.exports = {
   getDb,
   closeDb,
   convertSchema,
+  parseUtcTimestamp,
 };
