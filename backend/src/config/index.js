@@ -26,6 +26,16 @@ const PESOS_PER_MINUTE = parseInt(process.env.MACRODROID_PESOS_PER_MINUTE || '10
 // against "customer took a while between landing and paying".
 const PORTAL_CONTEXT_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
+// ── Premium hard expiry ────────────────────────────────────────────────
+// BUSINESS CONSTANT (intentionally NOT env-configurable, same reasoning as
+// the values above): how long a Premium pass may exist AT ALL, counted from
+// the moment its session was created. Premium guests get unlimited
+// pause/resume — pausing protects their purchased minutes — but the pass is
+// void once this window closes, however much frozen time it still holds, so a
+// cheap pass cannot be kept alive indefinitely. 72 hours is three days of
+// "pause overnight, resume tomorrow" without an open-ended obligation.
+const PREMIUM_HARD_EXPIRY_HOURS = 72;
+
 // ── Omada extPortal auth time unit ──────────────────────────────────────
 // ENV-CONFIGURABLE EXCEPTION — this is the ONE value kept in .env, and
 // that is deliberate: the correct unit for the `time` field of
@@ -41,5 +51,6 @@ const OMADA_TIME_UNIT = (process.env.OMADA_TIME_UNIT || 'ms').toLowerCase();
 module.exports = {
   PESOS_PER_MINUTE,
   PORTAL_CONTEXT_MAX_AGE_MS,
+  PREMIUM_HARD_EXPIRY_HOURS,
   OMADA_TIME_UNIT,
 };

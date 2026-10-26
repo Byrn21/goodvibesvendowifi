@@ -22,7 +22,8 @@ async function seed() {
     { code: 'WIFI-TEST-0003', type: 'standard', duration: 180, state: 'active', price: 1000 },
     { code: 'EXPIRED-VOUCHER', type: 'standard', duration: 60,  state: 'expired', price: 333 },
     { code: 'USED-VOUCHER',    type: 'standard', duration: 60,  state: 'used', price: 333 },
-    // Premium vouchers — consumable with pause/resume (7-day pause validity)
+    // Premium vouchers — consumable with unlimited pause/resume inside
+    // PREMIUM_HARD_EXPIRY_HOURS (72 h from session creation).
     { code: 'PREMIUM-TEST-001', type: 'premium', duration: 300,  state: 'active', price: 667 },
     { code: 'PREMIUM-TEST-002', type: 'premium', duration: 480,  state: 'active', price: 1167 },
     { code: 'PREMIUM-TEST-003', type: 'premium', duration: 1440, state: 'active', price: 3000 },

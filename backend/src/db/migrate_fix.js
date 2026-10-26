@@ -39,7 +39,11 @@ const SESSIONS_COLUMNS = [
   { name: 'total_duration_seconds', type: 'INTEGER', after: 'voucher_type' },
   { name: 'started_at', type: 'TIMESTAMP', after: 'total_duration_seconds' },
   { name: 'expires_at', type: 'TIMESTAMP', after: 'started_at' },
-  { name: 'paused_at', type: 'TIMESTAMP', after: 'expires_at' },
+  // Premium hard expiry (absolute deadline, config: PREMIUM_HARD_EXPIRY_HOURS).
+  // NULL on Standard sessions and on premium rows created before this column
+  // existed — such rows simply have no hard deadline.
+  { name: 'absolute_expires_at', type: 'TIMESTAMP', after: 'expires_at' },
+  { name: 'paused_at', type: 'TIMESTAMP', after: 'absolute_expires_at' },
   { name: 'remaining_seconds', type: 'INTEGER', after: 'paused_at' },
   { name: 'state', type: "VARCHAR(16) NOT NULL DEFAULT 'pending'", after: 'remaining_seconds' },
   { name: 'voucher_used', type: 'VARCHAR(32)', after: 'state' },

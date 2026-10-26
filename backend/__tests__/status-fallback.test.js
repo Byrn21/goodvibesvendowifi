@@ -399,3 +399,120 @@ describe('status.html — cloud-tunnel fallback to the saved device MAC', () => 
     expect(status.storage.get('portalSessionId')).toBe(SESSION_ID);
   });
 });
+
+// ── Hard expiry rendering ───────────────────────────────────────
+
+const HARD_DEADLINE = '2026-10-29T15:45:00.000Z';
+
+const PAUSED_PREMIUM = {
+  test: /[?&]mac=/,
+  status: 200,
+  body: {
+    success: true,
+    sessionId: SESSION_ID,
+    clientMac: MAC,
+    state: 'paused',
+    remainingSeconds: 5400,
+    startedAt: '2026-10-26T10:00:00.000Z',
+    expiresAt: null,
+    absoluteExpiresAt: HARD_DEADLINE,
+    absolute_expires_at: HARD_DEADLINE,
+    voucherType: 'premium',
+  },
+};
+
+const HARD_EXPIRED = {
+  test: /[?&]mac=/,
+  status: 200,
+  body: {
+    success: true,
+    sessionId: SESSION_ID,
+    clientMac: MAC,
+    state: 'expired',
+    remainingSeconds: 0,
+    startedAt: '2026-10-26T10:00:00.000Z',
+    expiresAt: null,
+    absoluteExpiresAt: HARD_DEADLINE,
+    absolute_expires_at: HARD_DEADLINE,
+    voucherType: 'premium',
+    expireReason: 'hard_expired',
+    expire_reason: 'hard_expired',
+  },
+};
+
+describe('status.html — Premium hard expiry notice and expired screen', () => {
+  test('the paused view shows the absolute deadline too', async () => {
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      responses: [MISSING_CONTEXT, PAUSED_PREMIUM],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
+    const notice = status.getEl('paused-hard-expiry-notice');
+    expect(notice.classList.contains('hidden')).toBe(false);
+    expect(notice.textContent).toContain('Pass expires completely on');
+  });
+
+  test('a Standard session hides both notices', async () => {
+    // Standard sessions carry no hard deadline at all, so neither notice shows.
+    const status = loadStatus({
+      search: '',
+      responses: [{ test: /\/api\/session\/status$/, status: 200, body: ACTIVE_SESSION.body }],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.getEl('hard-expiry-notice').classList.contains('hidden')).toBe(true);
+    expect(status.getEl('paused-hard-expiry-notice').classList.contains('hidden')).toBe(true);
+  });
+
+  test('a hard-expired pass renders its own screen with the deadline', async () => {
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      responses: [MISSING_CONTEXT, HARD_EXPIRED],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.getEl('session-expired').classList.contains('hidden')).toBe(false);
+    expect(status.getEl('session-unknown').classList.contains('hidden')).toBe(true);
+    expect(status.getEl('expired-heading').textContent).toBe('Your Pass Has Expired');
+    expect(status.getEl('expired-message').textContent).toContain('absolute expiry');
+    const stamp = status.getEl('expired-timestamp');
+    expect(stamp.classList.contains('hidden')).toBe(false);
+    expect(stamp.textContent).toContain('Pass expired on');
+  });
+
+  test('a normally expired session keeps the generic copy and shows its expires_at', async () => {
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      responses: [MISSING_CONTEXT, {
+        test: /[?&]mac=/,
+        status: 200,
+        body: {
+          ...ACTIVE_SESSION.body,
+          state: 'expired',
+          remainingSeconds: 0,
+          expireReason: 'time_expired',
+          expire_reason: 'time_expired',
+        },
+      }],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.getEl('session-expired').classList.contains('hidden')).toBe(false);
+    expect(status.getEl('expired-heading').textContent).toBe('Session Expired');
+    expect(status.getEl('expired-message').textContent).toContain('Your WiFi session has ended');
+    expect(status.getEl('expired-timestamp').textContent).toContain('Session expired on');
+  });
+});

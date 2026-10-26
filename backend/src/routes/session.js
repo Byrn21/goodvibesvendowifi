@@ -19,8 +19,8 @@ const {
   reauthorizeSession,
   expireSession,
   isSessionActive,
-  getPauseRemaining,
   isPausableVoucherType,
+  isHardExpired,
   getSessionByVoucher,
 } = require('../services/session');
 const omadaService = require('../services/omada');
@@ -129,11 +129,27 @@ router.get('/status', async (req, res, next) => {
       if (row && row.session_id) {
         sessionId = row.session_id;
       } else {
-        return res.status(404).json({
-          success: false,
-          error: 'No active session exists for this device.',
-          code: 'SESSION_NOT_FOUND',
-        });
+        // Nothing live under this MAC — fall back to the device's most recent
+        // EXPIRED session instead of 404ing. A guest whose pass ran out (or hit
+        // its Premium hard deadline) must be told it expired, with the reason
+        // and deadline, rather than being dumped on "session not found". Only a
+        // device that never had a session at all still gets 404.
+        const expired = await getDb().getOne(
+          `SELECT session_id FROM sessions
+            WHERE LOWER(client_mac) = LOWER(?)
+              AND state = 'expired'
+            ORDER BY id DESC LIMIT 1`,
+          [normalized]
+        );
+        if (expired && expired.session_id) {
+          sessionId = expired.session_id;
+        } else {
+          return res.status(404).json({
+            success: false,
+            error: 'No session exists for this device.',
+            code: 'SESSION_NOT_FOUND',
+          });
+        }
       }
     }
 
@@ -157,8 +173,10 @@ router.get('/status', async (req, res, next) => {
     if (session.state === 'active' && session.expiresAt) {
       const expiresAt = Math.floor(new Date(session.expiresAt).getTime() / 1000);
       if (serverTime >= expiresAt) {
-        // Server-side expired — call unauth and update state
-        await expireSession(sessionId, 'server_expired');
+        // Server-side expired — call unauth and update state. A pass that is
+        // also past its Premium hard deadline is recorded as such.
+        const endedByHardExpiry = isHardExpired(session);
+        await expireSession(sessionId, endedByHardExpiry ? 'hard_expired' : 'server_expired');
         try {
           await omadaService.unauthenticateClient({ clientMac: session.clientMac });
         } catch (_) { /* ignore */ }
@@ -169,8 +187,14 @@ router.get('/status', async (req, res, next) => {
           remainingSeconds: 0,
           startedAt: session.startedAt,
           expiresAt: session.expiresAt,
+          absoluteExpiresAt: session.absoluteExpiresAt || null,
+          absolute_expires_at: session.absoluteExpiresAt || null,
           voucherType: session.voucherType || 'standard',
           voucherCode: maskVoucherCode(session.voucherUsed),
+          // 'hard_expired' when the Premium hard deadline is what ended the
+          // pass (computed above on the row we just read).
+          expireReason: endedByHardExpiry ? 'hard_expired' : 'server_expired',
+          expire_reason: endedByHardExpiry ? 'hard_expired' : 'server_expired',
           canPause: false,
           canResume: false,
         });
@@ -189,14 +213,22 @@ router.get('/status', async (req, res, next) => {
       remainingSeconds,
       startedAt: session.startedAt,
       expiresAt: session.expiresAt,
+      // Premium hard deadline (null for Standard sessions). Reported in both
+      // spellings: camelCase to sit alongside expiresAt, and the snake_case
+      // name the status contract documents.
+      absoluteExpiresAt: session.absoluteExpiresAt || null,
+      absolute_expires_at: session.absoluteExpiresAt || null,
       voucherType: session.voucherType || 'standard',
       voucherCode: maskVoucherCode(session.voucherUsed),
+      // Why an 'expired' session ended ('hard_expired' for a Premium pass that
+      // hit PREMIUM_HARD_EXPIRY_HOURS, 'time_expired' when its minutes ran
+      // out). Null while the session is still live. Reported in both spellings
+      // like absolute_expires_at so the status page can render the right screen.
+      expireReason: session.expireReason || null,
+      expire_reason: session.expireReason || null,
       totalSeconds: (session.totalDurationSeconds || (session.duration || 60) * 60),
       canPause:  session.state === 'active' && remainingSeconds > 60 && isPausableVoucherType(session.voucherType),
       canResume: session.state === 'paused',
-      pauseValidRemainingSeconds: session.state === 'paused' && isPausableVoucherType(session.voucherType)
-        ? await getPauseRemaining(sessionId)
-        : null,
     });
   } catch (err) {
     // Log real database/processing errors server-side — never let them
@@ -319,6 +351,17 @@ router.post('/pause', async (req, res, next) => {
     if (!session) {
       return res.status(404).json({ success: false, error: 'Session not found.' });
     }
+    // Hard expiry (Premium): past its absolute deadline the pass is void even
+    // with frozen/remaining time left, so it must never be paused again.
+    // getSession() has already terminalised the row.
+    if (isHardExpired(session)) {
+      return res.status(410).json({
+        success: false,
+        code: 'HARD_EXPIRED',
+        error: 'This pass has reached its absolute expiry and can no longer be paused.',
+        absolute_expires_at: session.absoluteExpiresAt || null,
+      });
+    }
         if (session.state !== 'active') {
       return res.status(409).json({ success: false, error: 'Session is not active.', code: 'INVALID_STATE' });
     }
@@ -335,7 +378,6 @@ router.post('/pause', async (req, res, next) => {
       voucherType: paused.voucherType || 'standard',
       remainingSeconds: computeRemaining(paused, Math.floor(Date.now() / 1000)),
       pausedAt: paused.pausedAt,
-      pauseValidRemainingSeconds: await getPauseRemaining(sessionId),
     });
   } catch (err) {
     next(err);
@@ -354,6 +396,16 @@ router.post('/resume', async (req, res, next) => {
     const session = await getSession(sessionId);
     if (!session) {
       return res.status(404).json({ success: false, error: 'Session not found.' });
+    }
+    // Hard expiry (Premium): frozen time does NOT extend the pass past its
+    // absolute deadline, so a hard-expired pause can never be resumed.
+    if (isHardExpired(session)) {
+      return res.status(410).json({
+        success: false,
+        code: 'HARD_EXPIRED',
+        error: 'This pass has reached its absolute expiry and can no longer be resumed.',
+        absolute_expires_at: session.absoluteExpiresAt || null,
+      });
     }
         if (session.state !== 'paused') {
       return res.status(409).json({ success: false, error: 'Session is not paused.', code: 'INVALID_STATE' });
@@ -560,6 +612,10 @@ function computeRemaining(session, serverTime) {
   if (!session) return 0;
 
   if (session.state === 'expired' || session.state === 'unknown') return 0;
+
+  // Hard-expired Premium pass: report nothing left, whatever the frozen or
+  // counted-down value still says (defensive — getSession() already expires it).
+  if (isHardExpired(session)) return 0;
 
   if (session.state === 'paused') {
     // Use the server-side frozen remaining time

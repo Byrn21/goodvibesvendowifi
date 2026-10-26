@@ -18,10 +18,10 @@ const {
   isPremiumVoucherType,
 } = require('../utils/qos');
 const { getDb } = require('../db/client');
+const { PREMIUM_HARD_EXPIRY_HOURS } = require('../config');
 
 const DEFAULT_DURATION = parseInt(process.env.DEFAULT_SESSION_DURATION || '60', 10);
 const EXPIRE_CHECK_INTERVAL = parseInt(process.env.SESSION_ENFORCE_INTERVAL || '60000', 10);
-const PREMIUM_PAUSE_VALIDITY_HOURS = parseInt(process.env.PREMIUM_PAUSE_VALIDITY_HOURS || '168', 10);
 let expirationTimer = null;
 
 /**
@@ -45,6 +45,45 @@ const PAUSABLE_VOUCHER_TYPES = ['premium'];
  */
 function isPausableVoucherType(voucherType) {
   return PAUSABLE_VOUCHER_TYPES.indexOf(normalizeVoucherType(voucherType)) !== -1;
+}
+
+/**
+ * hardExpiryFor — the ABSOLUTE deadline a session created now would carry.
+ *
+ * Premium passes get one (config: PREMIUM_HARD_EXPIRY_HOURS, default 72 h);
+ * Standard sessions get null — they are strictly continuous and end when their
+ * purchased active time runs out, so a hard deadline would cut long vouchers
+ * (a multi-day Standard pass, say) short.
+ *
+ * The deadline is derived from the session's CREATION time and is never
+ * recomputed: a pause freezes the countdown, never this clock, which is what
+ * makes "pause as often as you like" safe for the network.
+ *
+ * @param {string} voucherType
+ * @param {number} [nowMs] creation instant (defaults to now)
+ * @returns {string|null} UTC ISO-8601 timestamp, or null for Standard
+ */
+function hardExpiryFor(voucherType, nowMs) {
+  if (!isPremiumVoucherType(voucherType)) return null;
+  const from = typeof nowMs === 'number' ? nowMs : Date.now();
+  return new Date(from + PREMIUM_HARD_EXPIRY_HOURS * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * isHardExpired — true when a session has passed its absolute (hard) deadline.
+ *
+ * Applies to Premium sessions in ANY live state: an active session must not be
+ * paused any further, and a paused session must not be resumed, even when it
+ * still holds plenty of frozen time. Sessions without the field (Standard, and
+ * premium rows created before the column existed) are never hard-expired.
+ *
+ * @param {Object} session session object from getSession()/loadSession()
+ * @returns {boolean}
+ */
+function isHardExpired(session) {
+  if (!session || !session.absoluteExpiresAt) return false;
+  const at = new Date(session.absoluteExpiresAt).getTime();
+  return Number.isFinite(at) && Date.now() >= at;
 }
 
 /**
@@ -180,14 +219,18 @@ async function recordSession({
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const expiresAt = new Date(nowMs + duration * 60 * 1000).toISOString();
+  // Premium passes also get an absolute (hard) deadline, fixed here at creation
+  // and never moved afterwards. Standard sessions store NULL: they are strictly
+  // continuous and end when their purchased active time runs out.
+  const absoluteExpiresAt = hardExpiryFor(voucherType, nowMs);
 
     await db.run(`
     INSERT INTO sessions (
       session_id, client_mac, client_ip, ap_mac, ssid_name,
       duration_minutes, voucher_type, down_kbps, up_kbps, total_duration_seconds,
-      started_at, expires_at, state,
+      started_at, expires_at, absolute_expires_at, state,
       voucher_used, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
   `, [
     sessionId,
     clientMac || '',
@@ -203,6 +246,7 @@ async function recordSession({
     totalDurationSeconds || null,
     now,
     expiresAt,
+    absoluteExpiresAt,
     voucherUsed || null,
     now,
     now,
@@ -249,6 +293,8 @@ async function loadSession(sessionId) {
     totalDurationSeconds: row.total_duration_seconds,
     startedAt: row.started_at,
     expiresAt: row.expires_at,
+    // Premium hard deadline (null for Standard sessions — see hardExpiryFor).
+    absoluteExpiresAt: row.absolute_expires_at,
     pausedAt: row.paused_at,
     remainingSeconds: row.remaining_seconds,
     state: row.state,
@@ -301,8 +347,21 @@ async function getSession(sessionId) {
     const expiresAt = new Date(session.expiresAt).getTime();
     if (now >= expiresAt) {
       await expireSession(sessionId, 'time_expired', session);
-      return { ...session, state: 'expired' };
+      // Carry the reason forward: callers (the status payload) render the
+      // expired screen from it, and the row read above predates the write.
+      return { ...session, state: 'expired', expireReason: 'time_expired' };
     }
+  }
+
+  // Hard expiry (Premium): the pass is void once its absolute deadline has
+  // passed, even when it is PAUSED with frozen time still on it. This single
+  // check is what every caller inherits — status polling, pause, resume,
+  // re-authorization and the modal lookups all read sessions through here.
+  if ((session.state === 'active' || session.state === 'paused') && isHardExpired(session)) {
+    await expireSession(sessionId, 'hard_expired', session);
+    // expireReason is what the status page uses to distinguish a pass that
+    // hit its hard deadline from one that simply ran its minutes out.
+    return { ...session, state: 'expired', expireReason: 'hard_expired' };
   }
 
   return session;
@@ -374,6 +433,16 @@ async function pauseSession(sessionId) {
     throw new Error('Session not found');
   }
 
+  // Hard expiry first, so the guest is told WHY the pause is refused rather
+  // than being handed a generic invalid-state error. getSession() above has
+  // already terminalised the row; this makes the reason explicit.
+  if (isHardExpired(session)) {
+    await expireSession(sessionId, 'hard_expired', session);
+    const err = new Error('This pass has reached its absolute expiry and can no longer be paused');
+    err.code = 'HARD_EXPIRED';
+    throw err;
+  }
+
   if (session.state !== 'active') {
     throw new Error('Session not active');
   }
@@ -385,17 +454,10 @@ async function pauseSession(sessionId) {
     throw err;
   }
 
-  // Enforce pause validity window for premium sessions
-  if (session.pausedAt) {
-    const pauseAgeHours = (Date.now() - new Date(session.pausedAt).getTime()) / (1000 * 60 * 60);
-    if (pauseAgeHours >= PREMIUM_PAUSE_VALIDITY_HOURS) {
-      await expireSession(sessionId, 'pause_expired');
-      const expiredErr = new Error('Pause validity period has expired');
-      expiredErr.code = 'PAUSE_EXPIRED';
-      throw expiredErr;
-    }
-  }
-
+  // NO pause counter and no separate pause-validity window, deliberately: a
+  // Premium guest may pause and resume as often and for as long as they like.
+  // The only limit on the pass is its absolute expiry (checked above), so
+  // repeated pause/resume cycles stay valid within PREMIUM_HARD_EXPIRY_HOURS.
   const now = new Date();
   const remainingSeconds = Math.max(
     0,
@@ -430,7 +492,21 @@ async function resumeSession(sessionId) {
   const db = getDb();
   const session = await getSession(sessionId);
 
-  if (!session || session.state !== 'paused') {
+  if (!session) {
+    throw new Error('Session not paused');
+  }
+
+  // Hard expiry (Premium): frozen time does NOT buy an extension past the
+  // absolute deadline. Refused before the state check so the guest gets the
+  // real reason instead of "not paused".
+  if (isHardExpired(session)) {
+    await expireSession(sessionId, 'hard_expired', session);
+    const err = new Error('This pass has reached its absolute expiry and can no longer be resumed');
+    err.code = 'HARD_EXPIRED';
+    throw err;
+  }
+
+  if (session.state !== 'paused') {
     throw new Error('Session not paused');
   }
 
@@ -666,37 +742,34 @@ function startExpirationWorker() {
         await expireSession(row.session_id, 'time_expired');
       }
 
-      // Also expire premium sessions paused beyond the validity window
-      const maxPausedAt = new Date(Date.now() - PREMIUM_PAUSE_VALIDITY_HOURS * 60 * 60 * 1000).toISOString();
-      let stalePaused = [];
+      // Hard-expired Premium passes, in either live state: the absolute
+      // deadline has passed, so the remaining frozen time is void.
+      let hardExpired = [];
       try {
-        stalePaused = await db.query(`
+        hardExpired = await db.query(`
           SELECT session_id FROM sessions
-          WHERE state = 'paused' AND voucher_type = 'premium' AND paused_at IS NOT NULL AND paused_at <= ?
+          WHERE state IN ('active', 'paused')
+            AND absolute_expires_at IS NOT NULL AND absolute_expires_at <= ?
           LIMIT 50
-        `, [maxPausedAt]);
+        `, [now]);
       } catch (err) {
-        // voucher_type column may not exist in older databases — fall back to query without it
-        if (err.code === '42701' || (err.message && err.message.includes('voucher_type'))) {
-          stalePaused = await db.query(`
-            SELECT session_id FROM sessions
-            WHERE state = 'paused' AND paused_at IS NOT NULL AND paused_at <= ?
-            LIMIT 50
-          `, [maxPausedAt]);
+        // absolute_expires_at may not exist in older databases.
+        if (err.code === '42703' || (err.message && err.message.includes('absolute_expires_at'))) {
+          hardExpired = [];
         } else {
           throw err;
         }
       }
 
-      for (const row of stalePaused) {
-        await expireSession(row.session_id, 'pause_expired');
+      for (const row of hardExpired) {
+        await expireSession(row.session_id, 'hard_expired');
       }
 
       if (expiredSessions.length > 0) {
         console.log(`[expiration-worker] Expired ${expiredSessions.length} session(s)`);
       }
-      if (stalePaused.length > 0) {
-        console.log(`[expiration-worker] Expired ${stalePaused.length} paused premium session(s) past validity window`);
+      if (hardExpired.length > 0) {
+        console.log(`[expiration-worker] Expired ${hardExpired.length} premium session(s) past the ${PREMIUM_HARD_EXPIRY_HOURS}h hard expiry`);
       }
     } catch (err) {
       console.error('[expiration-worker] Critical error during run:', err);
@@ -777,6 +850,13 @@ async function activatePaidSession(sessionId, eventId, amount, webhookVoucherTyp
     voucherCode: session.voucherUsed || '',
   });
 
+  // A premium session activated by a payment gets the same absolute deadline a
+  // voucher-created one gets, counted from this activation. An already-set
+  // value is kept: the deadline belongs to the pass, not to the latest write.
+  const absoluteExpiresAt = isPremiumVoucherType(voucherType)
+    ? (session.absoluteExpiresAt || hardExpiryFor(voucherType))
+    : null;
+
     await db.run(`
     UPDATE sessions
     SET state = 'active',
@@ -785,9 +865,10 @@ async function activatePaidSession(sessionId, eventId, amount, webhookVoucherTyp
         voucher_type = ?,
         started_at = ?,
         expires_at = ?,
+        absolute_expires_at = ?,
         updated_at = ?
     WHERE session_id = ?
-  `, [eventId || null, amount || null, voucherType, now, expiresAt, now, sessionId]);
+  `, [eventId || null, amount || null, voucherType, now, expiresAt, absoluteExpiresAt, now, sessionId]);
 
   return await getSession(sessionId);
 }
@@ -866,25 +947,6 @@ async function getSessionByVoucher(voucher) {
   return await getSession(row.session_id);
 }
 
-/**
- * getPauseRemaining — Calculate seconds remaining in the pause validity window.
- * Only meaningful for premium sessions in 'paused' state.
- *
- * @param {string} sessionId
- * @returns {Promise<number|null>} seconds remaining, or null if not applicable
- */
-async function getPauseRemaining(sessionId) {
-  const session = await getSession(sessionId);
-  if (!session || session.state !== 'paused' || !isPausableVoucherType(session.voucherType)) {
-    return null;
-  }
-  if (!session.pausedAt) return null;
-
-  const pauseValidUntil = new Date(session.pausedAt).getTime() + PREMIUM_PAUSE_VALIDITY_HOURS * 60 * 60 * 1000;
-  const remaining = Math.max(0, Math.floor((pauseValidUntil - Date.now()) / 1000));
-  return remaining;
-}
-
 module.exports = {
   validateVoucher,
   consumeVoucher,
@@ -903,8 +965,9 @@ module.exports = {
   markPaymentFailed,
     isEventProcessed,
   markEventProcessed,
-  getPauseRemaining,
   isPausableVoucherType,
+  isHardExpired,
+  hardExpiryFor,
   getSessionByVoucher,
   applySessionRateLimit,
 };

@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     total_duration_seconds INTEGER, -- preserves original duration for premium remaining-time tracking
     started_at          TIMESTAMP,
     expires_at          TIMESTAMP,
+    -- Premium only: the ABSOLUTE deadline of the pass, counted from creation
+    -- and never extended by a pause or a resume (config: PREMIUM_HARD_EXPIRY_HOURS,
+    -- default 72 h). Once it passes the session is void even with frozen time
+    -- left. NULL for Standard sessions, which never hard-expire.
+    absolute_expires_at TIMESTAMP,
     paused_at           TIMESTAMP,
     remaining_seconds   INTEGER,
     state               VARCHAR(16) NOT NULL DEFAULT 'pending',

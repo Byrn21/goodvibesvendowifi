@@ -389,8 +389,21 @@ portal to refresh its AP/SSID association.
 |---|---|---|---|
 | `DEFAULT_SESSION_DURATION` | `services/session.js` | `60` | Default session duration (minutes). |
 | `SESSION_ENFORCE_INTERVAL` | `services/session.js` | `60000` | How often the expiration worker checks sessions (ms). |
-| `PREMIUM_PAUSE_VALIDITY_HOURS` | `services/session.js` | `168` | How long a premium session may stay paused (hours). |
+| `PREMIUM_HARD_EXPIRY_HOURS` | `config/index.js` | `72` | Hard deadline of a Premium pass (hours), counted from the moment its session was created. Pausing never extends it: once it passes, the pass is expired with `expire_reason = 'hard_expired'` even if frozen time is still on it. BUSINESS CONSTANT — intentionally **not** env-configurable; change it in `config/index.js`. Standard sessions never have one. |
 | `PAUSE_ENABLED` | `routes/session.js` | *(unset → disabled)* | Must be exactly `true` to allow session pause/resume. |
+
+A Premium pass may pause and resume as often as the guest likes inside
+`PREMIUM_HARD_EXPIRY_HOURS`; pausing protects the purchased minutes but never
+moves the deadline. Once the window closes the pass is expired with
+`expire_reason = 'hard_expired'`, even with frozen time still on it, and
+pause/resume answer `410 HARD_EXPIRED`. Standard sessions have no hard expiry:
+they are strictly continuous and end when their purchased active time runs out.
+
+There is no separate pause-validity window: the Premium hard expiry is the only
+limit on how long a pass may stay paused. The expiration worker
+(`SESSION_ENFORCE_INTERVAL`) sweeps live Premium sessions whose
+`absolute_expires_at` has passed and marks them `expired` with
+`expire_reason = 'hard_expired'`.
 
 ### MacroDroid payment webhook
 
@@ -660,7 +673,7 @@ limited to 16 kB.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/auth` | Voucher authentication (6-digit code) + Omada authorization. The device MAC is taken from the body `clientMac` (or `client_mac`); only when it is absent is the device resolved from the request address, so a tunnel-fronted portal still authorizes the right guest. |
-| `GET` | `/api/session/status` | Session remaining time. With no query string it resolves the device from the request IP through `portal_client_context` (MAC-direct flow; `502 MISSING_PORTAL_CONTEXT` when the device never loaded the portal). `?sessionId=…`, `?mac=…` (validated, `400 INVALID_MAC` otherwise) and `?voucher=…` still work; behind the cloud tunnel `status.html` uses `?mac=` with the MAC that `assets/portal.js` saved as `device_mac` after a successful claim, since the tunnel's public address never matches `client_ip`. |
+| `GET` | `/api/session/status` | Session remaining time. With no query string it resolves the device from the request IP through `portal_client_context` (MAC-direct flow; `502 MISSING_PORTAL_CONTEXT` when the device never loaded the portal). `?sessionId=…`, `?mac=…` (validated, `400 INVALID_MAC` otherwise) and `?voucher=…` still work; behind the cloud tunnel `status.html` uses `?mac=` with the MAC that `assets/portal.js` saved as `device_mac` after a successful claim, since the tunnel's public address never matches `client_ip`. `?mac=` resolves the newest live session for the device and, when there is none, falls back to its most recent **expired** session — so a guest whose pass ended is told it expired instead of being told no session exists. |
 | `POST` | `/api/session/pause` | Pause a premium session. |
 | `POST` | `/api/session/resume` | Resume a paused premium session. |
 | `POST` | `/api/session/expire` | Expire a session (admin/internal). |

@@ -231,6 +231,11 @@
           </div>
         </div>
 
+        <!-- Hard expiry notice — Premium only. Filled from the status payload's
+             absolute_expires_at; Standard sessions never receive that field, so
+             the element stays hidden for them. -->
+        <p id="hard-expiry-notice" class="hidden" style="font-size: 0.9em; color: #666; margin-top: 5px;"></p>
+
         <!-- Session details -->
         <dl class="session-details" id="session-details">
           <div class="session-detail-row">
@@ -293,6 +298,10 @@
             </div>
           </div>
         </div>
+        <!-- Hard expiry notice — Premium only, mirroring the active card. A
+             paused pass keeps counting down its absolute deadline, so the
+             guest must see it while paused too. -->
+        <p id="paused-hard-expiry-notice" class="hidden" style="font-size: 0.9em; color: #666; margin-top: 5px;"></p>
         <button
           type="button"
           id="btn-resume"
@@ -316,7 +325,11 @@
           </svg>
         </div>
         <h2 id="expired-heading" class="card-title card-title--error">Session Expired</h2>
-        <p class="card-subtitle">Your WiFi session has ended. Purchase a new session or enter a voucher to reconnect.</p>
+        <p id="expired-message" class="card-subtitle">Your WiFi session has ended. Purchase a new session or enter a voucher to reconnect.</p>
+        <!-- The deadline that ended the pass: the Premium hard expiry for
+             expire_reason 'hard_expired', otherwise the session's own
+             expires_at. Hidden when the backend reports neither. -->
+        <p id="expired-timestamp" class="hidden" style="font-size: 0.9em; color: #666; margin-top: 2px;"></p>
         <a href="index.html" class="btn btn--primary btn--full" role="button">
           Return to Login
         </a>
@@ -483,6 +496,11 @@
         pausedTime:   $('paused-time-display'),
         pausedRing:   $('paused-ring-fg'),
         subtitle:     $('countdown-subtitle'),
+        hardExpiry:   $('hard-expiry-notice'),
+        pausedHardExpiry: $('paused-hard-expiry-notice'),
+        expiredHeading:   $('expired-heading'),
+        expiredMessage:   $('expired-message'),
+        expiredTimestamp: $('expired-timestamp'),
         detailVoucher: $('detail-voucher'),
         detailPlan:   $('detail-plan'),
         detailSid:    $('detail-session-id'),
@@ -581,6 +599,73 @@
         var timeStr = formatDuration(localSeconds);
         if (els.cdTime) els.cdTime.textContent = timeStr;
         updateRing(els.cdRing, localSeconds, totalSeconds);
+      }
+
+      // Format the absolute deadline into a friendly local string, e.g.
+      // "Pass expires completely on 10/29/2026 at 3:45 PM". Fills the notice in
+      // BOTH the active and the paused card: the hard deadline keeps running
+      // while a pass is frozen, so a paused guest must see it too. Missing, null
+      // or unparseable values hide both notices — the backend is authoritative
+      // about whether a pass has one at all.
+      function renderHardExpiryNotice(value) {
+        var notices = [els.hardExpiry, els.pausedHardExpiry];
+        var when = value ? new Date(value) : null;
+
+        if (!when || isNaN(when.getTime())) {
+          notices.forEach(function (el) {
+            if (!el) return;
+            el.textContent = '';
+            el.classList.add('hidden');
+          });
+          return;
+        }
+
+        var text = 'Pass expires completely on ' +
+          when.toLocaleDateString() + ' at ' +
+          when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        notices.forEach(function (el) {
+          if (!el) return;
+          el.textContent = text;
+          el.classList.remove('hidden');
+        });
+      }
+
+      // Expired screen. A pass that simply ran its minutes out ended normally;
+      // one that hit its Premium hard deadline (expireReason 'hard_expired') was
+      // void with frozen time possibly still on it. Say which, and when, so the
+      // guest never lands on the generic not-found / connection-problem screen
+      // after the backend reports the session as expired.
+      function renderExpired(data) {
+        var reason = data.expireReason || data.expire_reason || '';
+        var hard = reason === 'hard_expired';
+        // The deadline that ended it: the absolute deadline for a hard expiry,
+        // otherwise the session's own expires_at.
+        var deadline = hard
+          ? (data.absolute_expires_at || data.absoluteExpiresAt)
+          : (data.expiresAt || data.expires_at ||
+             data.absolute_expires_at || data.absoluteExpiresAt);
+
+        if (els.expiredHeading) {
+          els.expiredHeading.textContent = hard ? 'Your Pass Has Expired' : 'Session Expired';
+        }
+        if (els.expiredMessage) {
+          els.expiredMessage.textContent = hard
+            ? 'This Premium pass reached its absolute expiry, so it can no longer be paused or resumed — even if it still had frozen time left. Purchase a new session or enter a voucher to reconnect.'
+            : 'Your WiFi session has ended. Purchase a new session or enter a voucher to reconnect.';
+        }
+
+        if (els.expiredTimestamp) {
+          var when = deadline ? new Date(deadline) : null;
+          if (!when || isNaN(when.getTime())) {
+            els.expiredTimestamp.textContent = '';
+            els.expiredTimestamp.classList.add('hidden');
+          } else {
+            els.expiredTimestamp.textContent =
+              (hard ? 'Pass expired on ' : 'Session expired on ') + formatDate(when);
+            els.expiredTimestamp.classList.remove('hidden');
+          }
+        }
       }
 
       function tickCountdown() {
@@ -771,6 +856,12 @@
         var planLabel = data.voucherType === 'premium' ? 'Premium' : 'Standard';
         var pausablePlan = PAUSABLE_PLANS.indexOf(data.voucherType) !== -1;
 
+        // Hard expiry (Premium only): the pass is void at absolute_expires_at
+        // however much frozen time it holds, so say when that is in the guest's
+        // own local time. A Standard session never carries the field and the
+        // notice stays hidden.
+        renderHardExpiryNotice(data.absolute_expires_at || data.absoluteExpiresAt);
+
         if (els.detailVoucher) els.detailVoucher.textContent = data.voucherCode || '—';
         if (els.detailPlan)    els.detailPlan.textContent    = planLabel;
         if (els.detailSid)    els.detailSid.textContent    = data.sessionId || '—';
@@ -816,6 +907,7 @@
           showSection('expired');
           clearInterval(countdownTimer);
           localSeconds = 0;
+          renderExpired(data);
         } else {
           showUnknown();
         }
