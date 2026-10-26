@@ -34,19 +34,47 @@ const request = require('supertest');
 const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 
-// The Omada cloud client is replaced wholesale: no fetch, no credentials, and
-// deterministic control over the authorization / QoS outcome.
-jest.mock('../src/services/omada-northbound', () => ({
-  authorizeGuest: jest.fn(),
-  setClientRateLimit: jest.fn(),
-}));
-const omadaNorthbound = require('../src/services/omada-northbound');
+// The controller client is replaced wholesale: no fetch, no credentials, and
+// deterministic control over the authorization / QoS outcome. The rest of the
+// module stays real so server startup and the session service keep working.
+jest.mock('../src/services/omada', () => Object.assign(
+  {},
+  jest.requireActual('../src/services/omada'),
+  { authenticateClient: jest.fn(), setClientRateLimit: jest.fn() }
+));
+const omadaService = require('../src/services/omada');
 
 // The authorized path waits a real 2000 ms for the cloud indexer.
 jest.setTimeout(20000);
 
 const MAC = 'AA:BB:CC:DD:EE:FF';
 const MOBILE = '09171234567';
+const AP_MAC = 'AA:AA:AA:AA:AA:AA';
+const SSID = 'GoodVibesVendoWifi';
+const CLIENT_IP = '10.0.0.5';
+
+/**
+ * The controller context the device gets by landing on the captive portal
+ * (POST /api/payment/context). extPortal/auth cannot be called without it, so
+ * every authorized claim in this suite depends on this row.
+ */
+async function seedPortalContext(clientMac = MAC) {
+  const now = new Date().toISOString();
+  await getDb().run(
+    `INSERT INTO portal_client_context
+       (client_mac, client_ip, ap_mac, ssid_name, radio_id, site, seen_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 0, 'Default', ?, ?, ?)`,
+    [clientMac, CLIENT_IP, AP_MAC, SSID, now, now, now]
+  );
+}
+
+const AUTH_CTX = {
+  clientMac: MAC,
+  clientIp: CLIENT_IP,
+  apMac: AP_MAC,
+  ssidName: SSID,
+  radioId: 0,
+};
 
 async function seedSession(sessionId, refNo, state, clientMac = MAC, durationMinutes = 5) {
   const now = new Date().toISOString();
@@ -75,9 +103,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events; DELETE FROM portal_client_context;');
+  await seedPortalContext();
   jest.clearAllMocks();
-  omadaNorthbound.authorizeGuest.mockResolvedValue({ success: true, clientMac: MAC, authRecordId: 'rec-claim' });
-  omadaNorthbound.setClientRateLimit.mockResolvedValue({ success: true, clientMac: MAC });
+  omadaService.authenticateClient.mockResolvedValue({ success: true, verified: true, result: 0 });
+  omadaService.setClientRateLimit.mockResolvedValue({ success: true, clientMac: MAC });
 });
 
 /**
@@ -292,7 +321,7 @@ describe('POST /api/payment/claim', () => {
 
   // ── Direct MAC authorization ──────────────────────────────────────────
 
-  test('authorizes the MAC through the Omada cloud (authorized:true + QoS)', async () => {
+  test('authorizes the MAC through the controller web API (authorized:true + QoS)', async () => {
     await seedUnclaimed('REF-AUTH0001', 50);   // 50 pesos -> 5 minutes at the old amount rate
     // The voucher's own duration is 30 minutes, which must win over the 5 the
     // amount alone would imply.
@@ -311,21 +340,24 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.voucherCode).toBe('828282');
     expect(res.body.ref_no).toBe('REF-AUTH0001');
 
-    expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 30 });
+    expect(omadaService.authenticateClient).toHaveBeenCalledWith({
+      ...AUTH_CTX,
+      durationMinutes: 30,
+    });
 
-    // The response must NOT wait for the 2000 ms cloud index delay: the claim is
+    // The response must NOT wait for the 2000 ms pre-QoS delay: the claim is
     // answered first, then the cap is applied (otherwise a slow tail is a window
     // in which a committed claim's response can be lost).
-    expect(omadaNorthbound.setClientRateLimit).not.toHaveBeenCalled();
+    expect(omadaService.setClientRateLimit).not.toHaveBeenCalled();
 
     await flushQosDelay();
 
     // 50 is not a premium amount, so no explicit limits are passed...
-    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
-    // ...and it happens AFTER the authorization, with the full cloud indexing
-    // delay in between (not skipped).
-    expect(omadaNorthbound.authorizeGuest.mock.invocationCallOrder[0])
-      .toBeLessThan(omadaNorthbound.setClientRateLimit.mock.invocationCallOrder[0]);
+    expect(omadaService.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+    // ...and it happens AFTER the authorization, with the full pre-QoS delay
+    // in between (not skipped).
+    expect(omadaService.authenticateClient.mock.invocationCallOrder[0])
+      .toBeLessThan(omadaService.setClientRateLimit.mock.invocationCallOrder[0]);
   });
 
   test('applies the premium caps when the amount is a premium tier price', async () => {
@@ -343,11 +375,14 @@ describe('POST /api/payment/claim', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.authorized).toBe(true);
-      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 45 });
+      expect(omadaService.authenticateClient).toHaveBeenCalledWith({
+        ...AUTH_CTX,
+        durationMinutes: 45,
+      });
 
       await flushQosDelay();
 
-      expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({
+      expect(omadaService.setClientRateLimit).toHaveBeenCalledWith({
         clientMac: MAC,
         customRateLimit: {
           upEnable: true, upUnit: 1, upLimit: 1024,
@@ -361,7 +396,7 @@ describe('POST /api/payment/claim', () => {
   });
 
   test('a failed rate limit does not fail the already-sent claim', async () => {
-    omadaNorthbound.setClientRateLimit.mockRejectedValue(new Error('ratelimit 500'));
+    omadaService.setClientRateLimit.mockRejectedValue(new Error('ratelimit 500'));
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     await seedUnclaimed('REF-QOS0001', 50);
     await seedVoucher('848484', 5000);
@@ -381,7 +416,7 @@ describe('POST /api/payment/claim', () => {
     await flushQosDelay();
 
     // The rejection was caught and logged, not thrown after the response.
-    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+    expect(omadaService.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
     expect(
       errorSpy.mock.calls.some((args) => String(args[0]).includes('rate limit failed'))
     ).toBe(true);
@@ -391,7 +426,7 @@ describe('POST /api/payment/claim', () => {
   test('502 OMADA_AUTH_FAILED consumes NOTHING — the same reference still claims on the retry', async () => {
     // The first attempt is rejected by Omada (e.g. the client is not yet
     // associated on the controller); the retry succeeds.
-    omadaNorthbound.authorizeGuest.mockRejectedValueOnce(new Error('cloud 503'));
+    omadaService.authenticateClient.mockRejectedValueOnce(new Error('controller 503'));
     await seedUnclaimed('REF-FAIL0001', 50);
     await seedVoucher('858585', 5000);
 
@@ -408,7 +443,7 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.voucherCode).toBeUndefined();
 
     // The QoS step is skipped entirely when the guest never got online.
-    expect(omadaNorthbound.setClientRateLimit).not.toHaveBeenCalled();
+    expect(omadaService.setClientRateLimit).not.toHaveBeenCalled();
 
     const untouchedVoucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['858585']);
     expect(untouchedVoucher.state).toBe('active');
@@ -454,7 +489,33 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.authorized).toBe(false);
     expect(res.body.voucherCode).toBe('868686');
     expect(res.body.authError).toMatch(/no client_mac/i);
-    expect(omadaNorthbound.authorizeGuest).not.toHaveBeenCalled();
+    expect(omadaService.authenticateClient).not.toHaveBeenCalled();
+  });
+
+  test('502 when client_mac is present but the device never landed on the portal', async () => {
+    // extPortal/auth is connection-type specific: without the AP/SSID/radio
+    // context there is nothing to authorize with, so the claim fails loud and
+    // consumes nothing.
+    await getDb().exec('DELETE FROM portal_client_context;');
+    await seedUnclaimed('REF-NOCTX0001', 50);
+    await seedVoucher('878788', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('MISSING_PORTAL_CONTEXT');
+    expect(res.body.error).toMatch(/open the wi-fi portal page/i);
+    expect(omadaService.authenticateClient).not.toHaveBeenCalled();
+    expect(omadaService.setClientRateLimit).not.toHaveBeenCalled();
+
+    // Nothing was consumed, so the same reference can be claimed after the
+    // device reloads the portal page.
+    const voucher = await getDb().getOne('SELECT state FROM vouchers WHERE code = ?', ['878788']);
+    expect(voucher.state).toBe('active');
+    const event = await getDb().getOne('SELECT status FROM webhook_events WHERE ref_no = ?', ['REF-NOCTX0001']);
+    expect(event.status).toBe('unclaimed');
   });
 
   test('400 when client_mac is present but malformed', async () => {
@@ -544,7 +605,10 @@ describe('POST /api/payment/claim', () => {
         .send({ ref_suffix: '0004', mobile_number: MOBILE, client_mac: MAC });
       expect(res.status).toBe(200);
       expect(res.body.minutes).toBe(1);
-      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 1 });
+      expect(omadaService.authenticateClient).toHaveBeenCalledWith({
+        ...AUTH_CTX,
+        durationMinutes: 1,
+      });
 
       const [url] = fetchMock.mock.calls[0];
       const parsed = new URL(url);
@@ -611,7 +675,7 @@ describe('POST /api/payment/claim', () => {
       // The code was already texted once; a replay must not text or authorize
       // again (which would extend the session for free).
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledTimes(1);
+      expect(omadaService.authenticateClient).toHaveBeenCalledTimes(1);
 
       // Let the first claim's bandwidth cap finish before the test ends.
       await flushQosDelay();

@@ -12,7 +12,6 @@
 
 const { v4: uuidv4 } = require('uuid');
 const omadaService = require('./omada');
-const omadaNorthbound = require('./omada-northbound');
 const {
   resolveVoucherRateLimit,
   normalizeVoucherType,
@@ -490,9 +489,10 @@ async function resumeSession(sessionId) {
  * The caps come from the session row (copied from the voucher at authorization
  * time), falling back to the tier rules in utils/qos.js.
  *
- * The cap itself is applied by omada-northbound, which routes it to whichever
- * transport works for this deployment (controller web API on the operator
- * session first, Open API second) — see the module header there.
+ * The cap itself is applied by omadaService.setClientRateLimit(), on a fresh
+ * controller ADMINISTRATOR session (OMADA_ADMIN_*): the portal operator account
+ * holds no site/QoS rights, and the cloud Open API path is disabled in this
+ * deployment.
  *
  * @param {Object} session session object from getSession()/loadSession()
  * @returns {Promise<{applied: boolean, method?: string, mock?: boolean, error?: string, customRateLimit?: Object}>}
@@ -521,7 +521,7 @@ async function applySessionRateLimit(session) {
   }
 
   try {
-    const result = await omadaNorthbound.applyClientRateLimit(
+    const result = await omadaService.setClientRateLimit(
       customRateLimit
         ? { clientMac: session.clientMac, customRateLimit }
         : { clientMac: session.clientMac }
@@ -531,9 +531,8 @@ async function applySessionRateLimit(session) {
       console.warn(
         '[session/qos] rate limit NOT applied to ' + session.clientMac +
         ' — mock mode: no controller is configured for QoS. Set OMADA_BASE_URL' +
-        ' (local web API, the reliable route on an OC200) or' +
-        ' OMADA_NORTHBOUND_BASE_URL / OMADA_NORTHBOUND_REGION + OMADA_CLIENT_ID +' +
-        ' OMADA_CLIENT_SECRET (Open API)'
+        ' plus OMADA_ADMIN_NAME / OMADA_ADMIN_PASSWORD — the controller web API' +
+        ' needs an administrator session to set a client rate limit'
       );
     } else {
       console.log(

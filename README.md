@@ -19,9 +19,8 @@ and QR Ph payment confirmations on an Android phone.
 6. [Environment Variables](#6-environment-variables)
 7. [Secure Frontend Build (`inject-secrets.js`)](#7-secure-frontend-build-inject-secretsjs)
 8. [Backend API Reference](#8-backend-api-reference)
-9. [Deployment on Render](#9-deployment-on-render)
-10. [Testing](#10-testing)
-11. [Security Notes](#11-security-notes)
+9. [Testing](#9-testing)
+10. [Security Notes](#10-security-notes)
 
 ---
 
@@ -201,7 +200,6 @@ goodvibesvendowifi/
 ├── scripts/
 │   └── generate-qr-placeholders.js
 ├── inject-secrets.js          # Build-time secret injection into the HTML pages
-├── render.yaml                # Render blueprint (web service + PostgreSQL)
 ├── backend/
 │   ├── package.json           # All npm scripts live here (see §5)
 │   ├── .env.example           # Environment variable template
@@ -300,8 +298,8 @@ unauthenticated health check at `GET /health`.
 ## 6. Environment Variables
 
 Only variables that are **actually referenced by the backend code** are listed
-here. Set them in `backend/.env` for local development, and in the **Render
-dashboard → Environment** (or `render.yaml`) for production.
+here. Set them in `backend/.env` on the host that runs the backend (the file is
+loaded relative to `src/server.js`, so the working directory does not matter).
 
 ### Core / server
 
@@ -323,18 +321,54 @@ dashboard → Environment** (or `render.yaml`) for production.
 |---|---|---|---|
 | `OMADA_BASE_URL` | `server.js`, `services/omada.js` | *(empty)* | Base URL the backend uses to reach the Omada controller API. When unset, Omada runs in mock mode and the session-expiration worker is disabled. |
 | `OMADA_OMADAC_ID` | `services/omada.js` | *(empty)* | Omada controller ID (OMADAC ID) used in API paths. |
-| `OMADA_SITE` | `services/omada.js`, `services/omada-northbound.js`, `routes/payment.js` | `Default` | Omada site name. The Northbound (InstaPay) client resolves it to its numeric site ID via `GET /openapi/v1/{omadacId}/sites` on first use and caches the result. |
+| `OMADA_SITE` | `services/omada.js`, `routes/payment.js` | `Default` | Omada site name. Sent in the body of every hotspot call and resolved to the site key its web-API paths embed (`GET …/api/v2/users/current`, falling back to `GET …/api/v2/sites`). |
 | `OMADA_PORTAL_OPERATOR_NAME` | `services/omada.js` | *(empty)* | Hotspot portal operator username (for `POST /{OMADAC_ID}/api/v2/hotspot/login`). Used **only** for captive-portal authorization (`/hotspot/extPortal/*`, including the undocumented `unauth`/`session` endpoints tried as a fallback); this account has no site privileges. |
 | `OMADA_PORTAL_OPERATOR_PASSWORD` | `services/omada.js` | *(empty)* | Hotspot portal operator password. |
 | `OMADA_ADMIN_NAME` | `services/omada.js` | *(empty)* | Controller **administrator** username (for `POST /{OMADAC_ID}/api/v2/login`). Used **only** for privileged calls: site-list lookup, the per-client rate-limit `PATCH`, and kicking an expired client off the site (`…/hotspot/clients/{MAC}/unauth`). Required for bandwidth caps **and** for expirations to actually disconnect a guest; Omada refuses admin accounts on the hotspot portal endpoints, hence the separate credentials. |
 | `OMADA_ADMIN_PASSWORD` | `services/omada.js` | *(empty)* | Controller administrator password. |
 | `OMADA_AUTH_TIMEOUT` | `services/omada.js` | `10000` | Controller request timeout (ms). |
 | `OMADA_TLS_REJECT` | `services/omada.js` | `false` | Default accepts the controller's self-signed cert (OC200/ER605). Set to `true` only when the controller has a publicly-trusted certificate. |
-| `OMADA_NORTHBOUND_BASE_URL` | `services/omada-northbound.js` | *(resolved from `OMADA_NORTHBOUND_REGION`)* | Base URL for the OpenAPI (`authClient`, `updateClientRateLimitSetting`). A **private/loopback** host that names no port automatically uses the controller's Open API port `8043` — port 443 is the web-UI/tunnel front, which does not serve `/openapi`. |
-| `OMADA_NORTHBOUND_TLS_REJECT` | `services/omada-northbound.js` | `false` for a LAN host (falls back to `OMADA_TLS_REJECT`) | Certificate verification for the OpenAPI calls. Relaxed automatically when the base URL is a LAN/loopback controller (its certificate cannot chain to a public CA); set `true` to force verification. |
-| `OMADA_QOS_METHOD` | `services/omada-northbound.js` | `auto` | Which transport applies bandwidth caps: `auto` = the controller web API on the fresh **administrator** session (`OMADA_BASE_URL` + `OMADA_ADMIN_*`) first, then the Open API; `local` = web API only; `openapi` = Open API only. See “Per-voucher bandwidth caps”. |
 | `OMADA_MOCK` | `services/omada.js` | `false` | `true` bypasses the controller entirely (mock mode). |
 | `OMADA_TIME_UNIT` | `config/index.js` | `ms` | Unit (`ms`, `us`, or `s`) for the Omada `time` field; depends on controller firmware. |
+
+### Omada web UI authorization (payment flows)
+
+Every guest authorization goes through the controller's **web UI API**
+(`services/omada.js`). There is no cloud/Open API path: the backend signs in to
+the controller itself and calls `/api/v2/hotspot/extPortal/auth`. This applies to
+the voucher login (`POST /api/auth`) and to both payment flows
+(`POST /api/payment/claim`, `POST /api/webhooks/instapay`).
+
+**Payment authorization therefore requires `OMADA_BASE_URL`,
+`OMADA_PORTAL_OPERATOR_NAME` / `OMADA_PORTAL_OPERATOR_PASSWORD` (the session that
+calls `extPortal/auth`) and `OMADA_ADMIN_NAME` / `OMADA_ADMIN_PASSWORD` (the
+administrator session that applies the bandwidth cap and disconnects expired
+clients).** With `OMADA_BASE_URL` unset the deployment is in mock mode and no
+device is really authorized.
+
+| Variable | Why it is required |
+|---|---|
+| `OMADA_BASE_URL` | The controller the backend calls. When unset, Omada runs in mock mode and nothing is really authorized. |
+| `OMADA_OMADAC_ID` | Controller ID used in every API path. |
+| `OMADA_PORTAL_OPERATOR_NAME` / `OMADA_PORTAL_OPERATOR_PASSWORD` | Hotspot portal operator session (`POST …/api/v2/hotspot/login`). Authorizing guests (`/hotspot/extPortal/*`) is the only thing this account may do. |
+| `OMADA_ADMIN_NAME` / `OMADA_ADMIN_PASSWORD` | Controller administrator session (`POST …/api/v2/login`). Required for the bandwidth-cap `PATCH …/clients/{MAC}/ratelimit` and for kicking an expired client off the site; the portal operator account holds no site/QoS rights. |
+
+**Operational requirement — the device must have loaded the portal at least
+once.** `extPortal/auth` is connection-type specific: it needs the client's AP
+MAC, SSID and radio ID (or `gatewayMac` + `vid`), which the backend only knows
+from the `portal_client_context` row written by the landing beacon
+(`POST /api/payment/context`). The portal page sends that beacon automatically
+when a device opens the captive portal.
+
+A paying device with **no** context row — it paid from a bookmark or history
+entry, never loaded the portal, or reconnected to a different AP — cannot be
+authorized. Both payment routes then fail loud with **HTTP 502 and
+`code: "MISSING_PORTAL_CONTEXT"`**, telling the caller to open the portal page
+once and retry. Nothing is consumed in that case: the payment stays claimable and
+the voucher stays active, so the retry after the portal page loads is a real
+retry. Context rows older than `PORTAL_CONTEXT_MAX_AGE_MS` (1 hour,
+`config/index.js`) are treated as missing, so a long-idle device has to reload the
+portal to refresh its AP/SSID association.
 
 ### Sessions
 
@@ -367,11 +401,15 @@ is set. A query string already present on the configured URL is preserved.
 
 ### InstaPay / PESONet webhook + tiered QoS
 
-`POST /api/webhooks/instapay` authorizes the paying device directly through
-Omada. A payment whose `amount` is one of `PREMIUM_AMOUNTS_PESOS` receives the
-premium bandwidth caps; every other amount receives the default caps. Values
-are parsed with `parseInt(..., 10)` and range-checked (1–1024) before reaching
-the controller.
+`POST /api/webhooks/instapay` authorizes the paying device directly through the
+controller's web UI API. The device must have loaded the captive portal at least
+once so its AP MAC / SSID / radio ID are on record — see
+[Omada web UI authorization](#omada-web-ui-authorization-payment-flows); without
+that context the callback answers `502 MISSING_PORTAL_CONTEXT` and changes
+nothing, so it can be retried once the device has opened the portal. A payment
+whose `amount` is one of `PREMIUM_AMOUNTS_PESOS` receives the premium bandwidth
+caps; every other amount receives the default caps. Values are parsed with
+`parseInt(..., 10)` and range-checked (1–1024) before reaching the controller.
 
 | Variable | Referenced in | Default | Description |
 |---|---|---|---|
@@ -380,14 +418,14 @@ the controller.
 | `PREMIUM_DOWN_MBPS` | `utils/qos.js` | *(empty → `PREMIUM_DOWN_KBPS`, else default caps)* | Premium download cap (Mbps). Unset/out-of-range falls back to the default caps. |
 | `PREMIUM_DOWN_KBPS` | `utils/qos.js` | *(empty → default caps)* | Alias for the premium download cap expressed in Kbps (≤1024 stays Kbps, above converts to Mbps). Used only when `PREMIUM_DOWN_MBPS` is unset/invalid. |
 | `PREMIUM_UP_KBPS` | `utils/qos.js` | *(empty → default caps)* | Premium upload cap (Kbps). Unset/out-of-range falls back to the default caps. |
-| `VOUCHER_DEFAULT_DOWN_MBPS` | `services/omada-northbound.js` | *(empty → error)* | Default download cap (Mbps) for non-premium amounts. |
-| `VOUCHER_DEFAULT_UP_KBPS` | `services/omada-northbound.js` | *(empty → error)* | Default upload cap (Kbps) for non-premium amounts. |
+| `VOUCHER_DEFAULT_DOWN_MBPS` | `services/omada.js` | *(empty → error)* | Default download cap (Mbps) for non-premium amounts. |
+| `VOUCHER_DEFAULT_UP_KBPS` | `services/omada.js` | *(empty → error)* | Default upload cap (Kbps) for non-premium amounts. |
 
 ### Per-voucher bandwidth caps (voucher login)
 
-A guest who redeems a voucher is capped through the same documented Omada call
-the payment flows use (`updateClientRateLimitSetting` →
-`services/omada-northbound.js`). The `extPortal/auth` body itself carries **no**
+A guest who redeems a voucher is capped through the same controller call the
+payment flows use (`services/omada.js` → `setClientRateLimit`). The
+`extPortal/auth` body itself carries **no**
 QoS fields: TP-Link's External Portal Server spec defines only
 `clientMac`/`clientIp`/`apMac`/`ssidName`/`radioId` (or `gatewayMac`/`vid`),
 `site`, `time` and `authType`, and an unknown field can make firmware reject the
@@ -418,41 +456,23 @@ are copied onto the session (`sessions.down_kbps`, `sessions.up_kbps`) so a
 re-authorization or a premium resume re-applies exactly the cap the guest paid
 for, even if the voucher row is edited afterwards.
 
-**Transport.** The same Omada operation (`updateClientRateLimitSetting`) can be
-reached two ways, and `services/omada-northbound.js` routes between them:
-
-1. **Controller web API** (`OMADA_QOS_METHOD=local`, and the first attempt for
-   `auto`) — `PATCH /{omadacId}/api/v2/sites/{siteKey}/clients/{MAC}/ratelimit`
-   on a **fresh administrator session** obtained at the start of every call
-   from `OMADA_ADMIN_NAME` / `OMADA_ADMIN_PASSWORD` (`OMADA_BASE_URL`). The
-   hotspot **portal operator** account cannot be used here: it holds no site
-   privileges, so the site query returns 0 sites and the cap is rejected. This
-   is the same call the controller UI makes, so it needs **no OAuth
-   credentials**; a fallback under `/openapi/v1/…` with the same admin session
-   is tried if the firmware does not expose the `/api/v2` route. Captive-portal
-   authorization keeps using the separate portal operator session
-   (`OMADA_PORTAL_OPERATOR_*`), which Omada requires for `/hotspot/extPortal/*`.
-2. **Open API** (`OMADA_QOS_METHOD=openapi`) — the documented
-   `updateClientRateLimitSetting` operation with an OAuth client-credentials
-   token (`OMADA_NORTHBOUND_BASE_URL`/`OMADA_NORTHBOUND_REGION` +
-   `OMADA_CLIENT_ID`/`OMADA_CLIENT_SECRET`). The Open API only exists on a
-   controller that ships it (**v5.12+**) **and** has an application created at
-   *Settings → Platform Integration → Open API*; use that page's **Omada ID /
-   Client ID / Client Secret** — Cloud-portal credentials do not work locally.
-   On a stock OC200 the token request can answer **HTTP 500**, which is why it is
-   no longer the only route.
-
-`auto` remembers the route that worked; if the controller definitively rejects
-the web-API route (missing permission, unknown site) it is skipped for 10
-minutes so logins are not slowed down by a probe that cannot succeed.
+**Transport.** The cap is applied through the controller's web API —
+`PATCH /{omadacId}/api/v2/sites/{siteKey}/clients/{MAC}/ratelimit` on a **fresh
+administrator session** obtained at the start of every call from
+`OMADA_ADMIN_NAME` / `OMADA_ADMIN_PASSWORD` (`OMADA_BASE_URL`). The hotspot
+**portal operator** account cannot be used here: it holds no site privileges, so
+the site query returns 0 sites and the cap is rejected. This is the same call the
+controller UI makes, so it needs no OAuth credentials; a fallback under
+`/openapi/v1/…` with the same admin session is tried if the firmware does not
+expose the `/api/v2` route. Captive-portal authorization keeps using the separate
+portal operator session (`OMADA_PORTAL_OPERATOR_*`), which Omada requires for
+`/hotspot/extPortal/*`.
 
 Applying the cap is **best-effort**: the guest is already authorized and the
 voucher already spent, so a rejected/failed rate-limit call never fails the
-login. `POST /api/auth` reports the outcome as `qosApplied`, with `qosError`
-when it failed and `qosMock: true` when no transport could actually apply it
-(mock mode: no `OMADA_BASE_URL` and no Open API credentials). A first rejection
-of the Open API route is retried once after 2 s, because the cloud indexes a
-freshly authorized client asynchronously.
+login. `POST /api/auth` reports the outcome as `qosApplied`, with `qosError` when
+it failed and `qosMock: true` when no controller is configured (mock mode: no
+`OMADA_BASE_URL`).
 
 Per-voucher caps are set through `POST /api/admin/vouchers`
 (`downKbps`/`upKbps`, both or neither, in Kbps), `PUT /api/admin/vouchers/:id`
@@ -490,9 +510,8 @@ when unset. The `*_QR_B64` values are complete data-URI strings
 
 ### Variables no longer used
 
-The following appear in `.env.example`, `render.yaml`, or older docs but are
-**not referenced anywhere in the backend code** and should not be carried over
-from legacy setups:
+The following appear in `.env.example` or older docs but are **not referenced
+anywhere in the backend code** and should not be carried over from legacy setups:
 
 - `OMADA_API_TOKEN` — superseded by the hotspot portal operator credentials
   (`OMADA_PORTAL_OPERATOR_NAME` / `OMADA_PORTAL_OPERATOR_PASSWORD`).
@@ -603,17 +622,22 @@ Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac? }`
 | `ref_suffix` | yes | Last 4 digits of the payment reference. |
 | `mobile_number` | yes | 11-digit PH mobile (`09XXXXXXXXX`). Saved on the reconciled `webhook_events` row and used as the SMS destination. |
 | `client_mac` | no | The device to authorize. Without it the claim still succeeds, it is just not auto-connected. |
-| `ap_mac` | no | Recorded in logs for traceability; the cloud authorize call is keyed on the client MAC alone. |
+| `ap_mac` | no | Recorded in logs for traceability; the authorization itself uses the AP MAC / SSID / radio ID captured by `POST /api/payment/context`. |
 
-The paying device is authorized **directly** through the Omada cloud
-(`authorizeGuest`) **before** the claim is written — so the customer does not
-have to type a code at all — and only once Omada has accepted is the payment
-marked claimed. The response is then sent **immediately**, before the 2000 ms
-index wait and the `setClientRateLimit` cap: those run after the caller already
-has its answer, and their outcome is logged rather than returned. The bandwidth
-cap comes from the same amount-based tier rules as the InstaPay webhook
-(`utils/qos.js`); a premium amount gets the `PREMIUM_*` caps and every other
-amount gets the `VOUCHER_DEFAULT_*` caps.
+The paying device is authorized **directly** through the controller's web UI API
+(`omadaService.authenticateClient` → `POST …/api/v2/hotspot/extPortal/auth`)
+**before** the claim is written — so the customer does not have to type a code at
+all — and only once the controller has accepted is the payment marked claimed.
+Because that call needs the device's AP MAC / SSID / radio ID, a device that has
+never loaded the portal cannot be auto-connected; the request answers
+`502 MISSING_PORTAL_CONTEXT` and consumes nothing (see
+[Omada web UI authorization](#omada-web-ui-authorization-payment-flows)). The
+response is then sent **immediately**, before the 2000 ms wait and the
+`setClientRateLimit` cap: those run after the caller already has its answer, and
+their outcome is logged rather than returned. The bandwidth cap comes from the
+same amount-based tier rules as the InstaPay webhook (`utils/qos.js`); a premium
+amount gets the `PREMIUM_*` caps and every other amount gets the
+`VOUCHER_DEFAULT_*` caps.
 
 | Result | Response |
 |---|---|
@@ -621,6 +645,7 @@ amount gets the `VOUCHER_DEFAULT_*` caps.
 | Not auto-connected (no `client_mac`, or the claimed voucher has no usable duration) | `200 { success: true, authorized: false, voucherCode, ref_no, minutes, authError }` |
 | Already claimed by the SAME mobile number | `200 { success: true, authorized: false, alreadyClaimed: true, voucherCode, ref_no, minutes }` |
 | Omada refused | `502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED', error }` |
+| Device has no fresh portal context (never loaded the portal, or the row is older than 1 hour) | `502 { success: false, authorized: false, code: 'MISSING_PORTAL_CONTEXT', error }` — nothing consumed; load the portal page and tap Claim again |
 | Payment not found / claimed by another number | `404 { success: false, error: 'Payment not found or already claimed.', code: 'PAYMENT_NOT_FOUND' }` |
 | No voucher left for the amount | `404 { success: false, error: 'No voucher is available for this amount…', code: 'NO_VOUCHER_AVAILABLE' }` |
 
@@ -640,9 +665,9 @@ Four deliberate behaviours worth noting:
   who only guessed the digits.
 - **The success response is sent before the bandwidth cap.** The claim is already
   committed, so no slow post-commit step may delay that answer: a connection that
-  dies during the 2000 ms index wait would make a successful claim *look* failed,
-  and the retry would answer "already claimed". A failed cap is logged only — the
-  guest is already online.
+  dies during the 2000 ms wait before the cap would make a successful claim
+  *look* failed, and the retry would answer "already claimed". A failed cap is
+  logged only — the guest is already online.
 - **Every attempt is logged.** Each request writes one `[payment/claim] attempt`
   line (suffix + MACs, never the mobile number), and the 404 / rollback /
   authorization paths log their outcome, so a support report can be matched to a
@@ -686,30 +711,7 @@ routes are added:
 
 ---
 
-## 9. Deployment on Render
-
-The repository includes a Render blueprint (`render.yaml`):
-
-- A **web service** named `goodvibesvendowifi`, built from
-  `backend/Dockerfile` with `dockerContext: .`, health check on `/health`, and
-  auto-deploy enabled.
-- A **PostgreSQL** database; its connection string is injected as
-  `DATABASE_URL`.
-
-The Docker build:
-
-1. Installs production dependencies (`npm ci --omit=dev`).
-2. Copies the backend code and the portal HTML into `/app/public`.
-3. Runs `inject-secrets.js` to bake in the store/contact details (§7).
-4. On start, runs `node src/db/migrate.js` and then `node src/server.js`.
-
-Set all secrets from §6 — plus the build-time variables `STORE_LOCATION`,
-`FACEBOOK_PAGE_NAME`, `FACEBOOK_URL`, `CONTACT_NUMBER`, and `SUPPORT_EMAIL` — in
-the Render dashboard, not in this repository.
-
----
-
-## 10. Testing
+## 9. Testing
 
 ```bash
 cd backend
@@ -728,7 +730,7 @@ Run in watch mode with `npm run test:watch`.
 
 ---
 
-## 11. Security Notes
+## 10. Security Notes
 
 - Public HTML is committed with placeholders only; real contact details are
   injected at build time (§7). Never commit injected values.

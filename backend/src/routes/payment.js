@@ -23,7 +23,8 @@ const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
 const { computeMinutesFromAmount } = require('../utils/duration');
 const { resolveCustomRateLimit } = require('../utils/qos');
-const omadaNorthbound = require('../services/omada-northbound');
+const omadaService = require('../services/omada');
+const { loadPortalContext } = require('../utils/portal-context');
 const SITE = process.env.OMADA_SITE || 'Default';
 
 // ── Per-IP rate limiter (stricter than the global apiLimiter) ──────────
@@ -87,9 +88,10 @@ function isValidIp(value) {
 // client must never be trusted to guarantee.
 const MOBILE_RE = /^09\d{9}$/;
 
-// The Omada cloud does not index a brand-new auth record instantly, so a QoS
-// PATCH sent in the same tick races the indexer and is silently dropped (the
-// same constraint documented on the InstaPay route). Exactly 2000 ms.
+// The controller does not always expose a just-authorized client to the
+// client/QoS endpoints in the same tick, so a QoS PATCH sent immediately is
+// silently dropped (the same constraint documented on the InstaPay route).
+// Exactly 2000 ms.
 const AUTHORIZE_INDEX_DELAY_MS = 2000;
 
 /**
@@ -150,7 +152,7 @@ function fireSmsWebhook(payload) {
  * (captive-portal mini browser, a proxy in front of the backend, a host restart)
  * and leave the customer looking at a failed claim whose payment is already
  * consumed — the next tap then answers "Payment not found or already claimed".
- * The 2000 ms cloud-index wait is the longest piece of that tail, so the response
+ * The 2000 ms pre-QoS wait is the longest piece of that tail, so the response
  * is sent first and the cap is applied afterwards. The wait itself is still
  * required: Omada does not index the new auth record instantly, and a cap PATCH
  * sent in the same tick is silently dropped (see the InstaPay route).
@@ -173,7 +175,7 @@ function applyRateLimitAfterResponse(ctx) {
   const timer = setTimeout(() => {
     try {
       const customRateLimit = resolveCustomRateLimit(amount);
-      omadaNorthbound
+      omadaService
         .setClientRateLimit(customRateLimit ? { clientMac, customRateLimit } : { clientMac })
         .then(() => {
           console.log(
@@ -366,8 +368,8 @@ router.get('/methods', (req, res) => {
  *   mobile_number — 11-digit PH mobile (09XXXXXXXXX); REQUIRED
  *   client_mac    — the device to authorize. Optional: without it the claim
  *                   still succeeds, it just is not auto-connected
- *   ap_mac        — recorded for traceability only; the cloud authorize call
- *                   is keyed on the client MAC alone
+ *   ap_mac        — recorded for traceability only; the authorization uses the
+ *                   AP/SSID/radio context captured by POST /api/payment/context
  *
  * Behaviour (in this order):
  *   1. Find the newest 'unclaimed' webhook_events row whose ref_no ends
@@ -376,10 +378,13 @@ router.get('/methods', (req, res) => {
  *      stores Pesos; vouchers.price stores centavos — never assume they match).
  *   3. Find one 'active', unassigned voucher whose price matches those
  *      centavos → 404 'No voucher available for this amount'.
- *   4. Authorize the paying device DIRECTLY through the Omada cloud
- *      (authorizeGuest). Steps 1–4 are READ-ONLY, so a refusal consumes
- *      nothing: the reference stays claimable and the same 4 digits can be
- *      retried instead of answering 'already claimed' on the second attempt.
+ *   4. Authorize the paying device DIRECTLY through the controller web API
+ *      (omadaService.authenticateClient, on the portal context captured at
+ *      landing; a device with no fresh context is a 502 MISSING_PORTAL_CONTEXT
+ *      and must reload the portal once). Steps 1–4 are READ-ONLY, so a refusal
+ *      consumes nothing: the reference stays claimable and the same 4 digits
+ *      can be retried instead of answering 'already claimed' on the second
+ *      attempt.
  *   5. Only once the device is authorized (or no authorization was needed)
  *      atomically mark the voucher 'claimed' (recording the FULL ref_no in
  *      assigned_ref_no) AND the event 'claimed'. Any failure rolls BOTH
@@ -644,21 +649,39 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     let authAttempted = false;
     let authorized = false;
     let authError = null;
+    let authErrorCode = null;
 
     if (clientMac && minutes > 0) {
       authAttempted = true;
       try {
-        await omadaNorthbound.authorizeGuest({ clientMac, durationMinutes: minutes });
+        const portal = await loadPortalContext(clientMac);
+        const auth = await omadaService.authenticateClient({
+          clientMac,
+          clientIp: portal.clientIp,
+          apMac: portal.apMac,
+          ssidName: portal.ssidName,
+          radioId: portal.radioId,
+          durationMinutes: minutes,
+        });
+        // Fail closed: the controller is the only authority on whether the
+        // guest is really authorized, so an unconfirmed answer is a failure.
+        if (!auth || auth.success !== true) {
+          const err = new Error('the controller did not confirm the authorization');
+          err.code = 'OMADA_AUTH_NOT_CONFIRMED';
+          throw err;
+        }
         authorized = true;
         console.log(
           '[payment/claim] authorized ' + clientMac + ' for ' + minutes + 'min' +
-          ' (ref ' + event.ref_no + ', ap ' + (apMac || 'unknown') + ')'
+          ' (ref ' + event.ref_no + ', ap ' + (apMac || portal.apMac) + ')'
         );
       } catch (err) {
-        authError = err && err.message ? err.message : String(err);
+        authError = (err && err.message) ? err.message : String(err);
+        authErrorCode = (err && err.code) || null;
         console.error(
           '[payment/claim] authorization failed for ' + clientMac +
-          ' (ref ' + event.ref_no + '): ' + authError
+          ' (ref ' + event.ref_no + '): ' +
+          ((err && err.code) ? err.code + ' — ' : '') + authError
         );
       }
     } else if (clientMac) {
@@ -670,12 +693,20 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // Omada refused: nothing has been written, so the same 4-digit reference
     // can be claimed again and no SMS is sent for a code that was never
     // consumed. This is the one failure that must not burn the payment.
+    //
+    // A missing/stale portal context is called out separately: the controller
+    // was never asked, and the customer can fix it themselves by reloading the
+    // captive portal page (which refreshes the context beacon) and claiming
+    // again.
     if (authAttempted && !authorized) {
+      const contextMissing = authErrorCode === 'MISSING_PORTAL_CONTEXT';
       return res.status(502).json({
         success: false,
         authorized: false,
-        code: 'OMADA_AUTH_FAILED',
-        error: 'Payment received but the Wi-Fi authorization failed. Please tap Claim again.',
+        code: contextMissing ? 'MISSING_PORTAL_CONTEXT' : 'OMADA_AUTH_FAILED',
+        error: contextMissing
+          ? 'Open the Wi-Fi portal page once, then tap Claim again so this device can be connected.'
+          : 'Payment received but the Wi-Fi authorization failed. Please tap Claim again.',
       });
     }
 

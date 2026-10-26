@@ -95,9 +95,6 @@ assets/portal.js
 !backend/templates/*.csv
 !backend/templates/*.xlsx
 
-# Render / deployment config with secrets (if not already covered by .env)
-render.yaml.local
-
 # Session/auth tokens if stored as files
 *.session
 *.token

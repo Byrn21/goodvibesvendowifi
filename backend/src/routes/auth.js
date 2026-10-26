@@ -394,7 +394,7 @@ router.post('/', async (req, res, next) => {
       durationMinutes: duration,
       totalSeconds: sessionTotalSeconds,
       // Whether the bandwidth cap was actually applied to this client. false =
-      // the guest is online but UNCAPPED (check the Render logs: northbound
+      // the guest is online but UNCAPPED (check the Render logs: OMADA_ADMIN_*
       // credentials / mock mode / controller rejection).
       qosApplied: qos.applied,
       qosMock: qos.mock === true,

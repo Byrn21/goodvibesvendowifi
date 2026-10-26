@@ -6,8 +6,8 @@
  *
  *   - vouchers.down_kbps / up_kbps are validated, stored and snapshotted onto
  *     the session when POST /api/auth authorizes the client;
- *   - the cap is applied through the documented Omada call
- *     (omadaNorthbound.setClientRateLimit via applyClientRateLimit), NOT by
+ *   - the cap is applied through the controller web API
+ *     (omadaService.setClientRateLimit on the administrator session), NOT by
  *     adding non-spec fields to the extPortal/auth body;
  *   - the voucher's own caps win, premium falls back to PREMIUM_*, standard
  *     falls back to the VOUCHER_DEFAULT_* service defaults;
@@ -40,7 +40,6 @@ const XLSX = require('xlsx');
 const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 const omada = require('../src/services/omada');
-const omadaNorthbound = require('../src/services/omada-northbound');
 const {
   resolveVoucherRateLimit,
   normalizeBandwidthKbps,
@@ -90,8 +89,8 @@ afterAll(async () => {
 beforeEach(async () => {
   await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers;');
   jest.spyOn(omada, 'authenticateClient').mockResolvedValue({ success: true, raw: {} });
-  jest.spyOn(omadaNorthbound, 'applyClientRateLimit')
-    .mockResolvedValue({ success: true, mocked: false, retried: false });
+  jest.spyOn(omada, 'setClientRateLimit')
+    .mockResolvedValue({ success: true, route: 'v2' });
 });
 
 afterEach(() => {
@@ -184,8 +183,8 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.qosApplied).toBe(true);
 
-    expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledTimes(1);
-    expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({
+    expect(omada.setClientRateLimit).toHaveBeenCalledTimes(1);
+    expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
         upEnable: true, upUnit: 2, upLimit: 5,
@@ -207,7 +206,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     const res = await authRequest({ voucher: '111222' });
 
     expect(res.status).toBe(200);
-    expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+    expect(omada.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
   });
 
   test('a premium voucher without caps uses the premium tier caps', async () => {
@@ -215,7 +214,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
     await authRequest({ voucher: '333444' });
 
-    expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({
+    expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
         upEnable: true, upUnit: 1, upLimit: 1024,
@@ -230,7 +229,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     const res = await authRequest({ voucher: '444555' });
 
     expect(res.status).toBe(200);
-    expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({
+    expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
         upEnable: true, upUnit: 1, upLimit: 1024,
@@ -251,7 +250,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
       await authRequest({ voucher: '666777' });
 
-      expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+      expect(omada.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
       const warned = warn.mock.calls.map((c) => c.join(' ')).join('\n');
       expect(warned).toContain('PREMIUM session');
       expect(warned).toContain('PREMIUM_DOWN_MBPS');
@@ -266,8 +265,8 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
   test('a failed cap does NOT fail the login and is reported in the response', async () => {
     await seedVoucher('555666', 'standard', 10000, 2000);
-    omadaNorthbound.applyClientRateLimit.mockRejectedValueOnce(
-      new Error('OMADA_NORTHBOUND_REJECTED: 404')
+    omada.setClientRateLimit.mockRejectedValueOnce(
+      new Error('OMADA_QOS_REJECTED: 404')
     );
 
     const res = await authRequest({ voucher: '555666' });
@@ -275,7 +274,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.qosApplied).toBe(false);
-    expect(res.body.qosError).toContain('OMADA_NORTHBOUND_REJECTED');
+    expect(res.body.qosError).toContain('OMADA_QOS_REJECTED');
 
     // The session was still recorded, so the guest can see their session.
     const session = await getDb().getOne(
@@ -293,13 +292,13 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     // The voucher cap is changed after the fact; the live session must keep
     // the cap it was created with.
     await getDb().run('UPDATE vouchers SET down_kbps = 1000, up_kbps = 1000 WHERE code = ?', ['777888']);
-    omadaNorthbound.applyClientRateLimit.mockClear();
+    omada.setClientRateLimit.mockClear();
 
     const second = await authRequest({ voucher: '777888' });
 
     expect(second.status).toBe(200);
     expect(second.body.sessionId).toBe(first.body.sessionId);
-    expect(omadaNorthbound.applyClientRateLimit).toHaveBeenCalledWith({
+    expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
         upEnable: true, upUnit: 2, upLimit: 10,

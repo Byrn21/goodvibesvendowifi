@@ -1290,14 +1290,12 @@ function omadaRequest(path, method, body, opts) {
 // ================================================================
 // QoS — per-client bandwidth cap through the WEB API (ADMIN session)
 // ================================================================
-// The Open API route (services/omada-northbound.js) needs a controller that
-// ships Open API (v5.12+) AND an Open API application created on the
-// controller, and it authenticates with OAuth client credentials. An OC200
-// whose firmware does not expose it answers the token request with HTTP 500,
-// so no cap is ever applied and every guest runs uncapped.
-//
-// The cap itself is not an Open API-only feature: the controller's UI sets it
-// through the v2 web API, authenticated by a session cookie + Csrf-Token.
+// The cap is not an Open API-only feature: the controller's own UI sets it
+// through the v2 web API, authenticated by a session cookie + Csrf-Token. (The
+// OAuth/Open API transport this module used to fall back to has been removed —
+// it needs firmware that ships the Open API (v5.12+) and an application created
+// on the controller, and an OC200 without it answers the token request with
+// HTTP 500, leaving every guest uncapped.)
 //
 // That session MUST belong to a controller ADMINISTRATOR (OMADA_ADMIN_*),
 // never to the hotspot portal operator: the operator account has no site
@@ -1441,6 +1439,87 @@ function rateLimitRejected(route, response) {
 }
 
 /**
+ * The operator's VOUCHER_DEFAULT_* caps — the fallback for every caller with no
+ * tier/voucher-specific cap.
+ *
+ * Both values go through parseInt(..., 10) so a quoted or suffixed value can
+ * never reach the controller as a string, and both are range-checked against
+ * the 1–1024 ceiling Omada accepts per unit. Down is Mbps (unit 2) and up is
+ * Kbps (unit 1) — the units the portal advertises to customers.
+ *
+ * Throws instead of sending mode 0 with no limits: a guest left uncapped while
+ * the logs claim a cap was applied is exactly the silent failure this fallback
+ * exists to prevent.
+ *
+ * @returns {Object} a customRateLimit payload fragment
+ */
+function defaultRateLimitPayload() {
+  const downMbps = parseInt(process.env.VOUCHER_DEFAULT_DOWN_MBPS, 10);
+  const upKbps = parseInt(process.env.VOUCHER_DEFAULT_UP_KBPS, 10);
+
+  if (!Number.isInteger(downMbps) || downMbps < 1 || downMbps > 1024) {
+    throw configError('VOUCHER_DEFAULT_DOWN_MBPS must be an integer between 1 and 1024 (Mbps)');
+  }
+  if (!Number.isInteger(upKbps) || upKbps < 1 || upKbps > 1024) {
+    throw configError('VOUCHER_DEFAULT_UP_KBPS must be an integer between 1 and 1024 (Kbps)');
+  }
+
+  return {
+    upEnable: true,
+    upUnit: 1,      // 1 = Kbps
+    upLimit: upKbps,
+    downEnable: true,
+    downUnit: 2,    // 2 = Mbps
+    downLimit: downMbps,
+  };
+}
+
+/**
+ * Build the PATCH body for the controller's per-client rate-limit call.
+ *
+ * Accepts the flat shape the payment/session callers use (customRateLimit /
+ * mode / rateLimitProfileId) and produces the payload the controller expects:
+ * mode 0 = explicit values, mode 1 = a named profile. A caller that passes no
+ * customRateLimit (no tier-specific cap) gets the VOUCHER_DEFAULT_* caps, so
+ * the fallback lives in one place instead of in every caller.
+ *
+ * @param {Object} ctx
+ * @param {0|1} [ctx.mode=0]                 0 = custom values, 1 = named profile
+ * @param {string} [ctx.rateLimitProfileId]  required when mode is 1
+ * @param {Object} [ctx.customRateLimit]     mode-0 values; defaults when omitted
+ * @returns {{mode:number, customRateLimit?:Object, rateLimitProfileId?:string}}
+ */
+function buildRateLimitPayload(ctx) {
+  const mode = Number(ctx && ctx.mode) === 1 ? 1 : 0;
+  const body = { mode };
+
+  if (mode === 1) {
+    if (!ctx.rateLimitProfileId) throw missingField('rateLimitProfileId');
+    body.rateLimitProfileId = ctx.rateLimitProfileId;
+    return body;
+  }
+
+  const c = (ctx && ctx.customRateLimit) || defaultRateLimitPayload();
+  for (const field of ['upLimit', 'downLimit']) {
+    const n = Number(c[field]);
+    if (!Number.isInteger(n) || n < 1 || n > 1024) {
+      throw configError('customRateLimit.' + field + ' must be an integer between 1 and 1024');
+    }
+  }
+
+  body.customRateLimit = {
+    upEnable: Boolean(c.upEnable),
+    upUnit: Number(c.upUnit) === 2 ? 2 : 1,
+    upLimit: Number(c.upLimit),
+    downEnable: Boolean(c.downEnable),
+    downUnit: Number(c.downUnit) === 2 ? 2 : 1,
+    downLimit: Number(c.downLimit),
+  };
+
+  return body;
+}
+
+/**
  * Apply a per-client bandwidth cap through the controller's web API.
  *
  * Privileged operation: it runs on a FRESH administrator session
@@ -1452,7 +1531,10 @@ function rateLimitRejected(route, response) {
  *
  * @param {Object} ctx
  * @param {string} ctx.clientMac  Client MAC, any common format
- * @param {Object} ctx.payload    { mode, customRateLimit } or { mode: 1, rateLimitProfileId }
+ * @param {Object} [ctx.payload]  an already-built { mode, customRateLimit } body
+ * @param {Object} [ctx.customRateLimit]  mode-0 caps (defaults when omitted)
+ * @param {0|1}    [ctx.mode]             0 = custom values (default), 1 = profile
+ * @param {string} [ctx.rateLimitProfileId] required when mode is 1
  * @returns {Promise<Object>} { success, clientMac, applied, route, mock? }
  * @throws Error with code OMADA_QOS_REJECTED / OMADA_SITE_NOT_FOUND / OMADA_MOCK…
  */
@@ -1465,11 +1547,18 @@ async function setClientRateLimit(ctx) {
     err.code = 'OMADA_INVALID_MAC';
     throw err;
   }
-  if (!ctx.payload || typeof ctx.payload !== 'object') throw missingField('payload');
+
+  // Either an already-built PATCH body ({ payload }) or the flat
+  // { customRateLimit } / { mode, rateLimitProfileId } shape. Resolving the
+  // default caps here means every caller gets the VOUCHER_DEFAULT_* fallback
+  // without having to know the controller's payload format.
+  const payload = (ctx.payload && typeof ctx.payload === 'object')
+    ? ctx.payload
+    : buildRateLimitPayload(ctx);
 
   if (MOCK_MODE) {
     console.warn('[omada/qos] MOCK MODE — rate limit NOT applied for ' + canonical);
-    return { success: true, mock: true, clientMac: canonical, applied: ctx.payload, route: 'mock' };
+    return { success: true, mock: true, clientMac: canonical, applied: payload, route: 'mock' };
   }
   if (!OMADAC_ID) throw configError('OMADA_OMADAC_ID is not configured');
 
@@ -1483,7 +1572,7 @@ async function setClientRateLimit(ctx) {
   // Path segments carry the hyphen-separated MAC (AA-BB-…) the controller's
   // URLs use; the BODY of a hotspot call uses colons, the path does not.
   const pathMac = canonical.replace(/:/g, '-');
-  const body = JSON.stringify(ctx.payload);
+  const body = JSON.stringify(payload);
 
   const routes = preferredRateLimitRoute
     ? [
@@ -1513,7 +1602,7 @@ async function setClientRateLimit(ctx) {
         '[omada/qos] rate limit applied to ' + canonical +
         ' via ' + route.name + ' (PATCH ' + path + ')'
       );
-      return { success: true, clientMac: canonical, applied: ctx.payload, route: route.name };
+      return { success: true, clientMac: canonical, applied: payload, route: route.name };
     }
 
     const rejected = rateLimitRejected(route.name, response);

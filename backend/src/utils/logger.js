@@ -2,7 +2,7 @@
  * utils/logger.js — shared application logger.
  *
  * winston is already a project dependency (backend/package.json) and LOG_LEVEL
- * is provisioned by the deployment (render.yaml: LOG_LEVEL=info). This wraps
+ * comes from the environment (default: info). This wraps
  * it so routes/services use a single `logger.info/warn/error` instead of each
  * file rolling its own console output, and so severity filtering is possible.
  *

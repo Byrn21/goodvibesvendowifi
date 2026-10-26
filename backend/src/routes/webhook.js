@@ -3,7 +3,7 @@
  *
  *   POST /api/webhooks/macrodroid — records an UNCLAIMED voucher entitlement
  *   POST /api/webhooks/instapay   — authorizes the paying device directly via
- *                                   the Omada cloud (InstaPay / PESONet)
+ *                                   the controller web API (InstaPay / PESONet)
  *
  * Receives a payment notification from MacroDroid after an e-wallet
  * payment completes and records it as an UNCLAIMED voucher entitlement.
@@ -34,7 +34,8 @@ const router = express.Router();
 const crypto = require('crypto');
 const { getDb } = require('../db/client');
 const { v4: uuidv4 } = require('uuid');
-const omadaNorthbound = require('../services/omada-northbound');
+const omadaService = require('../services/omada');
+const { loadPortalContext } = require('../utils/portal-context');
 const { normalizeMac } = require('../utils/device-id');
 const { computeMinutesFromAmount } = require('../utils/duration');
 const { resolveCustomRateLimit } = require('../utils/qos');
@@ -122,8 +123,15 @@ router.post('/macrodroid', async (req, res, next) => {
  * Example handler for a completed InstaPay / PESONet bank transfer. Unlike the
  * MacroDroid route above (which records an entitlement the customer claims
  * later), this flow authorizes the paying device immediately, through the
- * Omada CLOUD Northbound API — no voucher and no inbound reachability to the
- * controller required.
+ * controller's own web API (services/omada.js → extPortal/auth), on the AP/SSID/
+ * radio context captured when the device landed on the captive portal. No
+ * voucher is involved: the payment itself is the entitlement.
+ *
+ * A device with no (or stale) portal context cannot be authorized here —
+ * extPortal/auth is connection-type specific and there is nothing to fill
+ * apMac/ssidName/radioId from. That surfaces as a 502 MISSING_PORTAL_CONTEXT:
+ * the customer must reload the captive portal page once, then the callback can
+ * be retried.
  *
  * Body:
  *   { secret_token, payment_method: 'instapay'|'pesonet', client_mac,
@@ -133,12 +141,11 @@ router.post('/macrodroid', async (req, res, next) => {
  * so it is gated on the shared webhook secret compared in constant time.
  *
  * ── WHY THE THREE STEPS BELOW ARE IN THIS ORDER — DO NOT REORDER ──────────
- * authorizeGuest() creates the authentication record on the controller, but the
- * cloud does not index that new record instantly. Calling setClientRateLimit()
- * (a PATCH on /clients/{mac}/ratelimit) in the same tick races the indexer and
- * the controller answers as if the client did not exist yet, so the bandwidth
- * cap is silently never applied. Waiting AUTHORIZE_INDEX_DELAY_MS (exactly
- * 2000 ms) between the two calls is what makes the QoS step reliable.
+ * authenticateClient() authorizes the client on the controller, but the
+ * rate-limit PATCH addresses it by MAC and does not always see a
+ * just-authorized client in the same tick, so the cap can be silently dropped.
+ * Waiting AUTHORIZE_INDEX_DELAY_MS (exactly 2000 ms) between the two calls is
+ * what makes the QoS step reliable.
  *
  * Failure policy: a failed authorization is a 502 (nothing was granted), but a
  * failed rate limit is NOT fatal — the guest is already online, so the response
@@ -253,25 +260,45 @@ router.post('/instapay', async (req, res, next) => {
     }
 
     // ── THE SEQUENCE ────────────────────────────────────────────────────
-    // (a) Authorize the guest on the Omada cloud.
+    // (a) Authorize the guest through the controller web API, using the
+    //     AP/SSID/radio context captured when the device landed on the portal.
     let auth;
     try {
-      auth = await omadaNorthbound.authorizeGuest({
+      const portal = await loadPortalContext(clientMac);
+      auth = await omadaService.authenticateClient({
         clientMac,
+        clientIp: portal.clientIp,
+        apMac: portal.apMac,
+        ssidName: portal.ssidName,
+        radioId: portal.radioId,
         durationMinutes: minutes,
       });
+      // Fail closed on an unconfirmed authorization: the controller is the only
+      // authority on whether the guest is actually online.
+      if (!auth || auth.success !== true) {
+        const err = new Error('the controller did not confirm the authorization');
+        err.code = 'OMADA_AUTH_NOT_CONFIRMED';
+        throw err;
+      }
     } catch (err) {
       await db.run(
         `UPDATE webhook_events SET status = 'auth_failed', processed_at = ? WHERE ref_no = ?`,
         [new Date().toISOString(), refNo]
       );
       console.error(
-        '[webhook/instapay] authorization failed for ' + clientMac + ' (ref ' + refNo + '): ' + err.message
+        '[webhook/instapay] authorization failed for ' + clientMac + ' (ref ' + refNo + '): ' +
+        (err.code ? err.code + ' — ' : '') + err.message
       );
+      // A missing/stale portal context is reported on its own: the controller
+      // was never asked, and the device can be authorized on the next callback
+      // once it has loaded the captive portal page (which refreshes the beacon).
+      const contextMissing = err.code === 'MISSING_PORTAL_CONTEXT';
       return res.status(502).json({
         success: false,
-        error: 'Payment received but Wi-Fi authorization failed. Please contact support.',
-        code: 'OMADA_AUTH_FAILED',
+        code: contextMissing ? 'MISSING_PORTAL_CONTEXT' : 'OMADA_AUTH_FAILED',
+        error: contextMissing
+          ? 'This device has not loaded the Wi-Fi portal yet, so it cannot be auto-connected. Open the portal page once, then retry.'
+          : 'Payment received but Wi-Fi authorization failed. Please contact support.',
       });
     }
     console.log(
@@ -279,7 +306,8 @@ router.post('/instapay', async (req, res, next) => {
       paymentMethod + ', ref ' + refNo + ')'
     );
 
-    // (b) Wait exactly 2000 ms so the cloud indexes the new auth record.
+    // (b) Wait exactly 2000 ms so the controller exposes the fresh auth record
+    //     to the client/QoS endpoints the cap is PATCHed through.
     await delay(AUTHORIZE_INDEX_DELAY_MS);
 
     // (c) Apply the bandwidth caps. A premium purchase (amount is one of
@@ -290,7 +318,7 @@ router.post('/instapay', async (req, res, next) => {
     let qosError = null;
     try {
       const customRateLimit = resolveCustomRateLimit(amount);
-      await omadaNorthbound.setClientRateLimit(
+      await omadaService.setClientRateLimit(
         customRateLimit ? { clientMac, customRateLimit } : { clientMac }
       );
       console.log(

@@ -16,8 +16,9 @@
  *                                                         VOUCHER_DEFAULT_*
  *                                                         defaults
  *
- * Units mirror services/omada-northbound.js: down is Mbps (downUnit 2) and up
- * is Kbps (upUnit 1).
+ * Units match the customRateLimit the controller's web API accepts (see
+ * services/omada.js → setClientRateLimit): down is Mbps (downUnit 2) and up is
+ * Kbps (upUnit 1).
  *
  * The plan tier itself comes from vouchers.type ('standard' | 'premium'). It is
  * never trusted verbatim: normalizeVoucherType() trims/lowercases it first, so a

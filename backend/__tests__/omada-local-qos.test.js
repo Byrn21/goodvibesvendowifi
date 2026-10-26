@@ -314,10 +314,43 @@ describe('local web-API rate limit', () => {
     expect(patchCalls()).toHaveLength(2);
   });
 
-  test('rejects a missing payload before any HTTP call', async () => {
-    await expect(omada.setClientRateLimit({ clientMac: MAC }))
-      .rejects.toMatchObject({ code: 'OMADA_MISSING_FIELD' });
-    expect(calls).toHaveLength(0);
+  test('builds the payload from the VOUCHER_DEFAULT_* caps when none is given', async () => {
+    const savedDown = process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+    const savedUp = process.env.VOUCHER_DEFAULT_UP_KBPS;
+    process.env.VOUCHER_DEFAULT_DOWN_MBPS = '10';
+    process.env.VOUCHER_DEFAULT_UP_KBPS = '512';
+    try {
+      queueSession();
+      queueResponse(200, { errorCode: 0, msg: 'Success' });
+
+      const result = await omada.setClientRateLimit({ clientMac: MAC });
+
+      expect(result.applied).toEqual({
+        mode: 0,
+        customRateLimit: {
+          upEnable: true, upUnit: 1, upLimit: 512,
+          downEnable: true, downUnit: 2, downLimit: 10,
+        },
+      });
+      expect(JSON.parse(patchCalls()[0].body)).toEqual(result.applied);
+    } finally {
+      if (savedDown === undefined) delete process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+      else process.env.VOUCHER_DEFAULT_DOWN_MBPS = savedDown;
+      if (savedUp === undefined) delete process.env.VOUCHER_DEFAULT_UP_KBPS;
+      else process.env.VOUCHER_DEFAULT_UP_KBPS = savedUp;
+    }
+  });
+
+  test('rejects an unusable VOUCHER_DEFAULT_* fallback before any HTTP call', async () => {
+    const savedDown = process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+    delete process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+    try {
+      await expect(omada.setClientRateLimit({ clientMac: MAC }))
+        .rejects.toMatchObject({ code: 'OMADA_CONFIG_ERROR' });
+      expect(calls).toHaveLength(0);
+    } finally {
+      if (savedDown !== undefined) process.env.VOUCHER_DEFAULT_DOWN_MBPS = savedDown;
+    }
   });
 
   test('mock mode reports mock without touching the controller', async () => {
