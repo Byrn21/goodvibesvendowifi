@@ -995,6 +995,9 @@
           var pausedSecs = Math.floor(data.remainingSeconds || 0);
           if (els.pausedTime) els.pausedTime.textContent = formatDuration(pausedSecs);
           updateRing(els.pausedRing, pausedSecs, pausedSecs || 1);
+          // Re-arm Resume: it is disabled while a resume request is in flight,
+          // and pause/resume may repeat any number of times on Premium.
+          if (els.btnResume) els.btnResume.disabled = false;
           showSection('paused');
         } else if (state === 'expired') {
           stopCountdown();
@@ -1012,6 +1015,11 @@
       // ---- Event handlers ----
       if (els.btnPause) {
         els.btnPause.addEventListener('click', function () {
+          // Re-arm the confirmation dialog every time it is opened. Both buttons
+          // are disabled while a pause request is in flight; without this reset
+          // the SECOND pause of a Premium session would open a dead dialog.
+          if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
+          if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
           if (els.controls) els.controls.classList.add('hidden');
           if (els.pauseConfirm) els.pauseConfirm.classList.remove('hidden');
         });
@@ -1026,6 +1034,10 @@
             .then(function () {
               if (els.pollingStatus) els.pollingStatus.textContent = '';
               if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
+              // Leave the dialog usable for the next pause (Premium guests may
+              // pause/resume repeatedly).
+              if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
+              if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
               // Stop the local ticker at once, then re-read the authoritative
               // state (the /pause response carries no sessionId to render).
               stopCountdown();

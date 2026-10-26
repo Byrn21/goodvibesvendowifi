@@ -107,6 +107,91 @@ describe('POST /api/session/pause — plan-tier authorization', () => {
   });
 });
 
+describe('Premium pause is not a one-shot allowance', () => {
+  test('pause → resume → pause again, driven by the status payload canPause values', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_cycle',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+
+    const active = await request(app).get('/api/session/status?sessionId=sess_cycle');
+    expect(active.body.state).toBe('active');
+    expect(active.body.canPause).toBe(true);
+    expect(active.body.remainingSeconds).toBeGreaterThan(0);
+
+    const firstPause = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_cycle' });
+    expect(firstPause.status).toBe(200);
+    expect(firstPause.body.state).toBe('paused');
+
+    const paused = await request(app).get('/api/session/status?sessionId=sess_cycle');
+    expect(paused.body.state).toBe('paused');
+    expect(paused.body.canPause).toBe(false);
+    expect(paused.body.canResume).toBe(true);
+
+    const resumed = await request(app)
+      .post('/api/session/resume')
+      .send({ sessionId: 'sess_cycle' });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.state).toBe('active');
+
+    // The payload must offer Pause again — nothing was consumed by the first one.
+    const activeAgain = await request(app).get('/api/session/status?sessionId=sess_cycle');
+    expect(activeAgain.body.state).toBe('active');
+    expect(activeAgain.body.canPause).toBe(true);
+    expect(activeAgain.body.canResume).toBe(false);
+
+    const secondPause = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_cycle' });
+    expect(secondPause.status).toBe(200);
+    expect(secondPause.body.state).toBe('paused');
+
+    const frozen = await getDb().getOne(
+      'SELECT state, remaining_seconds FROM sessions WHERE session_id = ?',
+      ['sess_cycle']
+    );
+    expect(frozen.state).toBe('paused');
+    expect(frozen.remaining_seconds).toBeGreaterThan(0);
+  });
+
+  test('canPause stays true with under a minute left', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_short_pause',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+    await getDb().run(
+      'UPDATE sessions SET expires_at = ? WHERE session_id = ?',
+      [new Date(Date.now() + 30 * 1000).toISOString(), 'sess_short_pause']
+    );
+
+    const res = await request(app).get('/api/session/status?sessionId=sess_short_pause');
+    expect(res.body.state).toBe('active');
+    expect(res.body.remainingSeconds).toBeLessThanOrEqual(30);
+    // No "only enough time left" gate: the capability belongs to the plan.
+    expect(res.body.canPause).toBe(true);
+
+    const pause = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_short_pause' });
+    expect(pause.status).toBe(200);
+  });
+
+  test('the schema stores no consumed-pause flag to honour', async () => {
+    const cols = await getDb().query('PRAGMA table_info(sessions)');
+    const names = cols.map((c) => c.name);
+    expect(names).not.toContain('can_pause');
+    expect(names).not.toContain('used_pause');
+  });
+});
+
 describe('POST /api/session/pause — the frozen timer', () => {
   async function rowOf(sessionId) {
     return getDb().getOne(

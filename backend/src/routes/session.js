@@ -227,7 +227,15 @@ router.get('/status', async (req, res, next) => {
       expireReason: session.expireReason || null,
       expire_reason: session.expireReason || null,
       totalSeconds: (session.totalDurationSeconds || (session.duration || 60) * 60),
-      canPause:  session.state === 'active' && remainingSeconds > 60 && isPausableVoucherType(session.voucherType),
+      // Pause is a Premium CAPABILITY, not a once-per-session allowance: an
+      // active Premium session may pause again after every resume, right up to
+      // its absolute deadline. No pause counter or consumed flag is stored or
+      // consulted (the schema has no can_pause / used_pause column), so the
+      // only limits are the live state and the hard expiry, which getSession()
+      // has already enforced above.
+      canPause: session.state === 'active'
+        && isPausableVoucherType(session.voucherType)
+        && !isHardExpired(session),
       canResume: session.state === 'paused',
     });
   } catch (err) {

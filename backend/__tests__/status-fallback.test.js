@@ -57,6 +57,7 @@ function makeClassList() {
 }
 
 function createElement(id) {
+  const listeners = {};
   return {
     id,
     textContent: '',
@@ -66,9 +67,10 @@ function createElement(id) {
     disabled: false,
     style: {},
     classList: makeClassList(),
+    listeners,
     setAttribute() {},
     getAttribute() { return null; },
-    addEventListener() {},
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     removeEventListener() {},
     appendChild() {},
     removeChild() {},
@@ -182,6 +184,13 @@ function loadStatus(opts) {
     storage,
     timers: timeouts,
     window: windowStub,
+    /** Fire the first click handler registered on an element. */
+    click: (id) => {
+      const el = getEl(id);
+      const handlers = el.listeners && el.listeners.click;
+      if (!handlers || !handlers.length) throw new Error('no click handler on ' + id);
+      handlers[0]();
+    },
     /** How many countdown intervals are currently live. */
     intervalCount: () => intervals.size,
     /** Run the countdown heartbeat manually, as setInterval would. */
@@ -642,6 +651,85 @@ describe('status.html — connection race and paused countdown', () => {
     // The ticker is gone, and the frozen time is what the backend reported.
     expect(status.intervalCount()).toBe(0);
     expect(status.getEl('paused-time-display').textContent).toBe('09:00');
+    expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
+  });
+});
+
+describe('status.html — repeated Pause on a Premium session', () => {
+  test('pause → resume → pause again re-arms the controls each time', async () => {
+    let paused = false;
+    let pausePosts = 0;
+    let resumePosts = 0;
+
+    const premiumActive = {
+      ...ACTIVE_SESSION.body,
+      voucherType: 'premium',
+      canPause: true,
+    };
+
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      respond: (url) => {
+        if (/\/api\/session\/pause$/.test(url)) {
+          pausePosts += 1;
+          paused = true;
+          return { status: 200, body: { success: true, state: 'paused' } };
+        }
+        if (/\/api\/session\/resume$/.test(url)) {
+          resumePosts += 1;
+          paused = false;
+          return { status: 200, body: { success: true, state: 'active' } };
+        }
+        return {
+          status: 200,
+          body: paused
+            ? {
+                ...premiumActive,
+                state: 'paused',
+                remainingSeconds: 540,
+                expiresAt: null,
+                canPause: false,
+                canResume: true,
+              }
+            : premiumActive,
+        };
+      },
+    });
+
+    const settle = async () => {
+      for (let i = 0; i < 8; i += 1) {
+        await status.flush();
+      }
+    };
+
+    await settle();
+    expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
+
+    // First pause.
+    status.click('btn-pause');
+    expect(status.getEl('pause-confirm').classList.contains('hidden')).toBe(false);
+    status.click('btn-pause-confirm');
+    await settle();
+
+    expect(pausePosts).toBe(1);
+    expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
+    expect(status.getEl('btn-resume').disabled).toBe(false);
+
+    // Resume.
+    status.click('btn-resume');
+    await settle();
+
+    expect(resumePosts).toBe(1);
+    expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
+
+    // Second pause: the dialog must not still be disabled from the first one.
+    status.click('btn-pause');
+    expect(status.getEl('btn-pause-confirm').disabled).toBe(false);
+    status.click('btn-pause-confirm');
+    await settle();
+
+    expect(pausePosts).toBe(2);
     expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
   });
 });
