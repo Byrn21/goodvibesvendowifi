@@ -605,25 +605,29 @@ Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac? }`
 | `client_mac` | no | The device to authorize. Without it the claim still succeeds, it is just not auto-connected. |
 | `ap_mac` | no | Recorded in logs for traceability; the cloud authorize call is keyed on the client MAC alone. |
 
-Once the claim transaction commits, the paying device is authorized **directly**
-through the Omada cloud — `authorizeGuest` → 2000 ms index wait →
-`setClientRateLimit` — so the customer does not have to type a code at all. The
-bandwidth cap comes from the same amount-based tier rules as the InstaPay
-webhook (`utils/qos.js`); a premium amount gets the `PREMIUM_*` caps and every
-other amount gets the `VOUCHER_DEFAULT_*` caps.
+The paying device is authorized **directly** through the Omada cloud
+(`authorizeGuest`) **before** the claim is written — so the customer does not
+have to type a code at all — and only once Omada has accepted is the payment
+marked claimed. After the commit come the 2000 ms index wait and the
+`setClientRateLimit` cap. The bandwidth cap comes from the same amount-based
+tier rules as the InstaPay webhook (`utils/qos.js`); a premium amount gets the
+`PREMIUM_*` caps and every other amount gets the `VOUCHER_DEFAULT_*` caps.
 
 | Result | Response |
 |---|---|
 | Device authorized | `200 { success: true, authorized: true, message: 'Device authorized', voucherCode, ref_no, minutes, qosApplied }` |
 | Not auto-connected (no `client_mac`, or the claimed voucher has no usable duration) | `200 { success: true, authorized: false, voucherCode, ref_no, minutes, authError }` |
-| Omada refused | `502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED', voucherCode, ref_no }` |
+| Omada refused | `502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED', error }` |
 
 Two deliberate behaviours worth noting:
 
-- **A failed authorization never rolls the claim back.** The customer keeps the
-  voucher their money bought and the code is still returned, so they can connect
-  manually. A failed *bandwidth cap* is likewise reported as `qosApplied: false`
-  rather than failing the claim — the guest is already online.
+- **A refused authorization consumes nothing.** Nothing is written before Omada
+  answers, so a refusal leaves the payment `unclaimed` and the voucher `active`
+  and unassigned: the customer can claim the SAME 4 digits again — a second tap
+  is a real retry instead of "Payment not found or already claimed" — and no SMS
+  is sent for a code that was never consumed. A failed *bandwidth cap*, which
+  runs after the commit, is likewise reported as `qosApplied: false` rather than
+  failing the claim — the guest is already online.
 - **`voucherCode` is still returned even when the device is authorized.** It
   keeps the payment↔voucher ledger intact and provides the manual fallback, so
   the portal can stop *showing* it without the backend losing the audit trail.

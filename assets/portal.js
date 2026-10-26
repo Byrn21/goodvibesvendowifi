@@ -1663,9 +1663,11 @@
   // Response handling is deliberately tolerant, because the backend can answer
   // in three ways:
   //   authorized:true  — the MAC is online, so there is no code to show
-  //   voucherCode only — claimed, but not auto-authorized (no MAC context, or
-  //                      Omada refused); fall back to the manual code flow
-  //   neither          — a real failure, shown on the error step
+  //   voucherCode only — claimed, but not auto-authorized (no MAC context);
+  //                      fall back to the manual code flow
+  //   neither          — a real failure, shown on the error step. A refused
+  //                      Omada authorization is reported here and consumes
+  //                      nothing, so the same digits can simply be retried.
   function submitClaim() {
     if (claimState.submitting) return;
 

@@ -203,7 +203,7 @@ describe('POST /api/payment/claim', () => {
     await seedUnclaimed('REF-MOB0001', 50);
     await seedVoucher('888888', 5000);
 
-    for (const bad of [undefined, '', '0917123456', '091712345678', '99171234567', 'abcdefghijk', '0917-123-4567']) {
+    for (const bad of [undefined, '', '0917123456', '091712345678', '99171234567', '0917-123-4567']) {
       const res = await request(app)
         .post('/api/payment/claim')
         .send({ ref_suffix: '0001', mobile_number: bad });
@@ -313,8 +313,10 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.qosError).toBe('ratelimit 500');
   });
 
-  test('502 OMADA_AUTH_FAILED when the cloud rejects, but the claim is NOT rolled back', async () => {
-    omadaNorthbound.authorizeGuest.mockRejectedValue(new Error('cloud 503'));
+  test('502 OMADA_AUTH_FAILED consumes NOTHING — the same reference still claims on the retry', async () => {
+    // The first attempt is rejected by Omada (e.g. the client is not yet
+    // associated on the controller); the retry succeeds.
+    omadaNorthbound.authorizeGuest.mockRejectedValueOnce(new Error('cloud 503'));
     await seedUnclaimed('REF-FAIL0001', 50);
     await seedVoucher('858585', 5000);
 
@@ -326,13 +328,32 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.success).toBe(false);
     expect(res.body.authorized).toBe(false);
     expect(res.body.code).toBe('OMADA_AUTH_FAILED');
-    // The customer keeps the entitlement their money bought, and gets the code
-    // so they are not stranded with nothing.
-    expect(res.body.voucherCode).toBe('858585');
-    expect(res.body.ref_no).toBe('REF-FAIL0001');
+    expect(res.body.error).toMatch(/tap claim again/i);
+    // No code was issued, because nothing was consumed.
+    expect(res.body.voucherCode).toBeUndefined();
 
     // The QoS step is skipped entirely when the guest never got online.
     expect(omadaNorthbound.setClientRateLimit).not.toHaveBeenCalled();
+
+    const untouchedVoucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['858585']);
+    expect(untouchedVoucher.state).toBe('active');
+    expect(untouchedVoucher.assigned_ref_no).toBeNull();
+    const untouchedEvent = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-FAIL0001']);
+    expect(untouchedEvent.status).toBe('unclaimed');
+    expect(untouchedEvent.mobile_number).toBeNull();
+
+    // The SECOND attempt with the same 4 digits is a real retry — not the
+    // 'Payment not found or already claimed' dead end this route used to hit.
+    const retry = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
+
+    expect(retry.status).toBe(200);
+    expect(retry.body.success).toBe(true);
+    expect(retry.body.authorized).toBe(true);
+    expect(retry.body.voucherCode).toBe('858585');
+    expect(retry.body.ref_no).toBe('REF-FAIL0001');
+    expect(retry.body.minutes).toBe(60);
 
     const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['858585']);
     expect(voucher.state).toBe('claimed');

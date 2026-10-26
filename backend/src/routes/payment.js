@@ -317,20 +317,24 @@ router.get('/methods', (req, res) => {
  *   ap_mac        — recorded for traceability only; the cloud authorize call
  *                   is keyed on the client MAC alone
  *
- * Behaviour (all inside ONE transaction):
+ * Behaviour (in this order):
  *   1. Find the newest 'unclaimed' webhook_events row whose ref_no ends
  *      with ref_suffix → 404 'Payment not found or already claimed'.
  *   2. Convert the recorded amount from PESOS to CENTAVOS (webhook_events
  *      stores Pesos; vouchers.price stores centavos — never assume they match).
  *   3. Find one 'active', unassigned voucher whose price matches those
  *      centavos → 404 'No voucher available for this amount'.
- *   4. Atomically mark the voucher 'claimed' (recording the FULL ref_no in
+ *   4. Authorize the paying device DIRECTLY through the Omada cloud
+ *      (authorizeGuest). Steps 1–4 are READ-ONLY, so a refusal consumes
+ *      nothing: the reference stays claimable and the same 4 digits can be
+ *      retried instead of answering 'already claimed' on the second attempt.
+ *   5. Only once the device is authorized (or no authorization was needed)
+ *      atomically mark the voucher 'claimed' (recording the FULL ref_no in
  *      assigned_ref_no) AND the event 'claimed'. Any failure rolls BOTH
  *      back, so a voucher is never claimed without its event (or vice versa).
  *
- * Once the claim is committed, the paying device is authorized DIRECTLY
- * through the Omada cloud — authorizeGuest → 2000 ms index wait →
- * setClientRateLimit — so the customer does not have to type a code at all.
+ * After the commit: 2000 ms index wait → setClientRateLimit (best-effort QoS),
+ * and the SMS webhook with the code. Neither can fail the claim.
  *
  * `minutes` is the claimed voucher's own `duration_minutes` (a plain integer,
  * already in minutes) — never a value derived from the payment amount, which
@@ -344,9 +348,9 @@ router.get('/methods', (req, res) => {
  *                          carries no usable duration. The code is still
  *                          returned so the customer can connect manually.
  *   502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED',
- *         voucherCode, ref_no }  — Omada refused. The claim is deliberately
- *                          NOT rolled back: the customer's entitlement is
- *                          kept and the code is returned for a manual connect.
+ *         error }  — Omada refused. NOTHING was written (no voucher consumed,
+ *                          no payment marked claimed, no SMS sent), so the same
+ *                          reference can be claimed again.
  *
  * voucherCode is still returned even when the device is authorized — it keeps
  * the payment↔voucher ledger intact and gives a manual fallback, so the portal
@@ -407,37 +411,109 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
 
     const db = getDb();
 
+    // ── 1. Locate the payment and the voucher that pays for it ───────────
+    // Both lookups are READ-ONLY: nothing is consumed until step 3, after the
+    // authorization has been decided.
+    const event = await db.getOne(
+      `SELECT ref_no, amount FROM webhook_events
+        WHERE status = 'unclaimed' AND ref_no LIKE ?
+        ORDER BY id DESC LIMIT 1`,
+      ['%' + refSuffix]
+    );
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        error: 'Payment not found or already claimed.',
+        code: 'PAYMENT_NOT_FOUND',
+      });
+    }
+
+    // CRITICAL: webhook_events.amount is Pesos; vouchers.price is centavos.
+    const amountCentavos = Math.round(Number(event.amount) * 100);
+
+    // duration_minutes is the voucher's ENTITLEMENT: it is the number of
+    // minutes the customer actually bought (e.g. 1 for a 1-minute voucher,
+    // 60 for a 1-hour voucher), stored as a plain integer. It is NOT
+    // milliseconds and must never be divided by 60000 — it is already the
+    // exact total-minutes value the session, Omada and the SMS report.
+    const voucher = await db.getOne(
+      `SELECT id, code, duration_minutes FROM vouchers
+        WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
+        ORDER BY id ASC LIMIT 1`,
+      [amountCentavos]
+    );
+    if (!voucher) {
+      return res.status(404).json({
+        success: false,
+        error: 'No voucher is available for this amount. Please contact support.',
+        code: 'NO_VOUCHER_AVAILABLE',
+      });
+    }
+
+    // The granted time comes from the VOUCHER's duration_minutes — the thing
+    // that was actually sold — not from the amount. Deriving it from the amount
+    // rounded a 1-minute voucher down to 0 when its price was below one whole
+    // PESOS_PER_MINUTE unit, and reported 5 minutes for a 1-hour voucher.
+    // duration_minutes is already an integer number of minutes, so it is used
+    // as-is; the amount-derived rate is only a fallback for a voucher row with
+    // no usable duration.
+    const voucherMinutes = Math.floor(Number(voucher.duration_minutes));
+    const minutes = Number.isFinite(voucherMinutes) && voucherMinutes > 0
+      ? voucherMinutes
+      : computeMinutesFromAmount(Number(event.amount));
+
+    // ── 2. Authorize the device BEFORE anything is written ───────────────
+    // The claim used to be committed first, so an Omada refusal burned the
+    // customer's reference: the retry answered 'Payment not found or already
+    // claimed' and only support could help. Authorizing first means a refusal
+    // consumes nothing — the event stays 'unclaimed' and the voucher stays
+    // 'active' and unassigned — so tapping Claim again is a REAL retry, which
+    // normally succeeds once the device is associated on the controller.
+    let authAttempted = false;
+    let authorized = false;
+    let authError = null;
+
+    if (clientMac && minutes > 0) {
+      authAttempted = true;
+      try {
+        await omadaNorthbound.authorizeGuest({ clientMac, durationMinutes: minutes });
+        authorized = true;
+        console.log(
+          '[payment/claim] authorized ' + clientMac + ' for ' + minutes + 'min' +
+          ' (ref ' + event.ref_no + ', ap ' + (apMac || 'unknown') + ')'
+        );
+      } catch (err) {
+        authError = err && err.message ? err.message : String(err);
+        console.error(
+          '[payment/claim] authorization failed for ' + clientMac +
+          ' (ref ' + event.ref_no + '): ' + authError
+        );
+      }
+    } else if (clientMac) {
+      authError = 'the voucher carries no usable duration, so no session time could be granted';
+    } else {
+      authError = 'no client_mac was supplied with the claim';
+    }
+
+    // Omada refused: nothing has been written, so the same 4-digit reference
+    // can be claimed again and no SMS is sent for a code that was never
+    // consumed. This is the one failure that must not burn the payment.
+    if (authAttempted && !authorized) {
+      return res.status(502).json({
+        success: false,
+        authorized: false,
+        code: 'OMADA_AUTH_FAILED',
+        error: 'Payment received but the Wi-Fi authorization failed. Please tap Claim again.',
+      });
+    }
+
+    // ── 3. Commit the claim — the only write in this handler ─────────────
+    // Conditional updates keep the consume atomic against a concurrent claim
+    // (or a double tap): rowCount 0 rolls the whole transaction back, so a
+    // voucher is never claimed without its event (or vice versa).
     let claim;
     try {
       claim = await db.transaction(async (tx) => {
-        const event = await tx.getOne(
-          `SELECT ref_no, amount FROM webhook_events
-            WHERE status = 'unclaimed' AND ref_no LIKE ?
-            ORDER BY id DESC LIMIT 1`,
-          ['%' + refSuffix]
-        );
-        if (!event) throw httpError(404, 'PAYMENT_NOT_FOUND', 'Payment not found or already claimed.');
-
-        // CRITICAL: webhook_events.amount is Pesos; vouchers.price is centavos.
-        const amountCentavos = Math.round(Number(event.amount) * 100);
-
-        // duration_minutes is the voucher's ENTITLEMENT: it is the number of
-        // minutes the customer actually bought (e.g. 1 for a 1-minute voucher,
-        // 60 for a 1-hour voucher), stored as a plain integer. It is NOT
-        // milliseconds and must never be divided by 60000 — it is already the
-        // exact total-minutes value the session, Omada and the SMS report.
-        const voucher = await tx.getOne(
-          `SELECT id, code, duration_minutes FROM vouchers
-            WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
-            ORDER BY id ASC LIMIT 1`,
-          [amountCentavos]
-        );
-        if (!voucher) {
-          throw httpError(404, 'NO_VOUCHER_AVAILABLE', 'No voucher is available for this amount. Please contact support.');
-        }
-
-        // Conditional update guards against a concurrent claim taking the
-        // voucher between the SELECT and this UPDATE.
         const voucherUpdate = await tx.run(
           `UPDATE vouchers
               SET state = 'claimed', assigned_ref_no = ?
@@ -459,12 +535,7 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
           throw httpError(404, 'PAYMENT_NOT_FOUND', 'Payment not found or already claimed.');
         }
 
-        return {
-          voucherCode: voucher.code,
-          refNo: event.ref_no,
-          amount: Number(event.amount),
-          durationMinutes: voucher.duration_minutes,
-        };
+        return { voucherCode: voucher.code, refNo: event.ref_no };
       });
     } catch (err) {
       if (err.code === 'PAYMENT_NOT_FOUND' || err.code === 'NO_VOUCHER_AVAILABLE') {
@@ -473,50 +544,11 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       throw err;
     }
 
-    // ── Direct MAC authorization (Omada cloud) ───────────────────────────
-    // The claim above is ALREADY COMMITTED, so the customer's payment is
-    // reconciled to a voucher no matter what Omada does next. That is
-    // deliberate: an authorization failure must never also cost them the
-    // entitlement their money bought (it is reported as authorized:false, with
-    // the code still returned so they can connect manually).
-    // The granted time comes from the VOUCHER's duration_minutes — the thing
-    // that was actually sold — not from the amount. Deriving it from the amount
-    // rounded a 1-minute voucher down to 0 when its price was below one whole
-    // PESOS_PER_MINUTE unit, and reported 5 minutes for a 1-hour voucher.
-    // duration_minutes is already an integer number of minutes, so it is used
-    // as-is; the amount-derived rate is only a fallback for a voucher row with
-    // no usable duration.
-    const voucherMinutes = Math.floor(Number(claim.durationMinutes));
-    const minutes = Number.isFinite(voucherMinutes) && voucherMinutes > 0
-      ? voucherMinutes
-      : computeMinutesFromAmount(claim.amount);
-    let authAttempted = false;
-    let authorized = false;
-    let authError = null;
+    // The claim is COMMITTED from here on: the customer's money is reconciled
+    // to a voucher, so nothing below may turn this into an error response —
+    // a failed bandwidth cap only reports qosApplied:false.
     let qosApplied = null;
     let qosError = null;
-
-    if (clientMac && minutes > 0) {
-      authAttempted = true;
-      try {
-        await omadaNorthbound.authorizeGuest({ clientMac, durationMinutes: minutes });
-        authorized = true;
-        console.log(
-          '[payment/claim] authorized ' + clientMac + ' for ' + minutes + 'min' +
-          ' (ref ' + claim.refNo + ', ap ' + (apMac || 'unknown') + ')'
-        );
-      } catch (err) {
-        authError = err && err.message ? err.message : String(err);
-        console.error(
-          '[payment/claim] authorization failed for ' + clientMac +
-          ' (ref ' + claim.refNo + '): ' + authError
-        );
-      }
-    } else if (clientMac) {
-      authError = 'amount is below the minimum chargeable amount';
-    } else {
-      authError = 'no client_mac was supplied with the claim';
-    }
 
     // The SMS is dispatched as soon as the authorization OUTCOME is known but
     // BEFORE the QoS index wait below (the long pole), so the customer is texted
@@ -548,7 +580,7 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     if (authorized) {
       await delay(AUTHORIZE_INDEX_DELAY_MS);
       try {
-        const customRateLimit = resolveCustomRateLimit(claim.amount);
+        const customRateLimit = resolveCustomRateLimit(Number(event.amount));
         await omadaNorthbound.setClientRateLimit(
           customRateLimit ? { clientMac, customRateLimit } : { clientMac }
         );
@@ -563,20 +595,6 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         qosError = err && err.message ? err.message : String(err);
         console.error('[payment/claim] authorized but rate limit failed for ' + clientMac + ': ' + qosError);
       }
-    }
-
-    // Omada refused the authorization: the claim stands, the device is NOT
-    // online. This is a genuine error, reported as one — while still handing
-    // back the code so the customer is not stranded with nothing.
-    if (authAttempted && !authorized) {
-      return res.status(502).json({
-        success: false,
-        authorized: false,
-        code: 'OMADA_AUTH_FAILED',
-        error: 'Payment received but Wi-Fi authorization failed. Please contact support.',
-        voucherCode: claim.voucherCode,
-        ref_no: claim.refNo,
-      });
     }
 
     console.log('[payment/claim] claimed voucher ' + claim.voucherCode + ' for ref ' + claim.refNo);
