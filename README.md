@@ -19,7 +19,7 @@ GCash, Maya, and QR Ph payment confirmations on an Android phone.
 4. [Project Structure](#4-project-structure)
 5. [Backend Setup & Running](#5-backend-setup--running)
 6. [Environment Variables](#6-environment-variables)
-7. [Secure Frontend Build (`inject-secrets.js`)](#7-secure-frontend-build-inject-secretsjs)
+7. [Frontend Store Details & Contact Info](#7-frontend-store-details--contact-info)
 8. [Backend API Reference](#8-backend-api-reference)
 9. [Testing](#9-testing)
 10. [Security Notes](#10-security-notes)
@@ -204,11 +204,11 @@ goodvibesvendowifi/
 │   ├── carousel.js            # Landing carousel
 │   └── images/                # Logos and static images
 ├── config/
-│   ├── config.js              # Active frontend config
+│   ├── config.js              # Public defaults; store details come from .env at runtime
 │   └── config.example.js      # Frontend config template
 ├── scripts/
 │   └── generate-qr-placeholders.js
-├── inject-secrets.js          # Injects store/contact details into the HTML pages
+├── inject-secrets.js          # Legacy: build-time injection of store/contact details
 ├── backend/
 │   ├── package.json           # All npm scripts live here (see §5)
 │   ├── .env.example           # Environment variable template
@@ -521,6 +521,20 @@ when unset. The `*_QR_B64` values are complete data-URI strings
 | `ALLOWED_REDIRECT_DOMAINS` | `routes/auth.js` | *(empty → allow any)* | Comma-separated allowlist of post-auth redirect domains. |
 | `DEFAULT_REDIRECT_URL` | `routes/auth.js` | `https://www.google.com` | Fallback destination when no redirect is supplied. |
 
+### Frontend store details & support contact
+
+Served to the browser by `GET /config/config.js` (§7) and rendered in the
+cash-payment screen and the Contact Support modal. An empty value hides its row.
+Editing one of these needs a backend restart — no HTML edit and no rebuild.
+
+| Variable | Referenced in | Default | Description |
+|---|---|---|---|
+| `STORE_LOCATION` | `server.js` (`GET /config/config.js`) | *(empty → row hidden)* | Store address. |
+| `FACEBOOK_PAGE_NAME` | `server.js` | *(empty → row hidden)* | Facebook page link text. |
+| `FACEBOOK_URL` | `server.js` | *(empty → row hidden)* | Facebook page URL. |
+| `SUPPORT_PHONE` | `server.js` | *(empty → row hidden)* | Contact number (`tel:` link). `CONTACT_NUMBER` is accepted as an alias; `SUPPORT_PHONE` wins when both are set. |
+| `SUPPORT_EMAIL` | `server.js` | *(empty → row hidden)* | Support e-mail (`mailto:` link). |
+
 ### Variables no longer used
 
 The following appear in `.env.example` or older docs but are **not referenced
@@ -539,22 +553,72 @@ anywhere in the backend code** and should not be carried over from legacy setups
 
 ---
 
-## 7. Secure Frontend Build (`inject-secrets.js`)
+## 7. Frontend Store Details & Contact Info
 
-The public HTML pages in this repository ship with **placeholder tokens** so that
-real contact details never live in the public repo. The root-level
-`inject-secrets.js` (dependency-free; uses only Node's `fs` and `path`) replaces
-those tokens in place at build time.
+The public pages (`index.html`, `success.html`, `error.html`, `status.html`) show
+the store's address and support contacts, but this repository is public — so none
+of those values are committed. They live in the git-ignored `backend/.env` (§6)
+and are delivered to the browser **at runtime by the Express backend**. Changing
+a detail means editing `.env` and restarting the server: no HTML edits, no
+rebuild, and nothing to leak on `git push`.
 
-### What it injects
+### How it works — runtime route (primary method)
+
+`backend/src/server.js` registers `GET /config/config.js` **before**
+`express.static`, so it shadows the file on disk:
+
+1. It reads the public `config/config.js` and keeps every default in it
+   (branding, plans, page routes, `paramMap`, …).
+2. It layers the store/contact values from `.env` on top of `window.CONFIG`.
+3. It answers `Content-Type: application/javascript; charset=utf-8` with a strict
+   `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`, so a captive
+   WebView can never keep running a stale copy.
+
+The pages already request that URL (`<script src="config/config.js?v=…">`).
+`assets/portal.js` (index.html) and each page's own support-modal script then fill
+the Contact Support rows and the cash-payment "Store Location" line from
+`window.CONFIG`.
+
+| `.env` variable | `window.CONFIG` key | Where it appears |
+|---|---|---|
+| `STORE_LOCATION` | `storeLocation` | "Store Location:" line in the cash-payment modal (`index.html`); Location row of the Contact Support modal (`success.html`) |
+| `FACEBOOK_PAGE_NAME` | `facebookPageName` | Contact Support modal → Facebook Page row (link text) |
+| `FACEBOOK_URL` | `facebookUrl` | Contact Support modal → Facebook Page row (link target) |
+| `SUPPORT_PHONE` | `supportPhone` | Contact Support modal → Contact Number row (`tel:` link) |
+| `SUPPORT_EMAIL` | `supportEmail` | Contact Support modal → Email row (`mailto:` link) |
+
+`CONTACT_NUMBER` is accepted as an alias for `SUPPORT_PHONE` (that is the name
+`inject-secrets.js` reads); `SUPPORT_PHONE` wins when both are set. An empty
+variable hides its row, and a value that still looks like a `__TOKEN__` is
+ignored, so a placeholder can never reach a guest.
+
+### Resolution order in the browser
+
+1. `window.CONFIG` — the `.env` value served by the route above.
+2. A value already present in the page — i.e. a build-time injection (below).
+3. Otherwise the row is hidden, rather than rendered empty or with a token.
+
+The runtime route and the build-time script can therefore coexist, and the
+runtime value wins. If the HTML is hosted somewhere other than this backend
+(uploaded to the controller or a static host), `/config/config.js` is not
+generated — the on-disk `config/config.js` is served instead, and the build-time
+script below is the way to get real values in.
+
+### Legacy / alternative: build-time setup (`inject-secrets.js`)
+
+Kept for deployments where the portal HTML is served without this backend. The
+pages ship with **placeholder tokens**, and the dependency-free root-level
+`inject-secrets.js` (only Node's `fs` and `path`) replaces them in place. You do
+**not** need it when the Express backend serves the pages — the runtime route
+above already handles it.
 
 | Placeholder token | Environment variable | Files |
 |---|---|---|
-| `__STORE_LOCATION__` | `STORE_LOCATION` | `index.html` (HTML text) |
-| `__FACEBOOK_PAGE_NAME__` | `FACEBOOK_PAGE_NAME` | `index.html`, `error.html`, `status.html` (JS) |
-| `__FACEBOOK_URL__` | `FACEBOOK_URL` | `index.html`, `error.html`, `status.html` (JS) |
-| `__CONTACT_NUMBER__` | `CONTACT_NUMBER` | `index.html`, `error.html`, `status.html` (JS) |
-| `__SUPPORT_EMAIL__` | `SUPPORT_EMAIL` | `index.html`, `success.html`, `error.html`, `status.html` |
+| `__STORE_LOCATION__` | `STORE_LOCATION` | `index.html`, `success.html` (HTML text) |
+| `__FACEBOOK_PAGE_NAME__` | `FACEBOOK_PAGE_NAME` | `index.html`, `success.html`, `error.html` (JS) |
+| `__FACEBOOK_URL__` | `FACEBOOK_URL` | `index.html`, `success.html`, `error.html` (JS) |
+| `__CONTACT_NUMBER__` | `CONTACT_NUMBER` | `index.html`, `success.html`, `error.html` (JS) |
+| `__SUPPORT_EMAIL__` | `SUPPORT_EMAIL` | `index.html`, `success.html`, `error.html` (JS), `status.html` (HTML href) |
 
 Values are HTML-escaped or JavaScript-escaped depending on where each token
 lives. **Unset values degrade safely**: the Contact Support modal hides the
@@ -565,30 +629,24 @@ values, only replacement counts.
 > keys or the MacroDroid secret — those stay server-side as backend environment
 > variables (§6).
 
-### Where it runs
+**Where it runs.** Run it from the repository root in Termux before starting the
+server. The five variables come from the shell environment of that one command
+(the script does not read `backend/.env`):
 
-There is no build pipeline and no container image: the Express backend serves the
-portal HTML straight from the repository, so the values are live as soon as the
-script rewrites those files on the Termux device.
+```bash
+STORE_LOCATION="123 Example St" SUPPORT_EMAIL="help@example.com" node inject-secrets.js
+```
 
-- **Before starting the server:** run it from the repository root in Termux. The
-  five variables come from the shell environment of that one command (they are
-  not read from `backend/.env` by this script):
+⚠️ The script rewrites the target HTML files **in place**. Real contact details
+must not be committed, so keep the run on the device and restore the placeholders
+before committing any HTML change:
 
-  ```bash
-  STORE_LOCATION="123 Example St" SUPPORT_EMAIL="help@example.com" node inject-secrets.js
-  ```
+```bash
+git checkout index.html success.html error.html status.html
+```
 
-  ⚠️ The script rewrites the target HTML files **in place**. Real contact details
-  must not be committed, so keep the run on the device and restore the
-  placeholders before committing any HTML change:
-
-  ```bash
-  git checkout index.html success.html error.html status.html
-  ```
-
-- There is **no npm script** for this step — it is a plain Node script, so
-  re-run it whenever the store/contact details change and reload the portal.
+There is **no npm script** for this step — it is a plain Node script, so re-run it
+whenever the store/contact details change and reload the portal.
 
 ---
 
@@ -716,7 +774,9 @@ Four deliberate behaviours worth noting:
 ### Static pages
 
 When the portal HTML directory is found, `express.static` serves it and these
-routes are added:
+routes are added. `GET /config/config.js` is registered **before** the static
+middleware, so it is generated per request from `.env` rather than read from
+disk (§7):
 
 | Method | Path | File |
 |---|---|---|
@@ -726,6 +786,7 @@ routes are added:
 | `GET` | `/admin` | `admin.html` |
 | `GET` | `/login` | `login.html` |
 | `GET` | `/error` | `error.html` |
+| `GET` | `/config/config.js` | generated: `config/config.js` + `.env` store details, `Cache-Control: no-store` |
 
 ---
 
@@ -752,8 +813,10 @@ Run in watch mode with `npm run test:watch`.
 
 ## 10. Security Notes
 
-- Public HTML is committed with placeholders only; real contact details are
-  injected at build time (§7). Never commit injected values.
+- Public HTML is committed with placeholders only; the real store/contact details
+  come from the git-ignored `backend/.env` and are served at runtime by
+  `GET /config/config.js` (§7). Never commit them, and if you use the legacy
+  injection script, restore the placeholders before committing HTML changes.
 - The MacroDroid `secret_token` is compared in constant time and grants no access
   unless it matches `MACRODROID_WEBHOOK_SECRET`.
 - Payment reference numbers are deduplicated at the database level to prevent

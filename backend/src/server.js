@@ -265,6 +265,86 @@ for (const candidate of candidates) {
 }
 
 if (PORTAL_HTML_DIR) {
+  // ── Frontend configuration (served from .env) ─────────────────────
+  // Declared BEFORE express.static so it wins over the on-disk file.
+  //
+  // config/config.js is public: it is committed to the repository and ships
+  // inside portal-upload.zip. The real store details therefore live in the
+  // git-ignored .env, and this route serves the same configuration as
+  // JavaScript with those environment values layered on top. Every default
+  // (branding, plans, page routes, …) still comes from config/config.js, so
+  // nothing has to be duplicated here and nothing has to be edited to deploy:
+  // restarting the backend is enough to pick up an edited .env.
+  const FRONTEND_CONFIG_FILE = path.join(PORTAL_HTML_DIR, 'config', 'config.js');
+
+  // CONFIG key -> .env name(s), first non-empty wins. SUPPORT_PHONE is the
+  // documented name; CONTACT_NUMBER (what inject-secrets.js reads) is kept as
+  // its alias so an existing .env does not have to be renamed.
+  const FRONTEND_ENV_KEYS = {
+    storeLocation:    ['STORE_LOCATION'],
+    facebookPageName: ['FACEBOOK_PAGE_NAME'],
+    facebookUrl:      ['FACEBOOK_URL'],
+    supportPhone:     ['SUPPORT_PHONE', 'CONTACT_NUMBER'],
+    supportEmail:     ['SUPPORT_EMAIL'],
+  };
+
+  /** First real value among `names`, or '' — never a template token. */
+  const firstEnvValue = (names) => {
+    for (const name of names) {
+      const raw = process.env[name];
+      if (typeof raw !== 'string') continue;
+      const value = raw.trim();
+      if (value && !/^__[A-Z0-9_]+__$/.test(value)) return value;
+    }
+    return '';
+  };
+
+  app.get('/config/config.js', (req, res) => {
+    const overrides = {};
+    for (const key of Object.keys(FRONTEND_ENV_KEYS)) {
+      const value = firstEnvValue(FRONTEND_ENV_KEYS[key]);
+      if (value) overrides[key] = value;
+    }
+
+    let source = '';
+    try {
+      source = fs.readFileSync(FRONTEND_CONFIG_FILE, 'utf8');
+    } catch (err) {
+      // The HTML can be hosted without this file (e.g. uploaded to the
+      // controller). Answer with the environment values anyway, so window.CONFIG
+      // still exists and portal.js falls back to its own defaults.
+      console.warn(
+        '[config] ' + FRONTEND_CONFIG_FILE + ' unreadable — serving environment values only'
+      );
+    }
+
+    // JSON.stringify leaves U+2028/U+2029 raw, which older JS parsers treat as
+    // line terminators inside a string literal.
+    const envJson = JSON.stringify(overrides)
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+
+    const body =
+      '/* Served by the backend: config/config.js + .env store details. */\n' +
+      source + '\n' +
+      '(function (envValues) {\n' +
+      '  window.CONFIG = window.CONFIG || {};\n' +
+      '  for (var key in envValues) {\n' +
+      '    if (Object.prototype.hasOwnProperty.call(envValues, key)) {\n' +
+      '      window.CONFIG[key] = envValues[key];\n' +
+      '    }\n' +
+      '  }\n' +
+      '})(' + envJson + ');\n';
+
+    // Always freshly rendered: an edited .env (after a restart) or a changed
+    // config/config.js must reach the captive WebView immediately.
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.status(200).send(body);
+  });
+
   app.use(express.static(PORTAL_HTML_DIR, {
     setHeaders: (res, filePath) => {
       // config/config.js carries the public backend URL. Serving it no-store
