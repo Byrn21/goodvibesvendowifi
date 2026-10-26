@@ -84,12 +84,14 @@ describe('POST /api/payment/claim', () => {
     );
   }
 
-  // Seed a voucher whose price is INTEGER CENTAVOS (P50.00 = 5000).
-  async function seedVoucher(code, priceCentavos, state = 'active', assignedRef = null) {
+  // Seed a voucher whose price is INTEGER CENTAVOS (P50.00 = 5000) and whose
+  // duration_minutes is a plain INTEGER number of minutes (1 = one minute,
+  // 60 = one hour).
+  async function seedVoucher(code, priceCentavos, state = 'active', assignedRef = null, durationMinutes = 60) {
     await getDb().run(
       `INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no)
-       VALUES (?, 'standard', 60, ?, ?, ?)`,
-      [code, priceCentavos, state, assignedRef]
+       VALUES (?, 'standard', ?, ?, ?, ?)`,
+      [code, durationMinutes, priceCentavos, state, assignedRef]
     );
   }
 
@@ -233,8 +235,10 @@ describe('POST /api/payment/claim', () => {
   // ── Direct MAC authorization ──────────────────────────────────────────
 
   test('authorizes the MAC through the Omada cloud (authorized:true + QoS)', async () => {
-    await seedUnclaimed('REF-AUTH0001', 50);   // 50 pesos -> 5 minutes
-    await seedVoucher('828282', 5000);
+    await seedUnclaimed('REF-AUTH0001', 50);   // 50 pesos -> 5 minutes at the old amount rate
+    // The voucher's own duration is 30 minutes, which must win over the 5 the
+    // amount alone would imply.
+    await seedVoucher('828282', 5000, 'active', null, 30);
 
     const startedAt = Date.now();
     const res = await request(app)
@@ -246,13 +250,13 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.authorized).toBe(true);
     expect(res.body.message).toBe('Device authorized');
-    expect(res.body.minutes).toBe(5);
+    expect(res.body.minutes).toBe(30);
     expect(res.body.qosApplied).toBe(true);
     // The voucher is still returned so the ledger and a manual fallback survive.
     expect(res.body.voucherCode).toBe('828282');
     expect(res.body.ref_no).toBe('REF-AUTH0001');
 
-    expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 5 });
+    expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 30 });
     // 50 is not a premium amount, so no explicit limits are passed.
     expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
 
@@ -269,8 +273,8 @@ describe('POST /api/payment/claim', () => {
     process.env.PREMIUM_DOWN_MBPS = '50';
     process.env.PREMIUM_UP_KBPS = '1024';
     try {
-      await seedUnclaimed('REF-PREM0001', 25);   // premium amount -> 2 minutes
-      await seedVoucher('838383', 2500);
+      await seedUnclaimed('REF-PREM0001', 25);   // premium amount
+      await seedVoucher('838383', 2500, 'active', null, 45);
 
       const res = await request(app)
         .post('/api/payment/claim')
@@ -278,7 +282,7 @@ describe('POST /api/payment/claim', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.authorized).toBe(true);
-      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 2 });
+      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 45 });
       expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({
         clientMac: MAC,
         customRateLimit: {
@@ -416,7 +420,9 @@ describe('POST /api/payment/claim', () => {
         ref_suffix: '0001',
         ref_no: 'REF-SMS0001',
         authorized: 'true',
-        minutes: '5',
+        // The seeded voucher is a 1-HOUR (60-minute) plan; the amount alone
+        // would have implied 5, so this proves the voucher duration is used.
+        minutes: '60',
         status_link: 'https://goodvibes.example.com/status.html',
       });
     });
@@ -427,19 +433,26 @@ describe('POST /api/payment/claim', () => {
       const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
       global.fetch = fetchMock;
 
-      await seedUnclaimed('REF-SMS0004', 50);
-      await seedVoucher('929292', 5000);
+      // P5 at the 10-pesos-per-minute rate is 0 whole minutes, so a
+      // value derived from the amount would arrive as minutes=0 (the reported
+      // bug). The voucher's own duration is 1 minute and must be reported as
+      // exactly 1 — a plain integer in minutes, not milliseconds.
+      await seedUnclaimed('REF-SMS0004', 5);
+      await seedVoucher('929292', 500, 'active', null, 1);
 
       const res = await request(app)
         .post('/api/payment/claim')
         .send({ ref_suffix: '0004', mobile_number: MOBILE, client_mac: MAC });
       expect(res.status).toBe(200);
+      expect(res.body.minutes).toBe(1);
+      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 1 });
 
       const [url] = fetchMock.mock.calls[0];
       const parsed = new URL(url);
       expect(parsed.searchParams.get('secret')).toBe('abc');
       expect(parsed.searchParams.get('target_number')).toBe(MOBILE);
       expect(parsed.searchParams.get('voucher_code')).toBe('929292');
+      expect(parsed.searchParams.get('minutes')).toBe('1');
       // BASE_URL is unset, so status_link must be absent rather than "undefined".
       expect(parsed.searchParams.has('status_link')).toBe(false);
     });

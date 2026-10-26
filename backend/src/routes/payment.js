@@ -332,13 +332,17 @@ router.get('/methods', (req, res) => {
  * through the Omada cloud — authorizeGuest → 2000 ms index wait →
  * setClientRateLimit — so the customer does not have to type a code at all.
  *
+ * `minutes` is the claimed voucher's own `duration_minutes` (a plain integer,
+ * already in minutes) — never a value derived from the payment amount, which
+ * cannot know whether the voucher was a 1-minute or a 1-hour plan.
+ *
  * Returns:
  *   200 { success: true, authorized: true, message: 'Device authorized',
  *         voucherCode, ref_no, minutes, qosApplied }
  *   200 { success: true, authorized: false, voucherCode, ref_no, minutes,
- *         authError }  — no client_mac was supplied, or the amount buys no
- *                          whole minute. The code is still returned so the
- *                          customer can connect manually.
+ *         authError }  — no client_mac was supplied, or the claimed voucher
+ *                          carries no usable duration. The code is still
+ *                          returned so the customer can connect manually.
  *   502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED',
  *         voucherCode, ref_no }  — Omada refused. The claim is deliberately
  *                          NOT rolled back: the customer's entitlement is
@@ -417,8 +421,13 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         // CRITICAL: webhook_events.amount is Pesos; vouchers.price is centavos.
         const amountCentavos = Math.round(Number(event.amount) * 100);
 
+        // duration_minutes is the voucher's ENTITLEMENT: it is the number of
+        // minutes the customer actually bought (e.g. 1 for a 1-minute voucher,
+        // 60 for a 1-hour voucher), stored as a plain integer. It is NOT
+        // milliseconds and must never be divided by 60000 — it is already the
+        // exact total-minutes value the session, Omada and the SMS report.
         const voucher = await tx.getOne(
-          `SELECT id, code FROM vouchers
+          `SELECT id, code, duration_minutes FROM vouchers
             WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
             ORDER BY id ASC LIMIT 1`,
           [amountCentavos]
@@ -450,7 +459,12 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
           throw httpError(404, 'PAYMENT_NOT_FOUND', 'Payment not found or already claimed.');
         }
 
-        return { voucherCode: voucher.code, refNo: event.ref_no, amount: Number(event.amount) };
+        return {
+          voucherCode: voucher.code,
+          refNo: event.ref_no,
+          amount: Number(event.amount),
+          durationMinutes: voucher.duration_minutes,
+        };
       });
     } catch (err) {
       if (err.code === 'PAYMENT_NOT_FOUND' || err.code === 'NO_VOUCHER_AVAILABLE') {
@@ -465,7 +479,17 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // deliberate: an authorization failure must never also cost them the
     // entitlement their money bought (it is reported as authorized:false, with
     // the code still returned so they can connect manually).
-    const minutes = computeMinutesFromAmount(claim.amount);
+    // The granted time comes from the VOUCHER's duration_minutes — the thing
+    // that was actually sold — not from the amount. Deriving it from the amount
+    // rounded a 1-minute voucher down to 0 when its price was below one whole
+    // PESOS_PER_MINUTE unit, and reported 5 minutes for a 1-hour voucher.
+    // duration_minutes is already an integer number of minutes, so it is used
+    // as-is; the amount-derived rate is only a fallback for a voucher row with
+    // no usable duration.
+    const voucherMinutes = Math.floor(Number(claim.durationMinutes));
+    const minutes = Number.isFinite(voucherMinutes) && voucherMinutes > 0
+      ? voucherMinutes
+      : computeMinutesFromAmount(claim.amount);
     let authAttempted = false;
     let authorized = false;
     let authError = null;

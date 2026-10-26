@@ -615,7 +615,7 @@ other amount gets the `VOUCHER_DEFAULT_*` caps.
 | Result | Response |
 |---|---|
 | Device authorized | `200 { success: true, authorized: true, message: 'Device authorized', voucherCode, ref_no, minutes, qosApplied }` |
-| Not auto-connected (no `client_mac`, or the amount buys no whole minute) | `200 { success: true, authorized: false, voucherCode, ref_no, minutes, authError }` |
+| Not auto-connected (no `client_mac`, or the claimed voucher has no usable duration) | `200 { success: true, authorized: false, voucherCode, ref_no, minutes, authError }` |
 | Omada refused | `502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED', voucherCode, ref_no }` |
 
 Two deliberate behaviours worth noting:
