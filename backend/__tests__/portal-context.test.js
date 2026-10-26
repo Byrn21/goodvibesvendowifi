@@ -459,7 +459,7 @@ describe('Claim Voucher (reference number) submission', () => {
     expect(portal.getEl('claim-voucher-code').textContent).toBe('');
   });
 
-  test('the auto-authorized state hands the guest straight to status.html after 3 seconds', async () => {
+  test('the auto-authorized state waits 4 s before handing the guest to status.html', async () => {
     const portal = loadPortal({
       search: '',
       captureTimers: true,
@@ -472,7 +472,9 @@ describe('Claim Voucher (reference number) submission', () => {
     await portal.flush();
     await portal.flush();
 
-    const redirect = portal.timers.find((t) => t.ms === 3000);
+    // 3–4 s of headroom for the controller to finish programming the MAC, so
+    // status.html's first request does not fail with no connection yet.
+    const redirect = portal.timers.find((t) => t.ms === 4000);
     expect(redirect).toBeTruthy();
 
     redirect.fn();
@@ -512,7 +514,7 @@ describe('Claim Voucher (reference number) submission', () => {
     await portal.flush();
     await portal.flush();
 
-    portal.timers.find((t) => t.ms === 3000).fn();
+    portal.timers.find((t) => t.ms === 4000).fn();
     expect(portal.window.location.href).toBe(
       'status.html?mac=aa%3Abb%3Acc%3Add%3Aee%3Aff'
     );

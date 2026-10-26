@@ -106,3 +106,65 @@ describe('POST /api/session/pause — plan-tier authorization', () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe('POST /api/session/pause — the frozen timer', () => {
+  async function rowOf(sessionId) {
+    return getDb().getOne(
+      'SELECT state, remaining_seconds, expires_at FROM sessions WHERE session_id = ?',
+      [sessionId]
+    );
+  }
+
+  test('pause stores the remaining seconds and halts expires_at', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_freeze',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+
+    const res = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_freeze' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('paused');
+
+    const row = await rowOf('sess_freeze');
+    expect(row.state).toBe('paused');
+    // expires_at is cleared, so the frozen value is the only source of truth.
+    expect(row.expires_at).toBeNull();
+    // A one-hour session paused immediately has ~3600 s left, not 0.
+    expect(row.remaining_seconds).toBeGreaterThan(3590);
+    expect(row.remaining_seconds).toBeLessThanOrEqual(3600);
+    expect(res.body.remainingSeconds).toBe(row.remaining_seconds);
+  });
+
+  test('GET /status returns that stored value verbatim and never drains it', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_frozen_status',
+      clientMac: 'aa:bb:cc:dd:ee:ff',
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+
+    await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_frozen_status' });
+
+    const stored = (await rowOf('sess_frozen_status')).remaining_seconds;
+
+    const first = await request(app).get('/api/session/status?sessionId=sess_frozen_status');
+    expect(first.status).toBe(200);
+    expect(first.body.state).toBe('paused');
+    expect(first.body.remainingSeconds).toBe(stored);
+    expect(first.body.expiresAt).toBeNull();
+
+    // Repeated polling reads the same frozen value — the paused countdown is
+    // the database's remaining_seconds, not a clock-derived one.
+    const second = await request(app).get('/api/session/status?sessionId=sess_frozen_status');
+    expect(second.body.remainingSeconds).toBe(stored);
+  });
+});

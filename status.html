@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#2d6a4f">
   <title>GoodVibesVendoWifi</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <link rel="stylesheet" href="assets/style.css?v=2">
+  <link rel="stylesheet" href="assets/style.css?v=5">
   <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <style>
     /* ============================================================
@@ -532,6 +532,16 @@
       var localSeconds = null;
       var totalSeconds = null;   // used to calculate ring fill ratio
 
+      // Network-failure retry policy (see fetchStatus). A redirect straight
+      // from the portal can land here BEFORE the controller has finished
+      // authorizing this device, and that first request then fails at the
+      // network level. Retry the same query a few times before showing the
+      // "Connection Problem" screen: a slow controller is not a dead server.
+      var NETWORK_RETRY_LIMIT = 3;
+      var NETWORK_RETRY_DELAY = 2000;
+      var networkRetryCount = 0;
+      var networkRetryTimer = null;
+
       // The query string that last produced a session. Behind the cloud tunnel
       // the identifier-less (address-based) query can NEVER succeed, so once a
       // fallback has worked — ?mac=<device_mac>, say — every later poll starts
@@ -577,7 +587,18 @@
         }
       }
 
+      // Halt the local countdown outright. The ticker belongs to the active
+      // card ONLY: as soon as anything else is shown (paused, expired, error,
+      // loading) it must stop, or a paused session keeps draining on screen.
+      function stopCountdown() {
+        if (countdownTimer !== null) {
+          clearInterval(countdownTimer);
+          countdownTimer = null;
+        }
+      }
+
       function showSection(name) {
+        if (name !== 'active') stopCountdown();
         [els.loading, els.active, els.paused, els.expired, els.unknown, els.connError]
           .forEach(function (el) { if (el) el.classList.add('hidden'); });
         var map = { loading: els.loading, active: els.active, paused: els.paused,
@@ -669,17 +690,20 @@
       }
 
       function tickCountdown() {
+        // A queued tick can still fire after stopCountdown(); never let it
+        // touch the display once the ticker is stopped (paused/expired).
+        if (countdownTimer === null) return;
         if (localSeconds === null || localSeconds <= 0) return;
         localSeconds--;
         updateCountdownDisplay(localSeconds);
         if (localSeconds <= 0) {
-          clearInterval(countdownTimer);
+          stopCountdown();
           fetchStatus();
         }
       }
 
       function startCountdownTick() {
-        clearInterval(countdownTimer);
+        stopCountdown();
         countdownTimer = setInterval(tickCountdown, 1000);
       }
 
@@ -735,6 +759,11 @@
           return;
         }
 
+        // One request at a time: a new fetch (poll, Refresh, resume) supersedes
+        // any network retry still scheduled for an older one.
+        clearTimeout(networkRetryTimer);
+        networkRetryTimer = null;
+
         var url = API_BASE + '/api/session/status' + queries[at];
         fetch(url, { method: 'GET', cache: 'no-store' })
           .then(function (r) {
@@ -744,6 +773,13 @@
             });
           })
           .then(function (res) {
+            // Any HTTP answer — even an error status — proves the network is
+            // reachable, so the retry budget starts over.
+            if (networkRetryCount > 0 && els.pollingStatus) {
+              els.pollingStatus.textContent = '';
+            }
+            networkRetryCount = 0;
+
             if (!res.ok) {
               var errCode = (res.body && res.body.code) || '';
               if (res.status === 404 && errCode === 'SESSION_NOT_FOUND') {
@@ -787,8 +823,26 @@
             renderStatus(res.body);
           })
           .catch(function (err) {
-            console.warn('Session status fetch failed:', err.message);
-            // Network unreachable — do not claim "not found"
+            console.warn('Session status fetch failed:', err && err.message);
+
+            // Network unreachable — do not claim "not found". Right after the
+            // portal redirect this is expected while the controller finishes
+            // authorizing the device, so retry the SAME query a few times
+            // (2 s apart) before giving up and showing the error screen.
+            if (networkRetryCount < NETWORK_RETRY_LIMIT) {
+              networkRetryCount += 1;
+              if (els.pollingStatus) {
+                els.pollingStatus.textContent =
+                  'Reconnecting… (' + networkRetryCount + '/' + NETWORK_RETRY_LIMIT + ')';
+              }
+              networkRetryTimer = setTimeout(function () {
+                fetchStatus(at);
+              }, NETWORK_RETRY_DELAY);
+              return;
+            }
+
+            networkRetryCount = 0;
+            if (els.pollingStatus) els.pollingStatus.textContent = '';
             showSection('error');
             scheduleRetry();
           });
@@ -898,16 +952,20 @@
             }
           }
         } else if (state === 'paused') {
-          showSection('paused');
-          clearInterval(countdownTimer);
+          // Frozen: stop AND drop the local ticker before painting the static
+          // time, so no queued tick can decrement either display afterwards.
+          stopCountdown();
+          localSeconds = null;
+          totalSeconds = null;
           var pausedSecs = Math.floor(data.remainingSeconds || 0);
           if (els.pausedTime) els.pausedTime.textContent = formatDuration(pausedSecs);
           updateRing(els.pausedRing, pausedSecs, pausedSecs || 1);
+          showSection('paused');
         } else if (state === 'expired') {
-          showSection('expired');
-          clearInterval(countdownTimer);
+          stopCountdown();
           localSeconds = 0;
           renderExpired(data);
+          showSection('expired');
         } else {
           showUnknown();
         }
@@ -935,7 +993,7 @@
               if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
               // Stop the local ticker at once, then re-read the authoritative
               // state (the /pause response carries no sessionId to render).
-              clearInterval(countdownTimer);
+              stopCountdown();
               fetchStatus();
             })
             .catch(function (err) {
@@ -983,6 +1041,9 @@
         if (!btn) return;
         btn.addEventListener('click', function () {
           btn.disabled = true;
+          networkRetryCount = 0;
+          clearTimeout(networkRetryTimer);
+          networkRetryTimer = null;
           showSection('loading');
           fetchStatus();
           // Re-enable shortly after in case the fetch fails and the
@@ -1052,7 +1113,9 @@
       document.addEventListener('visibilitychange', function () {
         if (document.hidden) {
           clearTimeout(pollTimer);
-          clearInterval(countdownTimer);
+          clearTimeout(networkRetryTimer);
+          networkRetryTimer = null;
+          stopCountdown();
         } else {
           fetchStatus();
         }

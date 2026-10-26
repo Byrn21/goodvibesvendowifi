@@ -459,10 +459,14 @@ async function pauseSession(sessionId) {
   // The only limit on the pass is its absolute expiry (checked above), so
   // repeated pause/resume cycles stay valid within PREMIUM_HARD_EXPIRY_HOURS.
   const now = new Date();
-  const remainingSeconds = Math.max(
-    0,
-    Math.floor((new Date(session.expiresAt) - now) / 1000)
-  );
+  // Freeze the ACTIVE countdown at this instant. expires_at is cleared below,
+  // so this stored value becomes the only source of truth: start from the row's
+  // own deadline and fall back to its stored remaining for legacy rows that
+  // have none. This is what GET /status reports verbatim while paused.
+  const expiresAtMs = session.expiresAt ? new Date(session.expiresAt).getTime() : NaN;
+  const remainingSeconds = Number.isFinite(expiresAtMs)
+    ? Math.max(0, Math.floor((expiresAtMs - now.getTime()) / 1000))
+    : Math.max(0, Math.floor(session.remainingSeconds || 0));
 
   await db.run(`
     UPDATE sessions

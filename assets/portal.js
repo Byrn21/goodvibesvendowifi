@@ -1620,8 +1620,11 @@
   };
 
   // How long the auto-authorized confirmation stays on screen before the
-  // guest is taken to success.html. "Done" skips the wait.
-  var CLAIM_SUCCESS_REDIRECT_MS = 3000;
+  // guest is taken to status.html. success.html is bypassed entirely, so this
+  // wait is what gives the Omada controller time to finish programming the
+  // firewall for this MAC; redirecting too early would make status.html's first
+  // request fail (no connection yet). "Done" skips the wait.
+  var CLAIM_SUCCESS_REDIRECT_MS = 4000;
 
   function claimEl(id) { return document.getElementById(id); }
 

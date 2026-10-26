@@ -120,6 +120,8 @@ function loadStatus(opts) {
       ? opts.respond(url, callIndex)
       : (opts.responses || []).find((r) => r.test.test(url));
     if (!rule) throw new Error('unexpected status request: ' + url);
+    // Simulate a request that never reaches the server (network failure).
+    if (rule.reject) return Promise.reject(new Error(rule.message || 'network down'));
     return Promise.resolve({
       ok: rule.status >= 200 && rule.status < 300,
       status: rule.status,
@@ -144,6 +146,10 @@ function loadStatus(opts) {
     removeEventListener() {},
   };
 
+  // Countdown intervals are tracked by id so a test can assert that pausing
+  // really cleared the ticker (and drive it if it did not).
+  const intervals = new Map();
+  let intervalSeq = 0;
   const sandbox = {
     window: windowStub,
     document: documentStub,
@@ -157,8 +163,12 @@ function loadStatus(opts) {
     // assert on the request order and drive a poll by hand.
     setTimeout: (fn, ms) => { timeouts.push({ fn, ms }); return timeouts.length; },
     clearTimeout() {},
-    setInterval: () => 0,
-    clearInterval() {},
+    setInterval: (fn, ms) => {
+      intervalSeq += 1;
+      intervals.set(intervalSeq, { fn, ms });
+      return intervalSeq;
+    },
+    clearInterval: (id) => { intervals.delete(id); },
   };
   vm.createContext(sandbox);
 
@@ -170,7 +180,14 @@ function loadStatus(opts) {
     getEl,
     fetchCalls,
     storage,
+    timers: timeouts,
     window: windowStub,
+    /** How many countdown intervals are currently live. */
+    intervalCount: () => intervals.size,
+    /** Run the countdown heartbeat manually, as setInterval would. */
+    runCountdown: () => {
+      intervals.forEach((timer) => timer.fn());
+    },
     /** Let the pending promise chains settle. */
     flush: () => new Promise((resolve) => setTimeout(resolve, 0)),
     /** Run the most recently scheduled poll, as the 30 s interval would. */
@@ -178,6 +195,12 @@ function loadStatus(opts) {
       const timer = timeouts.pop();
       if (!timer || typeof timer.fn !== 'function') throw new Error('no poll was scheduled');
       timer.fn();
+    },
+    /** Run the most recently scheduled timer of exactly `ms` milliseconds. */
+    runTimer: (ms) => {
+      const at = timeouts.map((t) => t.ms).lastIndexOf(ms);
+      if (at === -1) throw new Error('no timer scheduled for ' + ms + 'ms');
+      timeouts.splice(at, 1)[0].fn();
     },
   };
 }
@@ -514,5 +537,98 @@ describe('status.html — Premium hard expiry notice and expired screen', () => 
     expect(status.getEl('expired-heading').textContent).toBe('Session Expired');
     expect(status.getEl('expired-message').textContent).toContain('Your WiFi session has ended');
     expect(status.getEl('expired-timestamp').textContent).toContain('Session expired on');
+  });
+});
+
+describe('status.html — connection race and paused countdown', () => {
+  test('a failed network request is retried with the same query before erroring', async () => {
+    let call = 0;
+    const status = loadStatus({
+      search: '',
+      respond: () => {
+        call += 1;
+        // The controller has not authorized the MAC yet: the first two
+        // requests never reach the server.
+        if (call < 3) return { reject: true };
+        return { status: 200, body: ACTIVE_SESSION.body };
+      },
+    });
+
+    await status.flush();
+    await status.flush();
+    expect(status.fetchCalls).toHaveLength(1);
+
+    status.runTimer(2000);
+    await status.flush();
+    await status.flush();
+    expect(status.fetchCalls).toHaveLength(2);
+    expect(status.fetchCalls[1]).toBe('/api/session/status');
+
+    status.runTimer(2000);
+    await status.flush();
+    await status.flush();
+    expect(status.fetchCalls).toHaveLength(3);
+
+    // The retry succeeded, so the guest sees the session, not an error screen.
+    expect(status.getEl('countdown-time-display').textContent).toBe('02:05');
+    expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
+  });
+
+  test('after three retries it shows the connection screen instead of hanging', async () => {
+    const status = loadStatus({
+      search: '',
+      respond: () => ({ reject: true }),
+    });
+
+    await status.flush();
+    await status.flush();
+
+    // Initial request + NETWORK_RETRY_LIMIT (3) retries, 2 s apart.
+    for (let i = 0; i < 3; i += 1) {
+      status.runTimer(2000);
+      await status.flush();
+      await status.flush();
+    }
+
+    expect(status.fetchCalls).toHaveLength(4);
+    expect(status.getEl('session-error').classList.contains('hidden')).toBe(false);
+    expect(status.getEl('session-active').classList.contains('hidden')).toBe(true);
+  });
+
+  test('pausing stops the countdown interval and keeps the frozen time static', async () => {
+    let call = 0;
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      respond: () => {
+        call += 1;
+        if (call === 1) {
+          return { status: 200, body: { ...ACTIVE_SESSION.body, voucherType: 'premium' } };
+        }
+        return {
+          status: 200,
+          body: {
+            ...ACTIVE_SESSION.body,
+            voucherType: 'premium',
+            state: 'paused',
+            remainingSeconds: 540,
+            expiresAt: null,
+          },
+        };
+      },
+    });
+
+    await status.flush();
+    await status.flush();
+    expect(status.intervalCount()).toBe(1);
+
+    status.runPoll();
+    await status.flush();
+    await status.flush();
+
+    // The ticker is gone, and the frozen time is what the backend reported.
+    expect(status.intervalCount()).toBe(0);
+    expect(status.getEl('paused-time-display').textContent).toBe('09:00');
+    expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
   });
 });
