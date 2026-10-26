@@ -608,26 +608,45 @@ Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac? }`
 The paying device is authorized **directly** through the Omada cloud
 (`authorizeGuest`) **before** the claim is written — so the customer does not
 have to type a code at all — and only once Omada has accepted is the payment
-marked claimed. After the commit come the 2000 ms index wait and the
-`setClientRateLimit` cap. The bandwidth cap comes from the same amount-based
-tier rules as the InstaPay webhook (`utils/qos.js`); a premium amount gets the
-`PREMIUM_*` caps and every other amount gets the `VOUCHER_DEFAULT_*` caps.
+marked claimed. The response is then sent **immediately**, before the 2000 ms
+index wait and the `setClientRateLimit` cap: those run after the caller already
+has its answer, and their outcome is logged rather than returned. The bandwidth
+cap comes from the same amount-based tier rules as the InstaPay webhook
+(`utils/qos.js`); a premium amount gets the `PREMIUM_*` caps and every other
+amount gets the `VOUCHER_DEFAULT_*` caps.
 
 | Result | Response |
 |---|---|
-| Device authorized | `200 { success: true, authorized: true, message: 'Device authorized', voucherCode, ref_no, minutes, qosApplied }` |
+| Device authorized | `200 { success: true, authorized: true, message: 'Device authorized', voucherCode, ref_no, minutes }` |
 | Not auto-connected (no `client_mac`, or the claimed voucher has no usable duration) | `200 { success: true, authorized: false, voucherCode, ref_no, minutes, authError }` |
+| Already claimed by the SAME mobile number | `200 { success: true, authorized: false, alreadyClaimed: true, voucherCode, ref_no, minutes }` |
 | Omada refused | `502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED', error }` |
+| Payment not found / claimed by another number | `404 { success: false, error: 'Payment not found or already claimed.', code: 'PAYMENT_NOT_FOUND' }` |
+| No voucher left for the amount | `404 { success: false, error: 'No voucher is available for this amount…', code: 'NO_VOUCHER_AVAILABLE' }` |
 
-Two deliberate behaviours worth noting:
+Four deliberate behaviours worth noting:
 
 - **A refused authorization consumes nothing.** Nothing is written before Omada
   answers, so a refusal leaves the payment `unclaimed` and the voucher `active`
   and unassigned: the customer can claim the SAME 4 digits again — a second tap
   is a real retry instead of "Payment not found or already claimed" — and no SMS
-  is sent for a code that was never consumed. A failed *bandwidth cap*, which
-  runs after the commit, is likewise reported as `qosApplied: false` rather than
-  failing the claim — the guest is already online.
+  is sent for a code that was never consumed.
+- **A claim that already succeeded can be replayed.** If the first response never
+  reached the phone, retrying the same 4 digits with the same `mobile_number`
+  returns the voucher that payment already produced (`alreadyClaimed: true`),
+  with no second voucher, no second SMS and no second authorization (which would
+  extend the session for free). A different number keeps the generic 404, and so
+  does a claimed row with no stored number, so the code never leaks to someone
+  who only guessed the digits.
+- **The success response is sent before the bandwidth cap.** The claim is already
+  committed, so no slow post-commit step may delay that answer: a connection that
+  dies during the 2000 ms index wait would make a successful claim *look* failed,
+  and the retry would answer "already claimed". A failed cap is logged only — the
+  guest is already online.
+- **Every attempt is logged.** Each request writes one `[payment/claim] attempt`
+  line (suffix + MACs, never the mobile number), and the 404 / rollback /
+  authorization paths log their outcome, so a support report can be matched to a
+  request instead of leaving no trace.
 - **`voucherCode` is still returned even when the device is authorized.** It
   keeps the payment↔voucher ledger intact and provides the manual fallback, so
   the portal can stop *showing* it without the backend losing the audit trail.

@@ -43,7 +43,9 @@ const contextLimiter = rateLimit({
 // apiLimiter is layered on top.)
 const claimLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 30,
+  // Env-overridable like the other limits so a deployment (or the test suite,
+  // which exercises dozens of claims) can tune it without editing code.
+  max: parseInt(process.env.CLAIM_RATE_LIMIT_MAX || '30', 10),
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Too many requests. Try again later.', code: 'RATE_LIMITED' },
@@ -89,11 +91,6 @@ const MOBILE_RE = /^09\d{9}$/;
 // PATCH sent in the same tick races the indexer and is silently dropped (the
 // same constraint documented on the InstaPay route). Exactly 2000 ms.
 const AUTHORIZE_INDEX_DELAY_MS = 2000;
-
-/** Promise-based sleep — keeps the index wait awaitable inside the handler. */
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /**
  * fireSmsWebhook — hand the claimed voucher to MacroDroid so it can text the
@@ -142,6 +139,61 @@ function fireSmsWebhook(payload) {
     // not escape into the response path either.
     console.error('[payment/claim] SMS webhook could not be dispatched for ref ' + payload.ref_no + ': ' + (err && err.message));
   }
+}
+
+/**
+ * applyRateLimitAfterResponse — apply the bandwidth cap AFTER the claim has
+ * already been answered.
+ *
+ * The claim is committed before the customer is answered, so every millisecond
+ * the handler spends after the commit is a chance for the connection to die
+ * (captive-portal mini browser, a proxy in front of the backend, a host restart)
+ * and leave the customer looking at a failed claim whose payment is already
+ * consumed — the next tap then answers "Payment not found or already claimed".
+ * The 2000 ms cloud-index wait is the longest piece of that tail, so the response
+ * is sent first and the cap is applied afterwards. The wait itself is still
+ * required: Omada does not index the new auth record instantly, and a cap PATCH
+ * sent in the same tick is silently dropped (see the InstaPay route).
+ *
+ * Deliberately NOT awaited and never throws: the response is already sent and
+ * the guest is already authorized, so a failed or rejected cap is logged only.
+ *
+ * @param {{clientMac: string, amount: number, refNo: string}} ctx
+ */
+function applyRateLimitAfterResponse(ctx) {
+  const { clientMac, amount, refNo } = ctx;
+
+  const logFailure = (err) => {
+    console.error(
+      '[payment/claim] authorized but rate limit failed for ' + clientMac +
+      ' (ref ' + refNo + '): ' + ((err && err.message) || String(err))
+    );
+  };
+
+  const timer = setTimeout(() => {
+    try {
+      const customRateLimit = resolveCustomRateLimit(amount);
+      omadaNorthbound
+        .setClientRateLimit(customRateLimit ? { clientMac, customRateLimit } : { clientMac })
+        .then(() => {
+          console.log(
+            '[payment/claim] rate limit applied to ' + clientMac +
+            (customRateLimit ? ' (premium tier)' : ' (default tier)') +
+            ' (ref ' + refNo + ')'
+          );
+        })
+        .catch(logFailure);
+    } catch (err) {
+      // A synchronous throw (bad tier config, a mock returning no promise) must
+      // not escape a timer callback: it would crash the process after the
+      // customer already has their voucher.
+      logFailure(err);
+    }
+  }, AUTHORIZE_INDEX_DELAY_MS);
+
+  // Do not let this best-effort timer keep the process alive on its own (the
+  // HTTP server already does); it also keeps test teardown clean.
+  if (timer && typeof timer.unref === 'function') timer.unref();
 }
 
 // ── Route ───────────────────────────────────────────────────────────────
@@ -333,8 +385,18 @@ router.get('/methods', (req, res) => {
  *      assigned_ref_no) AND the event 'claimed'. Any failure rolls BOTH
  *      back, so a voucher is never claimed without its event (or vice versa).
  *
- * After the commit: 2000 ms index wait → setClientRateLimit (best-effort QoS),
- * and the SMS webhook with the code. Neither can fail the claim.
+ * If no UNCLAIMED payment matches, a payment that is already claimed by the
+ * SAME mobile number is replayed (step 1b): its voucher code and minutes come
+ * back with a 200 and `alreadyClaimed: true`, and nothing is authorized, written
+ * or texted. That is what makes a dropped connection harmless — the result of a
+ * first tap whose response never arrived can be fetched again with the same two
+ * credentials instead of the customer being told their paid reference is gone.
+ *
+ * After the commit the customer is answered IMMEDIATELY (the SMS dispatch is
+ * synchronous fire-and-forget). The 2000 ms index wait and setClientRateLimit
+ * (best-effort QoS) then run AFTER the response has been sent, so no slow
+ * post-commit work can delay — or, if the connection drops, swallow — the one
+ * response that tells the customer their payment became a voucher.
  *
  * `minutes` is the claimed voucher's own `duration_minutes` (a plain integer,
  * already in minutes) — never a value derived from the payment amount, which
@@ -342,11 +404,17 @@ router.get('/methods', (req, res) => {
  *
  * Returns:
  *   200 { success: true, authorized: true, message: 'Device authorized',
- *         voucherCode, ref_no, minutes, qosApplied }
+ *         voucherCode, ref_no, minutes }  — the bandwidth cap is applied
+ *                          afterwards; its outcome is logged, not returned.
  *   200 { success: true, authorized: false, voucherCode, ref_no, minutes,
  *         authError }  — no client_mac was supplied, or the claimed voucher
  *                          carries no usable duration. The code is still
  *                          returned so the customer can connect manually.
+ *   200 { success: true, authorized: false, alreadyClaimed: true,
+ *         voucherCode, ref_no, minutes }  — this payment was already claimed by
+ *                          the SAME mobile number, so the voucher it produced
+ *                          is replayed. Nothing is authorized, consumed, or
+ *                          texted again.
  *   502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED',
  *         error }  — Omada refused. NOTHING was written (no voucher consumed,
  *                          no payment marked claimed, no SMS sent), so the same
@@ -363,6 +431,61 @@ function httpError(status, code, message) {
   err.status = status;
   err.code = code;
   return err;
+}
+
+/**
+ * findClaimedEntitlement — the idempotent-retry lookup.
+ *
+ * A claim can be committed and then never reach the phone (the connection drops
+ * while the handler finishes, a proxy or the host restarts, the captive-portal
+ * mini browser is torn down). The payment is spent, so a retry used to answer
+ * "Payment not found or already claimed" and the code was only recoverable
+ * through support.
+ *
+ * This returns the newest CLAIMED payment ending in the same 4 digits whose
+ * stored mobile number is the one the caller supplied, together with the voucher
+ * that claim assigned to it. The caller replays that voucher; nothing is
+ * authorized, written or texted.
+ *
+ * The mobile number is what makes this safe: it is exactly what the original
+ * claim required, so a retry proves the same two things (the ref digits and the
+ * number that paid). A claimed row with no stored number (older rows, or one
+ * claimed before the field was saved) never matches — there is nothing to compare
+ * against, so the caller keeps the generic 404 instead of handing a code to
+ * whoever guessed the digits.
+ *
+ * @param {Object} db
+ * @param {string} refSuffix last 4 digits of the payment reference
+ * @param {string} mobileNumber the 11-digit number supplied with the retry
+ * @returns {Promise<{refNo: string, voucherCode: string, minutes: number}|null>}
+ */
+async function findClaimedEntitlement(db, refSuffix, mobileNumber) {
+  const event = await db.getOne(
+    `SELECT ref_no, amount FROM webhook_events
+      WHERE status = 'claimed' AND ref_no LIKE ? AND mobile_number = ?
+      ORDER BY id DESC LIMIT 1`,
+    ['%' + refSuffix, mobileNumber]
+  );
+  if (!event) return null;
+
+  // The voucher this claim consumed carries the FULL reference in
+  // assigned_ref_no — that is the link back, not the 4-digit suffix.
+  const voucher = await db.getOne(
+    `SELECT code, duration_minutes FROM vouchers
+      WHERE assigned_ref_no = ?
+      ORDER BY id DESC LIMIT 1`,
+    [event.ref_no]
+  );
+  if (!voucher) return null;
+
+  // Same rule as the first claim: the voucher's own duration wins, with the
+  // amount rate only as a fallback for a row with no usable duration.
+  const voucherMinutes = Math.floor(Number(voucher.duration_minutes));
+  const minutes = Number.isFinite(voucherMinutes) && voucherMinutes > 0
+    ? voucherMinutes
+    : computeMinutesFromAmount(Number(event.amount));
+
+  return { refNo: event.ref_no, voucherCode: voucher.code, minutes };
 }
 
 router.post('/claim', claimLimiter, async (req, res, next) => {
@@ -409,6 +532,17 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // extPortal/auth path which needs the AP/SSID/radio triple.
     const apMac = parseMac(body.ap_mac);
 
+    // One line per attempt, written BEFORE anything is read or written. Without
+    // it a failed tap leaves no server-side trace at all (the failure paths used
+    // to log nothing), so "the portal said it could not verify the payment"
+    // cannot be matched to a request in the logs. The mobile number is NOT
+    // logged — it is customer PII.
+    console.log(
+      '[payment/claim] attempt suffix=' + refSuffix +
+      ' client_mac=' + (clientMac || '(none)') +
+      ' ap_mac=' + (apMac || '(none)')
+    );
+
     const db = getDb();
 
     // ── 1. Locate the payment and the voucher that pays for it ───────────
@@ -421,6 +555,40 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       ['%' + refSuffix]
     );
     if (!event) {
+      // ── 1b. Already claimed by THIS customer? Replay it ─────────────────
+      // The first tap may have committed and then lost its response (dropped
+      // connection, host restart, proxy timeout). Same 4 digits + same mobile
+      // number is exactly the proof the first claim required, so the code that
+      // payment already produced is handed back — without a second voucher, a
+      // second authorization, or a second SMS.
+      const replay = await findClaimedEntitlement(db, refSuffix, mobileNumber);
+      if (replay) {
+        console.log(
+          '[payment/claim] idempotent retry: ref ' + replay.refNo +
+          ' was already claimed by this mobile — replaying voucher ' +
+          replay.voucherCode + ' (' + replay.minutes + 'min); nothing consumed'
+        );
+        return res.json({
+          success: true,
+          authorized: false,
+          alreadyClaimed: true,
+          message: 'This payment was already claimed. Here is the same voucher code.',
+          voucherCode: replay.voucherCode,
+          ref_no: replay.refNo,
+          minutes: replay.minutes,
+        });
+      }
+
+      // 404 = no UNCLAIMED payment carries these digits, and no CLAIMED one
+      // carries them for this mobile number: either the webhook never recorded
+      // the payment, it was claimed by someone else, or it was claimed before
+      // the mobile number was stored. Nothing was read into an entitlement and
+      // nothing was consumed, so this line is the whole audit trail of the tap.
+      console.warn(
+        '[payment/claim] no claimable payment ends with ' + refSuffix +
+        ' for this mobile — nothing consumed (webhook not received yet, already' +
+        ' claimed by another number, or no number stored on the claim)'
+      );
       return res.status(404).json({
         success: false,
         error: 'Payment not found or already claimed.',
@@ -443,6 +611,10 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       [amountCentavos]
     );
     if (!voucher) {
+      console.warn(
+        '[payment/claim] no active unassigned voucher priced ' + amountCentavos +
+        ' centavos for ref ' + event.ref_no + ' (suffix ' + refSuffix + ') — nothing consumed'
+      );
       return res.status(404).json({
         success: false,
         error: 'No voucher is available for this amount. Please contact support.',
@@ -539,21 +711,28 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       });
     } catch (err) {
       if (err.code === 'PAYMENT_NOT_FOUND' || err.code === 'NO_VOUCHER_AVAILABLE') {
+        console.warn(
+          '[payment/claim] commit rolled back for ref ' + event.ref_no +
+          ' (' + err.code + '): ' + err.message + ' — nothing consumed'
+        );
         return res.status(err.status || 404).json({ success: false, error: err.message, code: err.code });
       }
       throw err;
     }
 
     // The claim is COMMITTED from here on: the customer's money is reconciled
-    // to a voucher, so nothing below may turn this into an error response —
-    // a failed bandwidth cap only reports qosApplied:false.
-    let qosApplied = null;
-    let qosError = null;
-
-    // The SMS is dispatched as soon as the authorization OUTCOME is known but
-    // BEFORE the QoS index wait below (the long pole), so the customer is texted
-    // about 2 s sooner. It reports whether the device was authorized; the
-    // bandwidth cap applied afterwards is not part of the customer's message.
+    // to a voucher. Nothing below may turn this into an error response.
+    //
+    // The response goes out BEFORE the QoS step below (the 2000 ms index wait is
+    // the longest thing in this handler). A committed claim whose response is
+    // lost — the tab/proxy/host gives up while the handler is still sleeping —
+    // is exactly how a reference gets "burned": the customer sees a failure, and
+    // the retry answers "Payment not found or already claimed" even though the
+    // first attempt succeeded. Answering first removes that window.
+    //
+    // The SMS is dispatched here too (synchronously fire-and-forget): it reports
+    // whether the device was authorized, and the bandwidth cap applied after the
+    // response is not part of the customer's message.
     //
     // NOTE ON THE QUERY PARAMETERS: `voucher_code` carries the REAL 6-digit voucher code
     // (the thing the customer needs), not the 4-digit ref_suffix — `ref_suffix`
@@ -571,45 +750,29 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         : {}),
     });
 
-    // ── Bandwidth caps (best-effort) ─────────────────────────────────────
-    // A premium purchase (amount ∈ PREMIUM_AMOUNTS_PESOS) gets the premium caps;
-    // every other amount passes no explicit limits so the service applies
-    // VOUCHER_DEFAULT_DOWN_MBPS / VOUCHER_DEFAULT_UP_KBPS. Mirrors the InstaPay
-    // route, including the index wait — the tier rules themselves are shared
-    // through utils/qos.js.
-    if (authorized) {
-      await delay(AUTHORIZE_INDEX_DELAY_MS);
-      try {
-        const customRateLimit = resolveCustomRateLimit(Number(event.amount));
-        await omadaNorthbound.setClientRateLimit(
-          customRateLimit ? { clientMac, customRateLimit } : { clientMac }
-        );
-        qosApplied = true;
-        console.log(
-          '[payment/claim] rate limit applied to ' + clientMac +
-          (customRateLimit ? ' (premium tier)' : ' (default tier)')
-        );
-      } catch (err) {
-        // The guest is already online, so a failed cap is NOT a failed claim.
-        qosApplied = false;
-        qosError = err && err.message ? err.message : String(err);
-        console.error('[payment/claim] authorized but rate limit failed for ' + clientMac + ': ' + qosError);
-      }
-    }
-
     console.log('[payment/claim] claimed voucher ' + claim.voucherCode + ' for ref ' + claim.refNo);
 
-    return res.json({
+    res.json({
       success: true,
       authorized,
       message: authorized ? 'Device authorized' : 'Voucher claimed. Enter the code to connect.',
       voucherCode: claim.voucherCode,
       ref_no: claim.refNo,
       minutes,
-      ...(authorized ? { qosApplied } : {}),
-      ...(qosError ? { qosError } : {}),
       ...(authError ? { authError } : {}),
     });
+
+    // ── Bandwidth caps (best-effort, AFTER the response) ─────────────────
+    // A premium purchase (amount ∈ PREMIUM_AMOUNTS_PESOS) gets the premium caps;
+    // every other amount passes no explicit limits so the service applies
+    // VOUCHER_DEFAULT_DOWN_MBPS / VOUCHER_DEFAULT_UP_KBPS. Mirrors the InstaPay
+    // route, including the index wait — the tier rules themselves are shared
+    // through utils/qos.js. Its outcome is logged only: the response has already
+    // been sent, the guest is already online, and a failed cap is NOT a failed
+    // claim.
+    if (authorized) {
+      applyRateLimitAfterResponse({ clientMac, amount: Number(event.amount), refNo: claim.refNo });
+    }
   } catch (err) {
     next(err);
   }

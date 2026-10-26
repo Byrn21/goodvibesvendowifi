@@ -1661,13 +1661,19 @@
   // backend can authorize THIS device directly (no code to type).
   //
   // Response handling is deliberately tolerant, because the backend can answer
-  // in three ways:
+  // in four ways:
   //   authorized:true  — the MAC is online, so there is no code to show
   //   voucherCode only — claimed, but not auto-authorized (no MAC context);
   //                      fall back to the manual code flow
-  //   neither          — a real failure, shown on the error step. A refused
+  //   error            — a real failure, shown on the error step. A refused
   //                      Omada authorization is reported here and consumes
   //                      nothing, so the same digits can simply be retried.
+  //   not JSON at all  — the host or a proxy answered with something other than
+  //                      the claim API's JSON (a suspended service, a gateway
+  //                      error page, a captive-portal interception). That is NOT
+  //                      "payment not found": the claim may never have reached
+  //                      the backend, so it is reported as a payment server that
+  //                      did not answer, not as an unverifiable payment.
   function submitClaim() {
     if (claimState.submitting) return;
 
@@ -1716,12 +1722,20 @@
       credentials: 'same-origin',
       body: JSON.stringify(claimBody)
     }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (data) {
-        return { ok: r.ok, data: data };
-      });
+      // A body that is not JSON is a server/host problem, not a verdict on the
+      // payment — keep that distinction instead of collapsing it into {}.
+      return r.json().then(
+        function (data) { return { ok: r.ok, status: r.status, data: data, json: true }; },
+        function () { return { ok: r.ok, status: r.status, data: {}, json: false }; }
+      );
     }).then(function (res) {
       var data = res.data || {};
-      if (res.ok && data.success && data.authorized) {
+      if (!res.json) {
+        showClaimFailure(
+          'The payment server did not answer properly (HTTP ' + res.status + '). ' +
+          'Your payment may still be fine \u2014 please tap Try Again in a moment.'
+        );
+      } else if (res.ok && data.success && data.authorized) {
         showClaimAuthorized();
       } else if (data.voucherCode) {
         showClaimSuccess(data.voucherCode);

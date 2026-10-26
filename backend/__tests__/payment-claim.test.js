@@ -26,6 +26,9 @@ process.env.MACRODROID_WEBHOOK_SECRET = 'test-webhook-secret-abc123';
 process.env.MACRODROID_PESOS_PER_MINUTE = '10';
 process.env.RATE_LIMIT_MAX_REQUESTS = '10000';
 process.env.LOGIN_RATE_LIMIT_MAX = '10000';
+// The claim route's own limiter caps at 30/15 min in production; this suite
+// exercises more claims than that (every branch plus the idempotent retries).
+process.env.CLAIM_RATE_LIMIT_MAX = '10000';
 
 const request = require('supertest');
 const app = require('../src/server');
@@ -61,6 +64,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // Let any bandwidth-cap timer scheduled after a claim response finish before
+  // the database and the console are torn down.
+  await new Promise((resolve) => setTimeout(resolve, 2100));
   await closeDb();
   try {
     fs.rmSync(TEST_DB_DIR, { recursive: true, force: true });
@@ -73,6 +79,16 @@ beforeEach(async () => {
   omadaNorthbound.authorizeGuest.mockResolvedValue({ success: true, clientMac: MAC, authRecordId: 'rec-claim' });
   omadaNorthbound.setClientRateLimit.mockResolvedValue({ success: true, clientMac: MAC });
 });
+
+/**
+ * The bandwidth cap is applied 2000 ms AFTER the claim response has been sent
+ * (Omada needs that long to index the new auth record). Draining the delay makes
+ * assertions on setClientRateLimit deterministic and keeps the timer inside the
+ * test that scheduled it.
+ */
+async function flushQosDelay() {
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+}
 
 describe('POST /api/payment/claim', () => {
   // Seed an 'unclaimed' webhook_events row (what the MacroDroid webhook writes).
@@ -145,7 +161,7 @@ describe('POST /api/payment/claim', () => {
     expect(event.status).toBe('unclaimed');
   });
 
-  test('a payment can only be claimed once - the second attempt consumes no extra voucher', async () => {
+  test('a payment can only be claimed once - the same customer\'s retry gets the SAME voucher back', async () => {
     await seedUnclaimed('REF-DBL0001', 50);
     await seedVoucher('444444', 5000);
     await seedVoucher('555555', 5000);
@@ -153,15 +169,57 @@ describe('POST /api/payment/claim', () => {
     const first = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001', mobile_number: MOBILE });
     expect(first.status).toBe(200);
     expect(first.body.voucherCode).toBe('444444');
+    expect(first.body.alreadyClaimed).toBeUndefined();
 
-    const second = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001', mobile_number: MOBILE });
-    expect(second.status).toBe(404);
-    expect(second.body.code).toBe('PAYMENT_NOT_FOUND');
+    // The first response may never have reached the phone. Same digits + same
+    // number replays the voucher that payment already produced — no second
+    // voucher is consumed and the answer is a 200, not "already claimed".
+    const retry = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001', mobile_number: MOBILE });
+    expect(retry.status).toBe(200);
+    expect(retry.body.success).toBe(true);
+    expect(retry.body.alreadyClaimed).toBe(true);
+    expect(retry.body.authorized).toBe(false);
+    expect(retry.body.voucherCode).toBe('444444');
+    expect(retry.body.ref_no).toBe('REF-DBL0001');
+    expect(retry.body.minutes).toBe(60);   // the seeded voucher's duration
 
+    // A different number must not be told anything about someone else's payment.
+    const stranger = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: '09170000000' });
+    expect(stranger.status).toBe(404);
+    expect(stranger.body.code).toBe('PAYMENT_NOT_FOUND');
+    expect(stranger.body.voucherCode).toBeUndefined();
+    expect(stranger.body.alreadyClaimed).toBeUndefined();
+
+    // Exactly one voucher was consumed, and the other is still on the shelf.
     const active = await getDb().getOne(
       "SELECT COUNT(*) AS c FROM vouchers WHERE state = 'active' AND assigned_ref_no IS NULL"
     );
     expect(Number(active.c)).toBe(1);
+    const claimed = await getDb().getOne(
+      "SELECT COUNT(*) AS c FROM vouchers WHERE state = 'claimed' AND assigned_ref_no = 'REF-DBL0001'"
+    );
+    expect(Number(claimed.c)).toBe(1);
+  });
+
+  test('a claimed payment with no stored mobile number cannot be replayed by guessing', async () => {
+    // Legacy row: claimed before the number was saved, so there is nothing to
+    // compare a retry against. It must keep answering the generic 404 rather
+    // than leaking a voucher code to whoever knows the last 4 digits.
+    await getDb().run(
+      `INSERT INTO webhook_events (event_id, ref_no, amount, status, mobile_number)
+       VALUES (?, ?, ?, 'claimed', NULL)`,
+      ['evt_legacy', 'REF-LEG0001', 50]
+    );
+    await seedVoucher('959595', 5000, 'claimed', 'REF-LEG0001');
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE });
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('PAYMENT_NOT_FOUND');
+    expect(res.body.voucherCode).toBeUndefined();
   });
 
   test('matches the newest unclaimed payment when several share the suffix', async () => {
@@ -240,31 +298,34 @@ describe('POST /api/payment/claim', () => {
     // amount alone would imply.
     await seedVoucher('828282', 5000, 'active', null, 30);
 
-    const startedAt = Date.now();
     const res = await request(app)
       .post('/api/payment/claim')
       .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC, ap_mac: 'AA:AA:AA:AA:AA:AA' });
-    const elapsed = Date.now() - startedAt;
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.authorized).toBe(true);
     expect(res.body.message).toBe('Device authorized');
     expect(res.body.minutes).toBe(30);
-    expect(res.body.qosApplied).toBe(true);
     // The voucher is still returned so the ledger and a manual fallback survive.
     expect(res.body.voucherCode).toBe('828282');
     expect(res.body.ref_no).toBe('REF-AUTH0001');
 
     expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 30 });
-    // 50 is not a premium amount, so no explicit limits are passed.
-    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
 
-    // ...and the QoS call happens AFTER the authorization, with the full
-    // cloud indexing delay in between (not skipped).
+    // The response must NOT wait for the 2000 ms cloud index delay: the claim is
+    // answered first, then the cap is applied (otherwise a slow tail is a window
+    // in which a committed claim's response can be lost).
+    expect(omadaNorthbound.setClientRateLimit).not.toHaveBeenCalled();
+
+    await flushQosDelay();
+
+    // 50 is not a premium amount, so no explicit limits are passed...
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+    // ...and it happens AFTER the authorization, with the full cloud indexing
+    // delay in between (not skipped).
     expect(omadaNorthbound.authorizeGuest.mock.invocationCallOrder[0])
       .toBeLessThan(omadaNorthbound.setClientRateLimit.mock.invocationCallOrder[0]);
-    expect(elapsed).toBeGreaterThanOrEqual(2000);
   });
 
   test('applies the premium caps when the amount is a premium tier price', async () => {
@@ -283,6 +344,9 @@ describe('POST /api/payment/claim', () => {
       expect(res.status).toBe(200);
       expect(res.body.authorized).toBe(true);
       expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledWith({ clientMac: MAC, durationMinutes: 45 });
+
+      await flushQosDelay();
+
       expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({
         clientMac: MAC,
         customRateLimit: {
@@ -296,8 +360,9 @@ describe('POST /api/payment/claim', () => {
     }
   });
 
-  test('a failed rate limit does not fail the claim (authorized:true + qosApplied:false)', async () => {
+  test('a failed rate limit does not fail the already-sent claim', async () => {
     omadaNorthbound.setClientRateLimit.mockRejectedValue(new Error('ratelimit 500'));
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     await seedUnclaimed('REF-QOS0001', 50);
     await seedVoucher('848484', 5000);
 
@@ -305,12 +370,22 @@ describe('POST /api/payment/claim', () => {
       .post('/api/payment/claim')
       .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
 
-    // The guest is online, so the claim is still a success.
+    // The guest is online, so the claim is still a success. The cap runs after
+    // the response, so its outcome is not part of the body.
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.authorized).toBe(true);
-    expect(res.body.qosApplied).toBe(false);
-    expect(res.body.qosError).toBe('ratelimit 500');
+    expect(res.body.qosApplied).toBeUndefined();
+    expect(res.body.qosError).toBeUndefined();
+
+    await flushQosDelay();
+
+    // The rejection was caught and logged, not thrown after the response.
+    expect(omadaNorthbound.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+    expect(
+      errorSpy.mock.calls.some((args) => String(args[0]).includes('rate limit failed'))
+    ).toBe(true);
+    errorSpy.mockRestore();
   });
 
   test('502 OMADA_AUTH_FAILED consumes NOTHING — the same reference still claims on the retry', async () => {
@@ -354,6 +429,9 @@ describe('POST /api/payment/claim', () => {
     expect(retry.body.voucherCode).toBe('858585');
     expect(retry.body.ref_no).toBe('REF-FAIL0001');
     expect(retry.body.minutes).toBe(60);
+
+    // Drain the cap timer the successful retry scheduled.
+    await flushQosDelay();
 
     const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['858585']);
     expect(voucher.state).toBe('claimed');
@@ -507,6 +585,36 @@ describe('POST /api/payment/claim', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
       expect(res.body.authorized).toBe(true);
+    });
+
+    test('an idempotent retry does not text again and does not authorize again', async () => {
+      process.env.MACRODROID_SMS_WEBHOOK_URL = SMS_URL;
+      const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+      global.fetch = fetchMock;
+
+      await seedUnclaimed('REF-SMS0005', 50);
+      await seedVoucher('939393', 5000);
+
+      const first = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0005', mobile_number: MOBILE, client_mac: MAC });
+      expect(first.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const retry = await request(app)
+        .post('/api/payment/claim')
+        .send({ ref_suffix: '0005', mobile_number: MOBILE, client_mac: MAC });
+      expect(retry.status).toBe(200);
+      expect(retry.body.alreadyClaimed).toBe(true);
+      expect(retry.body.voucherCode).toBe('939393');
+
+      // The code was already texted once; a replay must not text or authorize
+      // again (which would extend the session for free).
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(omadaNorthbound.authorizeGuest).toHaveBeenCalledTimes(1);
+
+      // Let the first claim's bandwidth cap finish before the test ends.
+      await flushQosDelay();
     });
   });
 });
