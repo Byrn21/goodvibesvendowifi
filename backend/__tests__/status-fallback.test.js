@@ -233,20 +233,21 @@ const ACTIVE_SESSION = {
 // ── Tests ───────────────────────────────────────────────────────
 
 describe('status.html — cloud-tunnel fallback to the saved device MAC', () => {
-  test('MISSING_PORTAL_CONTEXT immediately retries with ?mac=<device_mac>', async () => {
+  test('a saved MAC is on the FIRST request, so cellular never hits MISSING_PORTAL_CONTEXT', async () => {
     const status = loadStatus({
       search: '',
       storage: new Map([['device_mac', MAC]]),
-      responses: [MISSING_CONTEXT, ACTIVE_SESSION],
+      responses: [ACTIVE_SESSION],
     });
 
     await status.flush();
     await status.flush();
 
-    // 1) address-based lookup, 2) saved-MAC fallback.
-    expect(status.fetchCalls).toHaveLength(2);
-    expect(status.fetchCalls[0]).toMatch(/\/api\/session\/status$/);
-    expect(status.fetchCalls[1]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+    // No identifier-less (address) request at all: over cellular that address
+    // is a carrier NAT address the backend cannot resolve, and the MAC is the
+    // only identity that works.
+    expect(status.fetchCalls).toHaveLength(1);
+    expect(status.fetchCalls[0]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
 
     // The active session is rendered, not the "could not identify" screen.
     expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
@@ -254,30 +255,44 @@ describe('status.html — cloud-tunnel fallback to the saved device MAC', () => 
     expect(status.getEl('unknown-message').textContent).toBe('');
   });
 
-  test('the dash-separated value saved by another page is canonicalized before use', async () => {
+  test('a MAC in window.location.search is carried on the request', async () => {
     const status = loadStatus({
-      search: '',
-      storage: new Map([['device_mac', 'aa-bb-cc-dd-ee-ff']]),
-      responses: [MISSING_CONTEXT, ACTIVE_SESSION],
+      search: '?mac=aa-bb-cc-dd-ee-ff',
+      responses: [ACTIVE_SESSION],
     });
 
     await status.flush();
     await status.flush();
 
-    expect(status.fetchCalls[1]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+    // Normalized to the canonical colon form, and sent before any address lookup.
+    expect(status.fetchCalls[0]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+    expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
+  });
+
+  test('the dash-separated value saved by another page is canonicalized before use', async () => {
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', 'aa-bb-cc-dd-ee-ff']]),
+      responses: [ACTIVE_SESSION],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.fetchCalls[0]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
   });
 
   test('the older portalClientMac key is still honoured', async () => {
     const status = loadStatus({
       search: '',
       storage: new Map([['portalClientMac', MAC]]),
-      responses: [MISSING_CONTEXT, ACTIVE_SESSION],
+      responses: [ACTIVE_SESSION],
     });
 
     await status.flush();
     await status.flush();
 
-    expect(status.fetchCalls[1]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+    expect(status.fetchCalls[0]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
     expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
   });
 
@@ -324,32 +339,31 @@ describe('status.html — cloud-tunnel fallback to the saved device MAC', () => 
     expect(status.getEl('unknown-message').textContent).toBe(MISSING_CONTEXT_MESSAGE);
   });
 
-  test('a successful fallback is pinned: later polls skip the IP request entirely', async () => {
+  test('the MAC query is pinned: later polls never fall back to the address lookup', async () => {
     const status = loadStatus({
       search: '',
       storage: new Map([['device_mac', MAC]]),
-      responses: [MISSING_CONTEXT, ACTIVE_SESSION],
+      responses: [ACTIVE_SESSION],
     });
 
     await status.flush();
     await status.flush();
-    expect(status.fetchCalls).toHaveLength(2);
+    expect(status.fetchCalls).toHaveLength(1);
 
-    // The next 30 s poll goes straight to the query that works.
+    // Every 30 s poll goes straight to the MAC query.
+    status.runPoll();
+    await status.flush();
+    await status.flush();
+
+    expect(status.fetchCalls).toHaveLength(2);
+    expect(status.fetchCalls[1]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+
     status.runPoll();
     await status.flush();
     await status.flush();
 
     expect(status.fetchCalls).toHaveLength(3);
     expect(status.fetchCalls[2]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
-
-    // And keeps doing so.
-    status.runPoll();
-    await status.flush();
-    await status.flush();
-
-    expect(status.fetchCalls).toHaveLength(4);
-    expect(status.fetchCalls[3]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
   });
 
   test('a pinned query that stops matching falls back to the next identifier, then re-pins', async () => {
@@ -381,16 +395,15 @@ describe('status.html — cloud-tunnel fallback to the saved device MAC', () => 
 
     await status.flush();
     await status.flush();
-    expect(status.fetchCalls[0]).toMatch(/\/api\/session\/status$/);
-    expect(status.fetchCalls[1]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+    expect(status.fetchCalls[0]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
 
-    // Pinned ?mac= now 404s: the page advances to the stored session id and
-    // renders the expired state.
+    // Pinned ?mac= now 404s: the page walks on (address lookup, then the stored
+    // session id) and renders the expired state instead of breaking.
     status.runPoll();
-    await status.flush();
-    await status.flush();
+    for (let i = 0; i < 8; i += 1) await status.flush();
 
-    expect(status.fetchCalls[2]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+    expect(status.fetchCalls[1]).toBe('/api/session/status?mac=' + encodeURIComponent(MAC));
+    expect(status.fetchCalls[2]).toBe('/api/session/status');
     expect(status.fetchCalls[3]).toBe(
       '/api/session/status?sessionId=' + encodeURIComponent(SESSION_ID)
     );

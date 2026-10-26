@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#2d6a4f">
   <title>GoodVibesVendoWifi</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <link rel="stylesheet" href="assets/style.css?v=5">
+  <link rel="stylesheet" href="assets/style.css?v=6">
   <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <style>
     /* ============================================================
@@ -473,6 +473,32 @@
         return '';
       }
 
+      /**
+       * currentMac — the device MAC to put on status requests, re-read every
+       * time a request is built.
+       *
+       * The URL is the most reliable carrier (a redirect can rewrite it), then
+       * the value resolved at init, then whatever this origin saved from a
+       * claim/login. This matters most when the phone drops the Wi-Fi and polls
+       * over CELLULAR: the request address is then a carrier NAT address that
+       * can never match the device, so the backend can only identify the guest
+       * by MAC — the parameter must actually be on the URL, not merely in
+       * storage.
+       *
+       * @returns {string} canonical MAC, or '' when none is known
+       */
+      function currentMac() {
+        var fromUrl = '';
+        try {
+          var params = new URLSearchParams(window.location.search);
+          fromUrl = normalizeMac(params.get('clientMac') || params.get('mac') || '');
+        } catch (e) { fromUrl = ''; }
+
+        var mac = fromUrl || normalizeMac(CLIENT_MAC) || readSavedMac();
+        if (mac) CLIENT_MAC = mac;
+        return mac;
+      }
+
       // Plan tiers allowed to pause/resume. Mirrors the backend policy
       // (services/session.js → isPausableVoucherType, which routes/session.js
       // returns as 403 PREMIUM_ONLY for any other tier). Keep the two in sync.
@@ -710,21 +736,29 @@
       // ---- API calls ----
       // Query strings this page will try, in order.
       //
-      // '' (no query at all) is the MAC-direct path and is tried first: the
-      // status API maps the caller's address to the device MAC captured when the
-      // guest landed on the portal. The saved-identity lookups follow as the
-      // fallback — a sessionId handed over by success.html is fresher than the
-      // device lookup, and the MAC / stored session id still answer when the
-      // address is useless (every guest behind the cloud tunnel, where the
-      // backend only ever sees the tunnel's public address).
+      // 1. A sessionId handed over in the URL (fresh from login / success.html)
+      //    is the most specific identity there is.
+      // 2. ?mac=<device MAC> — ALWAYS used before the address lookup whenever a
+      //    MAC is known (URL or storage). This is the cellular case: the request
+      //    address is a carrier NAT address, so the backend cannot resolve the
+      //    device by IP and answers MISSING_PORTAL_CONTEXT. Sending the MAC on
+      //    the first request avoids that round-trip entirely and still works
+      //    behind the cloud tunnel (where every address is the tunnel's).
+      // 3. '' (no identifier) — the MAC-direct path for a device that has never
+      //    been identified on this origin: the status API maps the caller's
+      //    address to the device MAC captured when the guest landed on the
+      //    portal. Only possible on the LAN / same-network flow.
+      // 4. A session id recovered from storage, which may belong to an earlier
+      //    (already expired) session, so it is only the last resort.
       function statusQueries() {
         var list = [];
+        var mac = currentMac();
         var bySession = SESSION_ID ? '?sessionId=' + encodeURIComponent(SESSION_ID) : '';
-        var byMac = CLIENT_MAC ? '?mac=' + encodeURIComponent(CLIENT_MAC) : '';
+        var byMac = mac ? '?mac=' + encodeURIComponent(mac) : '';
 
         if (SESSION_ID && SESSION_ID_FROM_URL) list.push(bySession);
-        list.push('');                                  // device lookup by request IP
         if (byMac) list.push(byMac);
+        list.push('');                                  // device lookup by request IP
         if (SESSION_ID && !SESSION_ID_FROM_URL) list.push(bySession);
         return list;
       }
@@ -735,7 +769,8 @@
       // id is the fallback for links handed over by success.html / the login
       // flow. '' means this device has never been identified on this origin.
       function savedIdentityQuery() {
-        if (CLIENT_MAC) return '?mac=' + encodeURIComponent(CLIENT_MAC);
+        var mac = currentMac();
+        if (mac) return '?mac=' + encodeURIComponent(mac);
         if (SESSION_ID) return '?sessionId=' + encodeURIComponent(SESSION_ID);
         return '';
       }
