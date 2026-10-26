@@ -1801,7 +1801,7 @@
           'Your payment may still be fine \u2014 please tap Try Again in a moment.'
         );
       } else if (res.ok && data.success && data.authorized) {
-        // Remember the device before the hand-off to success.html / status.html.
+        // Remember the device before the hand-off to the status page.
         rememberDeviceIdentity();
         showClaimAuthorized();
       } else if (data.voucherCode) {
@@ -1835,20 +1835,24 @@
     showClaimStep('success');
   }
 
-  // Hand the guest to the success page, carrying the MAC the claim authorized
-  // in the URL. Storage is written first (rememberDeviceIdentity) but Android's
-  // captive-portal WebView can clear localStorage between navigations, so the
-  // URL is the only identity that is guaranteed to survive the hand-off:
-  // success.html forwards ?mac= on to status.html, which resolves the session
-  // from it instead of the address lookup — impossible behind the cloud tunnel,
-  // where the backend only sees the tunnel's public address.
-  function goToSuccessPage() {
+  // Hand the guest straight to the STATUS page, carrying the MAC the claim
+  // authorized in the URL.
+  //
+  // success.html is deliberately skipped. Android's captive-portal WebView can
+  // keep serving that page from a stale OS-level cache (an old copy without the
+  // logic that forwards the parameters on), and it can also wipe localStorage
+  // between navigations. Removing it from the path leaves exactly one hop, and
+  // the URL is the only identity guaranteed to survive it: status.html reads
+  // ?mac= before storage and before the address lookup — the latter is
+  // impossible behind the cloud tunnel, where the backend only sees the
+  // tunnel's public address.
+  function goToStatusPage() {
     if (claimState.redirectTimer) {
       window.clearTimeout(claimState.redirectTimer);
       claimState.redirectTimer = null;
     }
     var macToSave = normalizeMac(getDeviceContext().clientMac) || '';
-    window.location.href = (CONFIG.successPage || 'success.html') +
+    window.location.href = (CONFIG.statusPage || 'status.html') +
       (macToSave ? '?mac=' + encodeURIComponent(macToSave) : '');
   }
 
@@ -1860,8 +1864,8 @@
     claimClearBusy();
     showClaimStep('authorized');
     // Leave the confirmation up long enough to read, then continue to the
-    // success page. The Done button (the relabelled Cancel) does it at once.
-    claimState.redirectTimer = window.setTimeout(goToSuccessPage, CLAIM_SUCCESS_REDIRECT_MS);
+    // status page. The Done button (the relabelled Cancel) does it at once.
+    claimState.redirectTimer = window.setTimeout(goToStatusPage, CLAIM_SUCCESS_REDIRECT_MS);
   }
 
   function showClaimFailure(message) {
@@ -1925,9 +1929,9 @@
     if (closeBtn) closeBtn.onclick = closeClaimModal;
     if (cancelBtn) cancelBtn.onclick = function () {
       // In the auto-authorized state this footer button is labelled "Done":
-      // the device is already online, so it continues to the success page
+      // the device is already online, so it continues to the status page
       // instead of dismissing the modal back to the voucher form.
-      if (claimState.step === 'authorized') { goToSuccessPage(); return; }
+      if (claimState.step === 'authorized') { goToStatusPage(); return; }
       closeClaimModal();
     };
     if (verifyBtn) verifyBtn.onclick = submitClaim;

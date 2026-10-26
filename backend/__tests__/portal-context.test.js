@@ -459,7 +459,7 @@ describe('Claim Voucher (reference number) submission', () => {
     expect(portal.getEl('claim-voucher-code').textContent).toBe('');
   });
 
-  test('the auto-authorized state hands the guest to success.html after 3 seconds', async () => {
+  test('the auto-authorized state hands the guest straight to status.html after 3 seconds', async () => {
     const portal = loadPortal({
       search: '',
       captureTimers: true,
@@ -476,10 +476,12 @@ describe('Claim Voucher (reference number) submission', () => {
     expect(redirect).toBeTruthy();
 
     redirect.fn();
-    expect(portal.window.location.href).toBe('success.html');
+    // success.html is skipped: a cached copy of it in the captive WebView is
+    // what used to lose the MAC before it reached the status page.
+    expect(portal.window.location.href).toBe('status.html');
   });
 
-  test('clicking Done in the auto-authorized state goes to success.html immediately', async () => {
+  test('clicking Done in the auto-authorized state goes to status.html immediately', async () => {
     const portal = loadPortal({
       search: '',
       fetchJson: () => ({ success: true, authorized: true }),
@@ -492,7 +494,28 @@ describe('Claim Voucher (reference number) submission', () => {
     await portal.flush();
 
     portal.getEl('claim-cancel').onclick();
-    expect(portal.window.location.href).toBe('success.html');
+    expect(portal.window.location.href).toBe('status.html');
+  });
+
+  test('the auto-authorized hand-off carries the claimed MAC to status.html', async () => {
+    // The MAC must ride in the URL: the captive WebView can drop localStorage
+    // between navigations, and status.html reads ?mac= before storage / IP lookup.
+    const portal = loadPortal({
+      search: REDIRECT_SEARCH,
+      captureTimers: true,
+      fetchJson: () => ({ success: true, authorized: true }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    portal.timers.find((t) => t.ms === 3000).fn();
+    expect(portal.window.location.href).toBe(
+      'status.html?mac=aa%3Abb%3Acc%3Add%3Aee%3Aff'
+    );
   });
 
   test('Cancel outside the authorized state still just dismisses the modal', async () => {
