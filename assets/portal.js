@@ -1482,21 +1482,30 @@
   // The customer pays via GCash / Maya / QR Ph, MacroDroid POSTs the
   // confirmation to /api/webhooks/macrodroid (creating an 'unclaimed' event),
   // and the customer claims the matching pre-imported voucher here by typing
-  // the last 4 digits of their reference number. No MAC/device binding is
-  // involved — the returned voucher code is fed into the existing voucher
-  // authentication form (see connectClaimVoucher).
+  // the last 4 digits of their reference number.
+  //
+  // The permanent flow authorizes the guest's MAC directly, so the modal ends
+  // in the "authorized" state with no code to show or retype; its Done button
+  // (and a short automatic wait) hands the guest to success.html.
   var claimState = {
     open: false,
     submitting: false,
     voucherCode: null,
+    step: null,
+    redirectTimer: null,
     lastFocus: null
   };
+
+  // How long the auto-authorized confirmation stays on screen before the
+  // guest is taken to success.html. "Done" skips the wait.
+  var CLAIM_SUCCESS_REDIRECT_MS = 3000;
 
   function claimEl(id) { return document.getElementById(id); }
 
   // Show exactly one of the modal's states (input / loading / success / error)
   // and align the footer buttons with it.
   function showClaimStep(step) {
+    claimState.step = step;
     var steps = {
       input: claimEl('claim-step-input'),
       loading: claimEl('claim-step-loading'),
@@ -1577,6 +1586,12 @@
 
   // Reset the modal to its initial input state (called every time it opens).
   function resetClaimModal() {
+    // A pending hand-off from an earlier claim must never navigate this new
+    // attempt away from the portal page.
+    if (claimState.redirectTimer) {
+      window.clearTimeout(claimState.redirectTimer);
+      claimState.redirectTimer = null;
+    }
     claimState.submitting = false;
     claimState.voucherCode = null;
 
@@ -1765,6 +1780,17 @@
     showClaimStep('success');
   }
 
+  // Hand the guest to the success page. No query string is needed: the device
+  // is identified server-side by its address, so there is no voucher code or
+  // session id to carry through the MAC-direct flow.
+  function goToSuccessPage() {
+    if (claimState.redirectTimer) {
+      window.clearTimeout(claimState.redirectTimer);
+      claimState.redirectTimer = null;
+    }
+    window.location.href = 'success.html';
+  }
+
   // Auto-authorized: the backend authorized this device's MAC, so there is no
   // code to display, copy, or re-enter — the guest is already online.
   function showClaimAuthorized() {
@@ -1772,6 +1798,9 @@
     claimState.voucherCode = null;
     claimClearBusy();
     showClaimStep('authorized');
+    // Leave the confirmation up long enough to read, then continue to the
+    // success page. The Done button (the relabelled Cancel) does it at once.
+    claimState.redirectTimer = window.setTimeout(goToSuccessPage, CLAIM_SUCCESS_REDIRECT_MS);
   }
 
   function showClaimFailure(message) {
@@ -1833,7 +1862,13 @@
 
     if (openBtn) openBtn.addEventListener('click', openClaimModal);
     if (closeBtn) closeBtn.onclick = closeClaimModal;
-    if (cancelBtn) cancelBtn.onclick = closeClaimModal;
+    if (cancelBtn) cancelBtn.onclick = function () {
+      // In the auto-authorized state this footer button is labelled "Done":
+      // the device is already online, so it continues to the success page
+      // instead of dismissing the modal back to the voucher form.
+      if (claimState.step === 'authorized') { goToSuccessPage(); return; }
+      closeClaimModal();
+    };
     if (verifyBtn) verifyBtn.onclick = submitClaim;
     if (connectBtn) connectBtn.onclick = connectClaimVoucher;
 

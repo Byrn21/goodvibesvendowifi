@@ -2,7 +2,8 @@
  * __tests__/payment-claim.test.js
  * Integration tests for:
  *   POST /api/payment/claim   (routes/payment.js)
- *   GET  /api/session/status?mac=...  (routes/session.js)
+ *   GET  /api/session/status          (routes/session.js; ?mac=, ?sessionId= and
+ *                                      the no-identifier device lookup by IP)
  *
  * Patterns follow backend/__tests__/webhook.test.js:
  *   - Temp SQLite database created before requiring db/client.js
@@ -778,5 +779,60 @@ describe('GET /api/session/status?mac=', () => {
     const res = await request(app).get('/api/session/status?sessionId=sess_status3');
     expect(res.status).toBe(200);
     expect(res.body.sessionId).toBe('sess_status3');
+  });
+});
+
+// ── MAC-direct status (no identifier in the request at all) ────────────
+// status.html polls GET /api/session/status with no query string; the backend
+// maps the request address to the MAC captured by the portal landing beacon.
+describe('GET /api/session/status — device identified by request IP', () => {
+  test('returns the device\'s session when no identifier is supplied', async () => {
+    await seedSession('sess_status_ip', null, 'active', MAC, 60);
+
+    const res = await request(app)
+      .get('/api/session/status')
+      .set('X-Forwarded-For', CLIENT_IP);
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('sess_status_ip');
+    expect(res.body.clientMac).toBe(MAC);
+    expect(res.body.state).toBe('active');
+    expect(typeof res.body.remainingSeconds).toBe('number');
+  });
+
+  test('matches an IPv4-mapped request address (dual-stack listener)', async () => {
+    await seedSession('sess_status_ip6', null, 'active', MAC, 60);
+
+    const res = await request(app)
+      .get('/api/session/status')
+      .set('X-Forwarded-For', '::ffff:' + CLIENT_IP);
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('sess_status_ip6');
+  });
+
+  test('502 MISSING_PORTAL_CONTEXT when the request IP never landed on the portal', async () => {
+    // No portal_client_context row for this address: the device cannot be
+    // identified, and that is reported explicitly — never as "session gone".
+    await getDb().exec('DELETE FROM portal_client_context;');
+
+    const res = await request(app)
+      .get('/api/session/status')
+      .set('X-Forwarded-For', '10.0.0.99');
+
+    expect(res.status).toBe(502);
+    expect(res.body.success).toBe(false);
+    expect(res.body.code).toBe('MISSING_PORTAL_CONTEXT');
+    expect(res.body.error).toMatch(/open the wi-fi portal page/i);
+  });
+
+  test('404 SESSION_NOT_FOUND when the device is known but has no session', async () => {
+    const res = await request(app)
+      .get('/api/session/status')
+      .set('X-Forwarded-For', CLIENT_IP);
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('SESSION_NOT_FOUND');
+    expect(res.body.clientMac).toBe(MAC);
   });
 });

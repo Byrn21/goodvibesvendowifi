@@ -78,11 +78,15 @@ function createElement(id) {
  * @param {string} opts.search  window.location.search for this load
  * @param {Function} [opts.getStored]  localStorage.getItem (defaults to the map)
  * @param {Function} [opts.setStored]  localStorage.setItem
- * @returns {Object} { els, fetchCalls, storage, flush }
+ * @param {boolean} [opts.captureTimers] record window.setTimeout calls instead
+ *   of scheduling them, so a test can drive a delayed hand-off (the 3 s
+ *   success-page redirect) without waiting for it
+ * @returns {Object} { els, fetchCalls, storage, flush, timers }
  */
 function loadPortal(opts) {
   const storage = opts.storage || new Map();
   const fetchCalls = [];
+  const timers = [];
   const els = new Map();
   const getEl = (id) => {
     if (!els.has(id)) els.set(id, createElement(id));
@@ -136,7 +140,10 @@ function loadPortal(opts) {
     sessionStorage: sessionStorageStub,
     document: documentStub,
     navigator: { userAgent: 'jest' },
-    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    setTimeout: (fn, ms) => {
+      if (opts.captureTimers) { timers.push({ fn, ms }); return 0; }
+      return setTimeout(fn, ms);
+    },
     clearTimeout: (t) => clearTimeout(t),
     addEventListener() {},
     removeEventListener() {},
@@ -168,6 +175,7 @@ function loadPortal(opts) {
     getEl,
     fetchCalls,
     storage,
+    timers,
     /** Let the pending promise chains settle. */
     flush: () => new Promise((resolve) => setTimeout(resolve, 0)),
     window: windowStub,
@@ -398,6 +406,59 @@ describe('Claim Voucher (reference number) submission', () => {
     // The only action left is dismissal ("Done"), and NO code is rendered.
     expect(portal.getEl('claim-cancel').textContent).toBe('Done');
     expect(portal.getEl('claim-voucher-code').textContent).toBe('');
+  });
+
+  test('the auto-authorized state hands the guest to success.html after 3 seconds', async () => {
+    const portal = loadPortal({
+      search: '',
+      captureTimers: true,
+      fetchJson: () => ({ success: true, authorized: true }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    const redirect = portal.timers.find((t) => t.ms === 3000);
+    expect(redirect).toBeTruthy();
+
+    redirect.fn();
+    expect(portal.window.location.href).toBe('success.html');
+  });
+
+  test('clicking Done in the auto-authorized state goes to success.html immediately', async () => {
+    const portal = loadPortal({
+      search: '',
+      fetchJson: () => ({ success: true, authorized: true }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    portal.getEl('claim-cancel').onclick();
+    expect(portal.window.location.href).toBe('success.html');
+  });
+
+  test('Cancel outside the authorized state still just dismisses the modal', async () => {
+    const portal = loadPortal({
+      search: '',
+      fetchJson: () => ({ success: true, voucherCode: '777777' }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    expect(portal.getEl('claim-cancel').textContent).toBe('Cancel');
+    portal.getEl('claim-cancel').onclick();
+    expect(portal.window.location.href).toBe('');
   });
 
   test('a voucherCode-only response still falls back to the manual code flow', async () => {

@@ -332,7 +332,7 @@
           </svg>
         </div>
         <h2 id="unknown-heading" class="card-title card-title--center">Session Not Found</h2>
-        <p class="card-subtitle card-subtitle--center">
+        <p class="card-subtitle card-subtitle--center" id="unknown-message">
           We couldn't find an active session for this device. If you just connected, wait a few seconds and tap Refresh.
           If your time has run out, return to login to use a new voucher.
         </p>
@@ -404,15 +404,27 @@
       var POLL_INTERVAL = CONFIG.statusPollingInterval || 30000;
 
       // ---- Device identity ----
-      // A session is displayed from its id when that id is fresh, but the backend
-      // can also resolve the NEWEST live session for a device MAC. That MAC path
-      // is what keeps this page honest after a re-login: a sessionId left in
-      // localStorage by an earlier (already expired) session must never make the
-      // page claim the guest's current session has ended. Omada always supplies
-      // the device identity as ?clientMac=...
+      // Access is granted directly to the device's MAC, so this page must work
+      // with NOTHING in its URL or storage: GET /api/session/status resolves the
+      // device from the request address (the IP captured by the portal landing
+      // beacon) and reports that device's newest session.
+      //
+      // The identifier lookups below are kept only as fallbacks for links that
+      // still carry one. A sessionId in the URL is fresh (success.html just
+      // handed it over) so it wins; an id recovered from storage may belong to
+      // an earlier (already expired) session, so the device lookup is preferred
+      // and the stored id is only used as the last resort — which is what still
+      // reports a genuinely expired session.
       var SESSION_ID = '';
       var CLIENT_MAC = '';
       var SESSION_ID_FROM_URL = false;
+
+      // Shown when the backend answers MISSING_PORTAL_CONTEXT: the device has
+      // never loaded the portal page, so its MAC was never captured and no
+      // session can be found for it yet. That is a different problem from "your
+      // session ended", and reloading the portal is what fixes it.
+      var MISSING_CONTEXT_MESSAGE =
+        'We could not identify this device yet. Open the Wi-Fi portal page once, then tap Refresh.';
 
       function normalizeMac(mac) {
         if (!mac) return null;
@@ -461,7 +473,14 @@
         pauseHint:    $('pause-hint'),
         btnRefreshUnknown: $('btn-refresh-unknown'),
         btnRefreshError:   $('btn-refresh-error'),
+        unknownMessage:    $('unknown-message'),
       };
+
+      // Default explanation of the not-found screen (the markup text), restored
+      // whenever the screen is shown without a more specific reason.
+      var DEFAULT_UNKNOWN_MESSAGE = els.unknownMessage
+        ? els.unknownMessage.textContent.trim()
+        : '';
 
       var pollTimer = null;
       var countdownTimer = null;
@@ -512,6 +531,15 @@
         if (map[name]) map[name].classList.remove('hidden');
       }
 
+      // Show the not-found screen. `message` replaces the default explanation
+      // when this device could not be identified at all (MISSING_PORTAL_CONTEXT).
+      function showUnknown(message) {
+        if (els.unknownMessage) {
+          els.unknownMessage.textContent = message || DEFAULT_UNKNOWN_MESSAGE;
+        }
+        showSection('unknown');
+      }
+
       function updateCountdownDisplay(totalSecs) {
         localSeconds = Math.max(0, Math.floor(totalSecs));
         var timeStr = formatDuration(localSeconds);
@@ -535,23 +563,24 @@
       }
 
       // ---- API calls ----
-      // Query strings this page will try, in order. A sessionId that arrived in
-      // the URL is fresh (success.html just handed it over) so it wins; a
-      // sessionId recovered from storage may belong to an older session, so the
-      // MAC's live session is preferred and the stored id is only used as the
-      // fallback — which is what still reports a genuinely expired session.
+      // Query strings this page will try, in order.
+      //
+      // '' (no query at all) is the MAC-direct path and is ALWAYS tried: the
+      // status API maps the caller's address to the device MAC captured when the
+      // guest landed on the portal, so this page needs no voucher code, session
+      // id or MAC from its URL or storage. The identifier lookups stay as
+      // fallbacks — a sessionId handed over by success.html is fresher than the
+      // device lookup, and a stored session id is what still reports a genuinely
+      // expired session.
       function statusQueries() {
         var list = [];
         var bySession = SESSION_ID ? '?sessionId=' + encodeURIComponent(SESSION_ID) : '';
         var byMac = CLIENT_MAC ? '?mac=' + encodeURIComponent(CLIENT_MAC) : '';
 
-        if (SESSION_ID && (SESSION_ID_FROM_URL || !CLIENT_MAC)) {
-          if (bySession) list.push(bySession);
-          if (byMac) list.push(byMac);
-        } else {
-          if (byMac) list.push(byMac);
-          if (bySession) list.push(bySession);
-        }
+        if (SESSION_ID && SESSION_ID_FROM_URL) list.push(bySession);
+        list.push('');                                  // device lookup by request IP
+        if (byMac) list.push(byMac);
+        if (SESSION_ID && !SESSION_ID_FROM_URL) list.push(bySession);
         return list;
       }
 
@@ -559,9 +588,9 @@
         var queries = statusQueries();
         var at = (typeof index === 'number') ? index : 0;
 
-        // Nothing to identify this device with, or every identifier is exhausted.
+        // Every identifier and the device lookup itself are exhausted.
         if (!queries.length || at >= queries.length) {
-          showSection('unknown');
+          showUnknown();
           return;
         }
 
@@ -578,9 +607,15 @@
               var errCode = (res.body && res.body.code) || '';
               if (res.status === 404 && errCode === 'SESSION_NOT_FOUND') {
                 // No session under this identifier — try the next one (e.g. the
-                // MAC found nothing because the plan ended; the stored session
-                // id then answers "expired" instead of "not found").
+                // device lookup found nothing because the plan ended; the stored
+                // session id then answers "expired" instead of "not found").
                 fetchStatus(at + 1);
+              } else if (res.status === 502 && errCode === 'MISSING_PORTAL_CONTEXT') {
+                // The server could not map this request to a device. Another
+                // identifier may still find the session; when none does, say
+                // what fixes it instead of claiming the session is gone.
+                if (at + 1 < queries.length) fetchStatus(at + 1);
+                else showUnknown(MISSING_CONTEXT_MESSAGE);
               } else {
                 // Server error (5xx), rate limit, or other failure —
                 // NOT a "not found" case; show the retry-friendly screen.
@@ -633,7 +668,7 @@
         }
 
         if (!data || !data.sessionId) {
-          showSection('unknown');
+          showUnknown();
           return;
         }
 
@@ -701,7 +736,7 @@
           clearInterval(countdownTimer);
           localSeconds = 0;
         } else {
-          showSection('unknown');
+          showUnknown();
         }
 
         clearTimeout(pollTimer);
@@ -786,7 +821,8 @@
       handleRefreshClick(els.btnRefreshError);
 
       // ---- Init ----
-      // Identifier resolution order:
+      // Optional identifier resolution (never required — the device lookup runs
+      // even when all of these are empty):
       //   1. URL ?sessionId=  (set by portal.js / success.html after login)
       //   2. URL ?clientMac=  (Omada's own parameter name; ?mac= accepted too)
       //   3. localStorage     (persisted at login — survives redirects, but may
@@ -820,12 +856,11 @@
         } catch (e) { /* storage unavailable */ }
       }
 
-      if (SESSION_ID || CLIENT_MAC) {
-        showSection('loading');
-        fetchStatus(0);
-      } else {
-        showSection('unknown');
-      }
+      // Always ask: with no identifier the backend resolves this device from
+      // the request address (MAC-direct flow), so the page never depends on a
+      // voucher code, session id or MAC surviving in the URL or in storage.
+      showSection('loading');
+      fetchStatus(0);
 
       // Auto-retry when a fetch fails so a transient server/network error
       // recovers without user action (the error screen also has a Refresh
@@ -833,7 +868,7 @@
       function scheduleRetry() {
         clearTimeout(pollTimer);
         pollTimer = setTimeout(function () {
-          if (!document.hidden && SESSION_ID) fetchStatus();
+          if (!document.hidden) fetchStatus();
         }, Math.min(POLL_INTERVAL, 30000));
       }
 

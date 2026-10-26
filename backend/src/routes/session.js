@@ -2,7 +2,8 @@
  * routes/session.js
  *
  * GET  /api/session/status  — Poll session remaining time
- *                             (?sessionId=, ?mac=, or ?voucher= for the
+ *                             (no identifier at all for the MAC-direct flow,
+ *                              or ?sessionId=, ?mac=, or ?voucher= for the
  *                              offline "Check Voucher Status" modal)
  * POST /api/session/pause  — Pause active session
  * POST /api/session/resume — Resume paused session
@@ -25,6 +26,7 @@ const {
 const omadaService = require('../services/omada');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
+const { resolveClientMacByIp } = require('../utils/portal-context');
 const { normalizeVoucherType } = require('../utils/qos');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 
@@ -40,6 +42,62 @@ router.get('/status', async (req, res, next) => {
     // except marking an already-expired voucher 'expired' (see below).
     if (voucher !== undefined) {
       return await handleVoucherStatus(req, res, voucher);
+    }
+
+    // ── MAC-direct identification (no identifier at all) ────────────────
+    // Access is granted directly to the device's MAC, so the guest has no
+    // voucher code (and often no session id) to hand to this page. With no
+    // identifier, the device is resolved from the address it reached the
+    // portal from — the landing beacon stored that address next to its MAC in
+    // portal_client_context. A device that never loaded the portal page is the
+    // explicit MISSING_PORTAL_CONTEXT failure (never "session not found":
+    // reloading the portal is what fixes it).
+    //
+    // The NEWEST session is taken regardless of state, so a guest whose time
+    // ran out is told the session expired instead of being told it does not
+    // exist. getSession() below lazily expires it and the response reports the
+    // terminal state (and remaining 0).
+    if (!sessionId && !(mac && typeof mac === 'string')) {
+      let resolved;
+      try {
+        resolved = await resolveClientMacByIp(req.ip);
+      } catch (err) {
+        if (err && err.code === 'MISSING_PORTAL_CONTEXT') {
+          console.warn(
+            '[session/status] MISSING_PORTAL_CONTEXT for ip ' + String(req.ip || '(none)') +
+            ': ' + String(err.message || '(no message)')
+          );
+          return res.status(502).json({
+            success: false,
+            code: 'MISSING_PORTAL_CONTEXT',
+            error: 'Open the Wi-Fi portal page once so this device can be identified, then tap Refresh.',
+          });
+        }
+        throw err;
+      }
+
+      if (resolved.stale) {
+        console.warn(
+          '[session/status] using stale portal context for ' + resolved.clientMac +
+          ' (ip ' + String(req.ip || '(none)') + '): the device has not reloaded the portal recently'
+        );
+      }
+
+      const latest = await getDb().getOne(
+        `SELECT session_id FROM sessions
+          WHERE LOWER(client_mac) = LOWER(?)
+          ORDER BY id DESC LIMIT 1`,
+        [resolved.clientMac]
+      );
+      if (!latest || !latest.session_id) {
+        return res.status(404).json({
+          success: false,
+          error: 'No session exists for this device yet.',
+          code: 'SESSION_NOT_FOUND',
+          clientMac: resolved.clientMac,
+        });
+      }
+      sessionId = latest.session_id;
     }
 
     // The payment QR flow does not have a sessionId yet, so it polls with

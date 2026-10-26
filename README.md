@@ -602,7 +602,7 @@ limited to 16 kB.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/auth` | Voucher authentication (6-digit code) + Omada authorization. |
-| `GET` | `/api/session/status` | Session remaining time. Accepts `?sessionId=…` or `?mac=…`. |
+| `GET` | `/api/session/status` | Session remaining time. With no query string it resolves the device from the request IP through `portal_client_context` (MAC-direct flow; `502 MISSING_PORTAL_CONTEXT` when the device never loaded the portal). `?sessionId=…`, `?mac=…` and `?voucher=…` still work. |
 | `POST` | `/api/session/pause` | Pause a premium session. |
 | `POST` | `/api/session/resume` | Resume a paused premium session. |
 | `POST` | `/api/session/expire` | Expire a session (admin/internal). |
