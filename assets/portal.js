@@ -72,6 +72,11 @@
     // build time (see inject-secrets.js), so it is never committed here.
     supportEmail: '',
     supportPhone: '',
+    // Store details for the Contact Support modal / cash-payment store line.
+    // Empty values hide their row (see hydrateStoreInfo).
+    storeLocation: '',
+    facebookPageName: '',
+    facebookUrl: '',
     mockMode: false,
     mockSuccessDelay: 800,
     pricingPlans: {
@@ -409,6 +414,96 @@
 
     var privacyLink = $('privacy-link');
     if (privacyLink && CONFIG.privacyUrl) privacyLink.href = CONFIG.privacyUrl;
+  }
+
+  // ===============================================================
+  // STORE DETAILS — Contact Support modal + cash-payment store line
+  // ===============================================================
+  // The pages ship with __TOKEN__ placeholders that inject-secrets.js replaces
+  // at build time. When that step never ran — or the captive WebView is serving
+  // a copy from before it ran — those tokens would otherwise be shown to the
+  // guest verbatim. Every slot is resolved at page load, in this order:
+  //   1. CONFIG (config/config.js), when it holds a real value,
+  //   2. whatever the page already renders (a build-time injection),
+  //   3. nothing — the row is hidden instead of showing a template tag.
+  var PLACEHOLDER_TOKEN = /^__[A-Z0-9_]+__$/;
+
+  /** The value, or '' when it is missing or still a raw __TOKEN__. */
+  function realValue(value) {
+    var text = String(value == null ? '' : value).trim();
+    return PLACEHOLDER_TOKEN.test(text) ? '' : text;
+  }
+
+  /**
+   * setSupportRow — fill one Contact Support row from config, keep a
+   * build-injected value when config is silent, and hide the whole row when
+   * neither exists.
+   */
+  function setSupportRow(id, text, href) {
+    var link = $(id);
+    if (!link) return;
+
+    var currentHref = link.getAttribute('href') || '';
+    var rowText = realValue(text) || realValue(link.textContent);
+    var rowHref = realValue(href) || realValue(currentHref);
+
+    var row = link.closest ? link.closest('.support-row') : null;
+
+    if (!rowText) {
+      // Nothing to show: hide the row, blank the text and drop the target, so
+      // no __TOKEN__ survives anywhere in the DOM for a later style change (or
+      // a screen reader) to pick up.
+      link.textContent = '';
+      link.removeAttribute('href');
+      link.removeAttribute('target');
+      if (row) row.style.display = 'none';
+      else link.style.display = 'none';
+      return;
+    }
+
+    link.textContent = rowText;
+    // Config is authoritative: re-show a row an earlier pass (or the inline
+    // build-injection script) hid, now that it has a real value.
+    if (row) row.style.display = '';
+    else link.style.display = '';
+
+    if (rowHref && rowHref !== '#') {
+      link.setAttribute('href', rowHref);
+    } else {
+      // No usable target — drop the link behaviour instead of leaving an inert
+      // "#" (or a raw token) that only reloads the page.
+      link.removeAttribute('href');
+      link.removeAttribute('target');
+    }
+  }
+
+  // Runs on page load, so the modal is correct the first time it is opened.
+  function hydrateStoreInfo() {
+    // "Store Location:" line in the cash-payment modal.
+    var locationEl = $('store-location');
+    if (locationEl) {
+      var location = realValue(CONFIG.storeLocation) || realValue(locationEl.textContent);
+      var locationLine = locationEl.closest
+        ? locationEl.closest('.cash-timer__store-hours')
+        : null;
+
+      if (location) {
+        locationEl.textContent = location;
+        if (locationLine) locationLine.style.display = '';
+        else locationEl.style.display = '';
+      } else {
+        locationEl.textContent = '';
+        if (locationLine) locationLine.style.display = 'none';
+        else locationEl.style.display = 'none';
+      }
+    }
+
+    var phone = realValue(CONFIG.supportPhone);
+    var email = realValue(CONFIG.supportEmail);
+
+    setSupportRow('support-facebook', CONFIG.facebookPageName, CONFIG.facebookUrl);
+    setSupportRow('support-phone', phone, phone ? 'tel:' + phone.replace(/[^+0-9]/g, '') : '');
+    setSupportRow('support-email', email, email ? 'mailto:' + email : '');
   }
 
   // ===============================================================
@@ -2475,6 +2570,18 @@
 
         // Show connection instructions if redirected from cash payment flow
     showConnectionInstructions();
+  }
+
+  // ── Store details ───────────────────────────────────────────
+  // Deferred to DOMContentLoaded on purpose: each page's own inline Contact
+  // Support script (which carries the values injected at build time) is parsed
+  // AFTER this file, and hydrateStoreInfo has to see those values before it
+  // decides which rows to hide. The modal is closed until the guest opens it,
+  // so nothing flickers in the meantime.
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', hydrateStoreInfo);
+  } else {
+    hydrateStoreInfo();
   }
 
   // ── Start ───────────────────────────────────────────────────

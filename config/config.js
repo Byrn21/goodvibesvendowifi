@@ -27,6 +27,18 @@
     supportPhone: '',
 
     // ==============================================================
+    // STORE DETAILS — Contact Support modal / cash-payment store line
+    // ==============================================================
+    // Rendered at page load by assets/portal.js (index.html) and by each
+    // page's own support-modal script. Anything set here wins over the
+    // build-time values injected into the HTML. An empty value hides that
+    // row, and a raw __TOKEN__ left behind by a skipped inject-secrets run
+    // is treated as empty — the modal never shows template tags.
+    storeLocation: '',
+    facebookPageName: '',
+    facebookUrl: '',
+
+    // ==============================================================
     // AUTHENTICATION MODE â€” backend mode (voucher-based)
     // ==============================================================
     mode: 'backend',

@@ -388,8 +388,7 @@
     <div class="support-modal">
       <header class="support-modal__header">
         <div>
-          <h3 class="support-modal__title" id="support-modal-title">Kuya By's Gadget Repair Shop</h3>
-          <p class="support-modal__subtitle">Good Vibes Store</p>
+          <h3 class="support-modal__title" id="support-modal-title">Good Vibes Buko</h3>
         </div>
         <button type="button" class="support-modal__close" id="support-modal-close" aria-label="Close contact support dialog">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
@@ -409,7 +408,7 @@
           </span>
           <div>
             <span class="support-row__label">Location</span>
-            <span class="support-row__value">__STORE_LOCATION__</span>
+            <span class="support-row__value" id="store-location">__STORE_LOCATION__</span>
           </div>
         </div>
 
@@ -805,6 +804,10 @@
     })();
   </script>
 
+  <!-- Frontend config: the Contact Support modal reads its store details from
+       here. Served with no-store by the backend. -->
+  <script src="config/config.js?v=20261024"></script>
+
   <!-- Contact Support modal open/close. Kept in its own IIFE so the redirect
        and session logic above stays untouched. -->
   <script>
@@ -835,14 +838,27 @@
         }
       }
 
-      // Contact details for this page. Injected at build time by
-      // inject-secrets.js; a row is hidden when its value was not configured,
-      // so the modal never renders a raw token or a broken tel:/mailto: link.
+      // Contact details for this page, resolved at load time:
+      //   1. CONFIG (config/config.js) when it holds a real value,
+      //   2. otherwise the value injected at build time by inject-secrets.js
+      //      (the literals below),
+      //   3. otherwise the row is hidden — a raw __TOKEN__ is never displayed,
+      //      so a skipped build step cannot leak template tags to a guest.
+      var PLACEHOLDER_TOKEN = /^__[A-Z0-9_]+__$/;
+
+      function pickValue(configValue, injected) {
+        var fromConfig = String(configValue == null ? '' : configValue).trim();
+        if (fromConfig && !PLACEHOLDER_TOKEN.test(fromConfig)) return fromConfig;
+        var fallback = String(injected == null ? '' : injected).trim();
+        return PLACEHOLDER_TOKEN.test(fallback) ? '' : fallback;
+      }
+
+      var C = window.CONFIG || {};
       var SUPPORT_CONFIG = {
-        facebookName: '__FACEBOOK_PAGE_NAME__',
-        facebookUrl:  '__FACEBOOK_URL__',
-        phone:        '__CONTACT_NUMBER__',
-        email:        '__SUPPORT_EMAIL__'
+        facebookName: pickValue(C.facebookPageName, '__FACEBOOK_PAGE_NAME__'),
+        facebookUrl:  pickValue(C.facebookUrl,  '__FACEBOOK_URL__'),
+        phone:        pickValue(C.supportPhone, '__CONTACT_NUMBER__'),
+        email:        pickValue(C.supportEmail, '__SUPPORT_EMAIL__')
       };
 
       function fillSupportRow(id, text, href) {
@@ -878,6 +894,19 @@
         SUPPORT_CONFIG.email,
         SUPPORT_CONFIG.email ? 'mailto:' + SUPPORT_CONFIG.email : ''
       );
+
+      // "Location" row — same precedence, and hidden when unset so the
+      // __STORE_LOCATION__ placeholder never reaches the screen.
+      var locationEl = document.getElementById('store-location');
+      if (locationEl) {
+        var location = pickValue(C.storeLocation, locationEl.textContent);
+        var locationRow = locationEl.closest ? locationEl.closest('.support-row') : null;
+        if (location) locationEl.textContent = location;
+        else {
+          locationEl.textContent = ''; // never leave __STORE_LOCATION__ in the DOM
+          if (locationRow) locationRow.style.display = 'none';
+        }
+      }
 
       if (trigger) trigger.addEventListener('click', openModal);
       closeX.addEventListener('click', closeModal);

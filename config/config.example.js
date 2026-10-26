@@ -29,6 +29,13 @@
     supportEmail: 'support@example.com',
     supportPhone: '+1-555-0100',
 
+    // Store details shown in the Contact Support modal and on the
+    // cash-payment screen. Rendered at page load; an empty value hides that
+    // row (a raw __TOKEN__ is treated as empty, never displayed).
+    storeLocation: '123 Example Street, Example City',
+    facebookPageName: 'Your Facebook Page',
+    facebookUrl: 'https://www.facebook.com/yourpage',
+
     // ==============================================================
     // AUTHENTICATION MODE
     // ==============================================================

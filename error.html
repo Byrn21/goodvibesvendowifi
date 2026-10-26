@@ -373,7 +373,7 @@
     <div class="support-modal">
       <header class="support-modal__header">
         <div>
-          <h3 class="support-modal__title" id="support-modal-title">Contact Support</h3>
+          <h3 class="support-modal__title" id="support-modal-title">Good Vibes Buko</h3>
           <p class="support-modal__subtitle">We're here to help you get connected.</p>
         </div>
         <button type="button" class="support-modal__close" id="support-modal-close" aria-label="Close contact support dialog">
@@ -431,19 +431,37 @@
 
   <!-- Error display: reads ?message= and ?code= from URL -->
   <!-- Internal details (tokens, stack traces) are NEVER shown to users -->
+  <!-- Frontend config: the Contact Support modal reads its store details from
+       here. Served with no-store by the backend. -->
+  <script src="config/config.js?v=20261024"></script>
   <script>
     (function () {
       'use strict';
 
       /* ========================================================
-         SUPPORT DETAILS — replace these placeholders with the
-         real values. They populate the Contact Support modal.
+         SUPPORT DETAILS — resolved at load time:
+           1. CONFIG (config/config.js) when it holds a real value,
+           2. otherwise the value injected at build time by
+              inject-secrets.js (the literals below),
+           3. otherwise the row is hidden — a raw __TOKEN__ is never
+              displayed, so a skipped build step cannot leak template
+              tags to the guest.
          ======================================================== */
+      var PLACEHOLDER_TOKEN = /^__[A-Z0-9_]+__$/;
+
+      function pickValue(configValue, injected) {
+        var fromConfig = String(configValue == null ? '' : configValue).trim();
+        if (fromConfig && !PLACEHOLDER_TOKEN.test(fromConfig)) return fromConfig;
+        var fallback = String(injected == null ? '' : injected).trim();
+        return PLACEHOLDER_TOKEN.test(fallback) ? '' : fallback;
+      }
+
+      var C = window.CONFIG || {};
       var SUPPORT_CONFIG = {
-        facebookName: '__FACEBOOK_PAGE_NAME__',
-        facebookUrl:  '__FACEBOOK_URL__',
-        phone:        '__CONTACT_NUMBER__',
-        email:        '__SUPPORT_EMAIL__'
+        facebookName: pickValue(C.facebookPageName, '__FACEBOOK_PAGE_NAME__'),
+        facebookUrl:  pickValue(C.facebookUrl,  '__FACEBOOK_URL__'),
+        phone:        pickValue(C.supportPhone, '__CONTACT_NUMBER__'),
+        email:        pickValue(C.supportEmail, '__SUPPORT_EMAIL__')
       };
 
       var params = new URLSearchParams(window.location.search);
