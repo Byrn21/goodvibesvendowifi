@@ -1835,15 +1835,21 @@
     showClaimStep('success');
   }
 
-  // Hand the guest to the success page. No query string is needed: the device
-  // is identified server-side by its address, so there is no voucher code or
-  // session id to carry through the MAC-direct flow.
+  // Hand the guest to the success page, carrying the MAC the claim authorized
+  // in the URL. Storage is written first (rememberDeviceIdentity) but Android's
+  // captive-portal WebView can clear localStorage between navigations, so the
+  // URL is the only identity that is guaranteed to survive the hand-off:
+  // success.html forwards ?mac= on to status.html, which resolves the session
+  // from it instead of the address lookup — impossible behind the cloud tunnel,
+  // where the backend only sees the tunnel's public address.
   function goToSuccessPage() {
     if (claimState.redirectTimer) {
       window.clearTimeout(claimState.redirectTimer);
       claimState.redirectTimer = null;
     }
-    window.location.href = 'success.html';
+    var macToSave = normalizeMac(getDeviceContext().clientMac) || '';
+    window.location.href = (CONFIG.successPage || 'success.html') +
+      (macToSave ? '?mac=' + encodeURIComponent(macToSave) : '');
   }
 
   // Auto-authorized: the backend authorized this device's MAC, so there is no

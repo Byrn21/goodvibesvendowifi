@@ -690,16 +690,26 @@
 
       // The status page needs the same identifiers this page has, so hand it
       // BOTH the session id and the device MAC (the MAC keeps working after the
-      // id is gone).
+      // id is gone). The MAC is forwarded under the SAME parameter name this
+      // page was given — ?mac= from the claim hand-off, ?clientMac= from the
+      // login flow — so status.html's URL-first lookup finds it either way,
+      // even when the WebView cleared localStorage during the navigation.
+      var forwardedMacKey = params.has('mac') ? 'mac' : 'clientMac';
+
       function statusHref() {
         var q = new URLSearchParams();
         if (sessionId) q.set('sessionId', sessionId);
-        if (clientMac) q.set('clientMac', clientMac);
+        if (clientMac) q.set(forwardedMacKey, clientMac);
         var vt = params.get('voucherType') || '';
         if (vt) q.set('voucherType', vt);
         var qs = q.toString();
         return 'status.html' + (qs ? '?' + qs : '');
       }
+
+      // Point the link at the forwarded identifiers from the first paint: the
+      // guest can tap "View Session Status" before the session call below
+      // returns, and the later assignments only refresh what is already there.
+      if (statusLink) statusLink.href = statusHref();
 
       // Seed the countdown from the URL timing params (no round-trip needed).
       var initialSeconds = null;
