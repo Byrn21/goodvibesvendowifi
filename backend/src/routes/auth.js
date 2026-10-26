@@ -35,7 +35,7 @@ router.post('/', async (req, res, next) => {
   // First statement in the handler: proves the browser actually reached the
   // backend when the guest taps Submit. If the portal fails before the
   // request is sent (blocked fetch, captive mini-browser navigation, a JS
-  // error), this line never appears in the Render logs — which is itself the
+  // error), this line never appears in the server logs — which is itself the
   // signal. The voucher itself is NEVER logged (still a live credential).
   //
   // PRIMITIVE-ONLY payload: a single plain string built from scalars. The
@@ -394,7 +394,7 @@ router.post('/', async (req, res, next) => {
       durationMinutes: duration,
       totalSeconds: sessionTotalSeconds,
       // Whether the bandwidth cap was actually applied to this client. false =
-      // the guest is online but UNCAPPED (check the Render logs: OMADA_ADMIN_*
+      // the guest is online but UNCAPPED (check the server logs: OMADA_ADMIN_*
       // credentials / mock mode / controller rejection).
       qosApplied: qos.applied,
       qosMock: qos.mock === true,

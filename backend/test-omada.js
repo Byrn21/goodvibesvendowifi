@@ -52,7 +52,7 @@ const dotenv = require('dotenv');
 // ── Configuration (same load order as src/server.js) ────────────────────
 // server.js loads backend/.env explicitly and dotenv does NOT override
 // variables already present in the process environment. That detail matters:
-// a stale shell / Render / Windows user variable silently wins over .env.
+// a stale shell (or system) environment variable silently wins over .env.
 const ENV_PATH = path.join(__dirname, '.env');
 const KEYS = [
   'OMADA_BASE_URL',

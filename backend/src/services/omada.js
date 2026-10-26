@@ -126,11 +126,11 @@ const OPERATOR_PASSWORD = process.env.OMADA_PORTAL_OPERATOR_PASSWORD || '';
 const ADMIN_NAME = process.env.OMADA_ADMIN_NAME || '';
 const ADMIN_PASSWORD = process.env.OMADA_ADMIN_PASSWORD || '';
 const TIMEOUT    = parseInt(process.env.OMADA_AUTH_TIMEOUT || '10000', 10);
-// OC200/ER605 controllers present a SELF-SIGNED certificate. From a cloud
-// backend (Render) the default Node TLS behavior rejects it during the
-// handshake, surfacing as an opaque ECONNRESET/EPROTO and failing every
-// authorization. Default to accepting it (rejectUnauthorized: false); set
-// OMADA_TLS_REJECT=true only when the controller has a publicly-trusted cert.
+// OC200/ER605 controllers present a SELF-SIGNED certificate. With Node's
+// default TLS behavior the handshake rejects it, surfacing as an opaque
+// ECONNRESET/EPROTO and failing every authorization. Default to accepting it
+// (rejectUnauthorized: false); set OMADA_TLS_REJECT=true only when the
+// controller has a publicly-trusted cert.
 const TLS_REJECT = process.env.OMADA_TLS_REJECT === 'true';
 
 // Origin/Referer sent on EVERY controller request. Hardcoded to the
@@ -414,7 +414,7 @@ async function authenticateClient(ctx) {
   try {
     response = await requestWithSession(portalSession, path, 'POST', body);
   } catch (netErr) {
-    // Network / TLS / timeout — log the EXACT reason for the Render logs,
+    // Network / TLS / timeout — log the EXACT reason in the server logs,
     // including the body that was sent (connection type / site / time), then
     // rethrow so the route fails closed without consuming the voucher.
     logAuthFailure('extPortal/auth request', netErr, ctx, path, body);
@@ -927,8 +927,8 @@ function missingField(field) {
 // Diagnostics: verbose Omada auth-failure logging
 // ================================================================
 // Maps the transport-level error codes Node emits to the most likely cause
-// for THIS topology (cloud backend → Cloudflare tunnel → OC200), so a single
-// Render log line is actionable without reproducing the failure locally.
+// for THIS topology (backend → tunnel or LAN → OC200), so a single log line
+// is actionable without reproducing the failure locally.
 const NETWORK_ERROR_HINTS = {
   ECONNREFUSED: 'controller refused the TCP connection (wrong host/port, or the tunnel is down)',
   ECONNRESET: 'connection reset mid-request — usually a dropped TLS handshake; verify OMADA_TLS_REJECT is not true and the tunnel forwards TLS',
@@ -950,7 +950,7 @@ const NETWORK_ERROR_HINTS = {
 /**
  * Body fields that are safe to echo into the logs. Anything NOT in this list
  * is reported as a count only — /hotspot/login carries an operator password
- * and must never leak it into the Render logs.
+ * and must never leak it into the server logs.
  */
 const LOGGABLE_BODY_FIELDS = [
   'clientMac', 'clientIp', 'apMac', 'ssidName', 'radioId',
@@ -960,7 +960,7 @@ const LOGGABLE_BODY_FIELDS = [
 /**
  * Mask a voucher code for logging: `••••12` (last two characters, matching
  * the admin UI's maskVoucherCode). The sent-body line still proves the field
- * was present, without writing a still-usable code into the Render logs —
+ * was present, without writing a still-usable code into the server logs —
  * on a FAILED authorization the voucher has deliberately NOT been consumed.
  *
  * @param {string|number} code
@@ -1024,7 +1024,7 @@ function summarizeBody(body) {
 
 /**
  * Log the exact failure reason for an extPortal/auth call so it is visible
- * in the Render logs: transport code, a mapped cause hint, the body that was
+ * in the server logs: transport code, a mapped cause hint, the body that was
  * SENT (connection type / site / time / extra fields), the controller's
  * response JSON, and the stack.
  *
@@ -1066,7 +1066,7 @@ function logAuthFailure(stage, err, ctx, path, body) {
 // call carries the SITE name in its body and targets the OMADAC_ID in its
 // path, so if either resolves to a value the controller does not know, the
 // authorization silently does nothing. These two logs make the resolved
-// values visible in the Render logs so the operator can compare them with
+// values visible in the server logs so the operator can compare them with
 // the controller's own Site / API settings.
 
 let configLogged = false;
@@ -1157,7 +1157,7 @@ function logResolvedConfig(force) {
 /**
  * Log the exact target of an outgoing controller request — the resolved
  * path (which embeds OMADAC_ID) and the `site` value actually placed in the
- * request body — so a Render log line shows what the controller received.
+ * request body — so a log line shows what the controller received.
  *
  * The request BODY is never printed: /hotspot/login carries a password.
  *
@@ -1227,7 +1227,7 @@ function omadaRequest(path, method, body, opts) {
     };
 
     // Echo the exact resolved target of every controller call (path + site +
-    // OMADAC_ID) into the logs, so the Render output shows what was sent.
+    // OMADAC_ID) into the logs, so the log shows what was sent.
     logControllerRequest(method, path, body, opts);
 
     // Attach THIS session's cookie and CSRF token when present. Login itself

@@ -1,11 +1,13 @@
-# GoodVibesVendoWifi — Cloud Captive Portal
+# GoodVibesVendoWifi — Self-Hosted Captive Portal
 
-A cloud-hosted guest Wi-Fi captive portal for TP-Link Omada deployments. A TP-Link
-Omada **OC200** hardware controller is configured with the **External Portal
-Server** authentication method and redirects guest Wi-Fi traffic to a
-Node.js/Express portal and backend hosted on **Render**. Paid access is verified
-without any payment-gateway fees using **MacroDroid** to intercept GCash, Maya,
-and QR Ph payment confirmations on an Android phone.
+A self-hosted guest Wi-Fi captive portal for TP-Link Omada deployments. The
+Node.js/Express portal, the payment webhook listener and the database (PostgreSQL
+or SQLite) all run **on an Android device under Termux** — there is no cloud
+provider and no container runtime. A TP-Link Omada **OC200** hardware controller
+is configured with the **External Portal Server** authentication method and
+redirects guest Wi-Fi traffic to that locally hosted backend. Paid access is
+verified without any payment-gateway fees using **MacroDroid** to intercept
+GCash, Maya, and QR Ph payment confirmations on an Android phone.
 
 ---
 
@@ -33,8 +35,9 @@ and QR Ph payment confirmations on an Android phone.
 [Omada OC200 controller]  ── External Portal Server auth method ──┐
       │  redirects the guest (with controller query params)        │
       ▼                                                            │
-[Captive portal + backend on Render]                               │
-  https://goodvibesvendowifi.onrender.com                          │
+[Android device — Termux]                                          │
+  portal HTML + Express backend + webhook listener                 │
+  http://<termux-lan-ip>:3000 (or a tunnel hostname)               │
       │                                                            │
       ├── Serves index.html / success.html / error.html / status.html
       │                                                            │
@@ -48,12 +51,13 @@ and QR Ph payment confirmations on an Android phone.
       │    ├── GCash / Maya  → intercepts app push notification
       │    └── QR Ph         → intercepts SMS containing "QRPH"
       │
-      └── PostgreSQL (Render) — vouchers, sessions, webhook events
+      └── PostgreSQL / SQLite on the same device — vouchers, sessions,
+          webhook events
 ```
 
-The portal itself is **hosted in the cloud**, so there is no on-site web server
-to expose and **no tunnel is required**. See
-[§2](#2-network--captive-portal-layer) for why.
+The whole stack runs **on site, on one Android device**: the Termux-hosted
+backend is the portal server, and the database lives on that same device. See
+[§2](#2-network--captive-portal-layer) for how guests reach it.
 
 ---
 
@@ -64,29 +68,34 @@ The Wi-Fi edge is a **TP-Link Omada OC200** hardware controller. On the OC200:
 - The guest portal profile is set to the **External Portal Server**
   authentication method.
 - Before a guest is authorized, the controller redirects their HTTP traffic to
-  the cloud portal URL — in this deployment
-  `https://goodvibesvendowifi.onrender.com` — and appends controller context as
+  the portal URL served by the Termux device — the LAN address of the Android
+  phone, e.g. `http://192.168.1.20:3000` — and appends controller context as
   query parameters (`clientMac`, `clientIp`, `apMac`, `ssidName`, `redirectUrl`,
   …).
 - The portal page captures that controller context (AP MAC, SSID, radio ID) and
   sends it to the backend, where it is stored against the client MAC so it is
   ready when a payment arrives.
 
-### Why there is no tunnel
+### How guests reach the backend
 
-Older deployments exposed a portal running on local hardware by tunnelling it to
-the public internet. That is **no longer part of this architecture**:
+The captive portal HTML, the Express backend, the payment webhook listener and
+the database all run on the same Android device under Termux. The OC200's
+External Portal Server URL and `BASE_URL` (§6) must therefore point at that
+device:
 
-- The captive portal HTML, the Express backend, and the database all run on
-  Render, which is already publicly reachable over HTTPS.
-- The OC200 points straight at that public HTTPS URL. There is no local portal
-  server and therefore nothing to tunnel.
-- **No Cloudflare Tunnel, ngrok, Raspberry Pi, or any other local tunnel/host is
-  used or required.** Do not add tunnel setup steps.
+- **Same network (default):** use the Termux device's LAN address, e.g.
+  `http://192.168.1.20:3000`. The OC200, the guest devices and the Termux phone
+  are all on that Wi-Fi network, so no public hostname is involved.
+- If the controller cannot reach the Termux device directly, point the OC200 at
+  whatever address does reach it (a private tunnel hostname, for example) and
+  set the same value in `BASE_URL`.
+- Nothing here is configured for a cloud provider, and there is no container
+  platform, image build or deploy pipeline — the process you start in Termux is
+  the production server.
 
-> The backend still talks to the Omada controller through `OMADA_BASE_URL`
-> (§6) to authorize clients — but that is an outbound API call from the backend,
-> not a locally hosted tunnel serving the portal.
+> `OMADA_BASE_URL` (§6) is the *outbound* direction: the controller the backend
+> calls to authorize clients. `BASE_URL` is how guests reach this backend. They
+> are usually two different addresses.
 
 ---
 
@@ -108,11 +117,11 @@ notification/SMS content to extract:
 - the **reference number**.
 
 It then sends an HTTP **POST** to the backend's payment webhook,
-[`POST /api/webhooks/macrodroid`](#post-apiwebhooks-macrodroid), hosted on
-Render:
+[`POST /api/webhooks/macrodroid`](#post-apiwebhooks-macrodroid), on the Termux
+device:
 
 ```
-POST https://goodvibesvendowifi.onrender.com/api/webhooks/macrodroid
+POST http://192.168.1.20:3000/api/webhooks/macrodroid
 Content-Type: application/json
 ```
 
@@ -199,11 +208,10 @@ goodvibesvendowifi/
 │   └── config.example.js      # Frontend config template
 ├── scripts/
 │   └── generate-qr-placeholders.js
-├── inject-secrets.js          # Build-time secret injection into the HTML pages
+├── inject-secrets.js          # Injects store/contact details into the HTML pages
 ├── backend/
 │   ├── package.json           # All npm scripts live here (see §5)
 │   ├── .env.example           # Environment variable template
-│   ├── Dockerfile             # Production image (build + runtime)
 │   └── src/
 │       ├── server.js          # Express entry point (mounts all routes)
 │       ├── config/index.js    # Centralized business constants
@@ -226,10 +234,11 @@ All commands below are the exact scripts defined in `backend/package.json`.
 
 ### Prerequisites
 
-- **Node.js `>=22.0.0`** (enforced by the `engines` field).
+- **Node.js `>=22.0.0`** (enforced by the `engines` field) inside **Termux** on
+  the Android device that hosts the portal.
 - npm.
-- Optional: **PostgreSQL** for production. Local development defaults to SQLite
-  (`better-sqlite3` is a dependency).
+- **PostgreSQL** for the live portal, or SQLite for development (both run on the
+  same device; `better-sqlite3` is a dependency).
 - An Android phone running MacroDroid (§3) for live payment verification.
 - A TP-Link Omada controller (OC200) configured with the External Portal Server
   method (§2).
@@ -262,8 +271,9 @@ To seed sample data:
 npm run db:seed
 ```
 
-For PostgreSQL, set `DATABASE_URL` to a `postgresql://…` connection string and run
-`npm run db:migrate` again.
+For PostgreSQL (installed with `pkg install postgresql` in the same Termux
+environment), set `DATABASE_URL` to the local `postgresql://…` connection string
+and run `npm run db:migrate` again.
 
 ### 4. Start the server
 
@@ -289,26 +299,29 @@ unauthenticated health check at `GET /health`.
 | `npm run db:migrate` | `node src/db/migrate.js` | Apply the database schema |
 | `npm run db:seed` | `node src/db/seed.js` | Seed sample data (refuses to run when `NODE_ENV=production`) |
 
-> In the Docker image the container starts with
-> `node src/db/migrate.js && node src/server.js`, so migrations run automatically
-> on every Render deploy. `npm run db:migrate` is only needed for local setup.
+> There is no container and no process manager: the Termux session that runs
+> `npm start` **is** the production server, and the webhook listener lives in
+> that same process. Run `npm run db:migrate` after pulling schema changes —
+> nothing migrates the database for you.
 
 ---
 
 ## 6. Environment Variables
 
 Only variables that are **actually referenced by the backend code** are listed
-here. Set them in `backend/.env` on the host that runs the backend (the file is
-loaded relative to `src/server.js`, so the working directory does not matter).
+here. All of them are configured by hand in `backend/.env` on the Android device
+running Termux — no cloud provider or container platform supplies any of them.
+The file is loaded relative to `src/server.js`, so the working directory does not
+matter.
 
 ### Core / server
 
 | Variable | Referenced in | Default | Description |
 |---|---|---|---|
 | `NODE_ENV` | `server.js`, `db/client.js`, `db/seed.js` | `development` | Environment mode; production hides internal error details and enables Postgres TLS. |
-| `PORT` | `server.js` | `3000` | HTTP port. Render sets this automatically. |
-| `DATABASE_URL` | `db/client.js`, `db/migrate.js` | `sqlite:./data/portal.db` | `sqlite:…` or `postgresql://…` connection string. |
-| `PG_SSL_REJECT_UNAUTHORIZED` | `db/client.js` | `true` | Set to `false` for Render PostgreSQL (self-signed certs). |
+| `PORT` | `server.js` | `3000` | HTTP port to listen on. Choose a free port on the Termux device and make sure the OC200 and the guest network can reach it. |
+| `DATABASE_URL` | `db/client.js`, `db/migrate.js` | `sqlite:./data/portal.db` | `sqlite:…` or `postgresql://…` connection string. Set it manually on the Termux device; nothing provisions the database. |
+| `PG_SSL_REJECT_UNAUTHORIZED` | `db/client.js` | `true` | Set to `false` when the local PostgreSQL in Termux presents a self-signed certificate. |
 | `FRONTEND_ORIGIN` | `server.js` | `http://localhost:8080` | Fallback allowed CORS origin. |
 | `CORS_ORIGINS` | `server.js` | `FRONTEND_ORIGIN` | Comma-separated allowed CORS origins. |
 | `RATE_LIMIT_WINDOW_MS` | `server.js` | `900000` | Rate-limit window (ms) for both limiters. |
@@ -552,29 +565,30 @@ values, only replacement counts.
 > keys or the MacroDroid secret — those stay server-side as backend environment
 > variables (§6).
 
-### Where it runs in the pipeline
+### Where it runs
 
-- **Primary (production):** during the Docker image build. `backend/Dockerfile`
-  copies `inject-secrets.js` to `/app` and the HTML to `/app/public`, declares
-  the five variables as build `ARG`s, and runs `node inject-secrets.js`. Render
-  passes dashboard environment variables to the Docker build, so setting them in
-  the Render dashboard is enough.
-- **Manual (for testing):** run it directly from the repository root:
+There is no build pipeline and no container image: the Express backend serves the
+portal HTML straight from the repository, so the values are live as soon as the
+script rewrites those files on the Termux device.
+
+- **Before starting the server:** run it from the repository root in Termux. The
+  five variables come from the shell environment of that one command (they are
+  not read from `backend/.env` by this script):
 
   ```bash
   STORE_LOCATION="123 Example St" SUPPORT_EMAIL="help@example.com" node inject-secrets.js
   ```
 
-  ⚠️ The script rewrites the target HTML files **in place**. If you run it
-  locally, restore the placeholders before committing:
+  ⚠️ The script rewrites the target HTML files **in place**. Real contact details
+  must not be committed, so keep the run on the device and restore the
+  placeholders before committing any HTML change:
 
   ```bash
   git checkout index.html success.html error.html status.html
   ```
 
-- There is **no npm script** for this step; it is a Docker build step. When
-  running the backend locally (outside Docker), the root HTML files do not have
-  the tokens replaced — set the values in the Render dashboard for production.
+- There is **no npm script** for this step — it is a plain Node script, so
+  re-run it whenever the store/contact details change and reload the portal.
 
 ---
 
@@ -721,9 +735,11 @@ npm test
 Tests use Jest + supertest and cover (among others):
 
 - `POST /api/webhooks/macrodroid` — secret validation, field validation,
-  duplicate reference rejection, success, Omada failure (`502`), and the
-  `422 MISSING_PORTAL_CONTEXT` fail-loud paths.
-- `POST /api/payment/claim` and `GET /api/payment/methods`.
+  duplicate reference rejection, success.
+- `POST /api/webhooks/instapay` and `POST /api/payment/claim` — validation, the
+  authorize → 2000 ms wait → rate-limit order, tiered caps, and the
+  `502 MISSING_PORTAL_CONTEXT` / `502 OMADA_AUTH_FAILED` fail-loud paths.
+- `GET /api/payment/methods`.
 - Session state transitions, pause/resume, and expiration math.
 
 Run in watch mode with `npm run test:watch`.
@@ -745,7 +761,8 @@ Run in watch mode with `npm run test:watch`.
 - MAC addresses are normalized to uppercase colon-separated format before storage
   and lookup.
 - The server trusts one proxy hop (`trust proxy = 1`) so per-IP rate limits use
-  the real client IP behind Render's proxy.
+  the real client IP when the portal is reached through a reverse proxy or
+  tunnel. Set it to `0` when guests connect to the Termux device directly.
 - Never place secrets in `config/config.js` — it ships with the portal frontend.
 
 ---

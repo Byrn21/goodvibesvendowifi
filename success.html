@@ -475,7 +475,7 @@
        (window.close()), and after a short settling delay performs one
        connectivity probe so the captive mini-browser can close.
        Both the button and the probe exit to a NON-whitelisted external host
-       (never the Render portal URL), because the OS only detects that the
+       (never the local portal URL), because the OS only detects that the
        firewall opened when a request reaches a host outside Omada's
        Pre-Authentication Access list. The probe is delayed on purpose: Omada
        reprograms its firewall rules asynchronously after auth. -->
@@ -504,9 +504,9 @@
       // ---- Final exit destination -----------------------------------------
       // The mobile OS only marks the network as open when a request reaches a
       // host Omada has NOT whitelisted in "Pre-Authentication Access". This
-      // portal runs on Render and Render is whitelisted, so bouncing the guest
-      // back to (or off) Render produces no network-state change and the
-      // captive mini-browser never closes.
+      // portal runs locally on Termux and the LAN IP is whitelisted, so bouncing
+      // the guest back to (or off) the local Termux server produces no
+      // network-state change and the captive mini-browser never closes.
       //
       // The fallback is a high-availability HTTPS host: once the firewall is
       // open, a TLS handshake to a well-known site is the clearest "the network
@@ -524,8 +524,8 @@
       // on the OC200, or they are the OS's own captive-detection endpoints that
       // the phone is already polling), so the OS keeps the captive mini-browser
       // open and re-probes — the client loop this page exists to avoid.
-      //   - *.onrender.com            this portal's Render host
-      //   - goodvibesvendowifi.com    the portal's custom domain (also whitelisted)
+      //   - the local LAN IP          this Termux server (whitelisted)
+      //   - legacy hosting hostnames  kept as a safety net; never exit via one
       //   - captive.apple.com         iOS captive-portal probe
       //   - connectivitycheck.*       Android captive-portal probe
       // Whatever origin served this page is rejected separately below.
@@ -559,9 +559,9 @@
       }
 
       // Try the guest's original URL first, then the controller's redirectUrl,
-      // but accept a value ONLY when it is a genuine external host. A Render
-      // URL (or an empty / non-http value) is rejected and forced to the
-      // high-availability fallback above.
+      // but accept a value ONLY when it is a genuine external host. A blocked
+      // or non-external URL (or an empty / non-http value) is rejected and
+      // forced to the high-availability fallback above.
       var candidates = [originUrl, destination];
       var exitUrl = EXTERNAL_FALLBACK;
       for (var i = 0; i < candidates.length; i++) {

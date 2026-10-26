@@ -66,10 +66,10 @@
     // ==============================================================
     // Intentionally empty. The guest's requested redirect is NOT restricted
     // here, and none of the pre-auth-whitelisted hosts (this portal's custom
-    // domain, Render, or the OS captive-probe endpoints) are listed: any host
-    // named here becomes eligible as the post-auth destination, and landing on
-    // a whitelisted host produces no network-state change, so the OS keeps the
-    // captive mini-browser open and re-probes (the client loop).
+    // domain or LAN address, or the OS captive-probe endpoints) are listed:
+    // any host named here becomes eligible as the post-auth destination, and
+    // landing on a whitelisted host produces no network-state change, so the OS
+    // keeps the captive mini-browser open and re-probes (the client loop).
     // The loop guard lives downstream in success.html's exit block-list.
     allowedRedirectDomains: [],
 

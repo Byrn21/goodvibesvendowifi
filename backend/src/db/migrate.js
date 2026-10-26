@@ -2,7 +2,7 @@
  * db/migrate.js — Database migration runner
  *
  * Reads DATABASE_URL from .env and applies the database schema.
- * Supports both SQLite (development) and PostgreSQL (Render.com production).
+ * Supports both SQLite (development) and PostgreSQL (production).
  *
  * Execution order matters:
  *   Phase 1: fixMissingColumns() — reconciles missing columns on tables

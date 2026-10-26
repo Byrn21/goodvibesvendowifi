@@ -1,9 +1,9 @@
 /**
- * db/client.js — Database client (dual-mode: SQLite for dev, PostgreSQL for Render)
+ * db/client.js — Database client (dual-mode: SQLite for dev, PostgreSQL for production)
  *
  * Provides a unified async interface that works with both:
  *   - SQLite (via better-sqlite3) for local development
- *   - PostgreSQL (via pg) for Render.com production
+ *   - PostgreSQL (via pg) for the production environment
  *
  * The session/service layer calls `db.query(sql, params)` and
  * `db.getOne(sql, params)` — never touching driver-specific APIs.

@@ -17,8 +17,9 @@
  * HTML-vs-JS context is therefore resolved per placeholder, not per file (see
  * TARGETS and contextFor() below), so a single pass replaces every token.
  *
- * Set the real values in the Render dashboard (Environment Variables) — never in
- * this repository. Missing values never render a broken `tel:`/`mailto:` link:
+ * Pass the real values as environment variables when you run this script on the
+ * Termux host — never commit them to this repository. Missing values never
+ * render a broken `tel:`/`mailto:` link:
  * the Contact Support modal hides the affected row, and footer links fall back to
  * a harmless `#`.
  *
@@ -141,15 +142,15 @@ function contextFor(target, placeholder) {
 /**
  * Locate the directory holding the portal HTML.
  *
- * It is this script's own directory in the repository root, but inside the
- * Docker image (see backend/Dockerfile) the HTML is copied to /app/public while
- * this script sits at /app. Try both layouts and use the first that exists, so
- * the same script works locally (Windows or Linux) and on Render.
+ * It is this script's own directory in the repository root (the layout used on
+ * the Termux host), with a `public/` sub-directory accepted as an alternative
+ * for a relocated deployment. Try both layouts and use the first that exists,
+ * so the same script works on Android/Termux (and Windows or Linux if needed).
  */
 function resolvePortalDir() {
   const candidates = [
     __dirname, // repo root: script + HTML are siblings
-    path.join(__dirname, 'public'), // Docker image: /app + /app/public
+    path.join(__dirname, 'public'), // optional: relocated HTML in public/
   ];
   for (const candidate of candidates) {
     if (fs.existsSync(path.join(candidate, 'index.html'))) return candidate;

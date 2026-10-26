@@ -11,7 +11,7 @@
  */
 
 // Load backend/.env regardless of the directory the process was started from.
-// dotenv never overrides variables that are already set (e.g. by Render).
+// dotenv never overrides variables that are already set (e.g. by the shell).
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const express = require('express');
 const helmet = require('helmet');
@@ -33,8 +33,9 @@ const { run: runVoucherRefMigration } = require('./db/migrate_add_voucher_ref');
 
 const app = express();
 
-// Trust the first proxy hop (Render, Nginx, etc.) so req.ip resolves to the
-// client's real IP from X-Forwarded-For — required for correct per-IP limits.
+// Trust the first proxy hop (a reverse proxy or tunnel, e.g. Nginx) so req.ip
+// resolves to the client's real IP from X-Forwarded-For — required for correct
+// per-IP limits.
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -207,7 +208,7 @@ const loginLimiter = rateLimit({
         retryAfterSeconds: retryAfterSecs,
       });
   },
-  // Disable X-Forwarded-For validation — Render's proxy header format triggers ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+  // Disable X-Forwarded-For validation — a proxy's header format can trigger ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
   validate: {
     xForwardedForHeader: false,
   },
@@ -245,13 +246,14 @@ app.get('/health', (req, res) => {
 });
 
 // ── Static file serving for captive portal pages ──────────────────
-// Docker: static files copied to /app/public/ by Dockerfile
-// Local dev: HTML files live in the project root (parent of backend/)
+// Termux: the HTML files live in the project root (parent of backend/), which
+// is what gets served. A backend/public/ directory is also accepted so the
+// files can be relocated without touching code.
 const fs = require('fs');
 
 const candidates = [
-  path.join(__dirname, '..', 'public'),              // Docker: /app/public/
-  path.join(__dirname, '..', '..'),                 // Local dev: project-root/
+  path.join(__dirname, '..', 'public'),              // optional: backend/public/
+  path.join(__dirname, '..', '..'),                 // repo layout: project-root/
 ];
 
 let PORTAL_HTML_DIR = null;
@@ -320,7 +322,7 @@ const startup = async () => {
   }
 
   // Echo the resolved Omada target configuration (base, OMADAC id, SITE, TLS)
-  // so the Render logs show exactly which controller + site this backend will
+  // so the server logs show exactly which controller + site this backend will
   // call. A captive loop is usually a mismatch between this line and the
   // controller's own Site / API settings.
   try {

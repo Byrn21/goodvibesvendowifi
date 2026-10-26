@@ -1,7 +1,7 @@
 -- ================================================================
 -- schema.sql -- Omada captive portal database schema
 -- ================================================================
--- Target: SQLite (development) / PostgreSQL (Render.com production)
+-- Target: SQLite (development) / PostgreSQL (production)
 --
 -- This file is written in SQLite syntax (AUTOINCREMENT).
 -- The db/client.js layer's convertSchema() function translates
