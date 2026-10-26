@@ -269,6 +269,7 @@ async function performLogin(session, path, body, label) {
  * @returns {Promise<void>} resolves on success, throws on failure
  */
 async function operatorLogin() {
+  console.log('RESOLVED OMADA URL:', BASE_URL);
   const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/hotspot/login';
   const body = JSON.stringify({ name: OPERATOR_NAME, password: OPERATOR_PASSWORD });
   await performLogin(portalSession, path, body, 'hotspot operator');
@@ -292,6 +293,7 @@ async function adminLogin() {
       '(the portal operator has no site/QoS privileges)'
     );
   }
+  console.log('RESOLVED OMADA URL:', BASE_URL);
   const path = '/' + encodeURIComponent(OMADAC_ID) + '/api/v2/login';
   const body = JSON.stringify({ username: ADMIN_NAME, password: ADMIN_PASSWORD });
   await performLogin(adminSession, path, body, 'administrator');
