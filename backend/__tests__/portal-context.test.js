@@ -282,6 +282,22 @@ describe('Claim Voucher (reference number) submission', () => {
     });
   });
 
+  test('sends the MAC saved by a previous claim (device_mac) on a bare URL', async () => {
+    // Only device_mac exists — the key a successful MAC-direct claim writes.
+    // The voucher form must still identify the device explicitly, otherwise the
+    // backend (seeing only the tunnel's public address) cannot authorize it.
+    const storage = new Map([['device_mac', 'aa-bb-cc-dd-ee-ff']]);
+    const portal = loadPortal({ search: '', storage });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    expect(claimBody(portal).client_mac).toBe(CONTEXT.clientMac);
+  });
+
   test('omits the device fields when no context is known (never sends junk)', async () => {
     const portal = loadPortal({ search: '' });
 
@@ -341,6 +357,41 @@ describe('Claim Voucher (reference number) submission', () => {
     await portal.flush();
 
     expect(claimBody(portal).mobile_number).toBe('09171234567');
+  });
+
+  test('the voucher form POSTs clientMac explicitly, even from a bare URL + saved device_mac', async () => {
+    // The cloud tunnel makes the backend's req.ip the tunnel address, so the
+    // explicit clientMac in the body is what identifies the device. Here the
+    // only identity is the MAC a previous claim saved.
+    const storage = new Map([['device_mac', 'aa:bb:cc:dd:ee:ff']]);
+    const portal = loadPortal({ search: '', storage });
+
+    portal.getEl('voucher-input').value = '123456';
+    portal.getEl('terms-checkbox').checked = true;
+    portal.getEl('sel:form.auth-form').fire('submit', { preventDefault() {} });
+    await portal.flush();
+    await portal.flush();
+
+    const call = portal.fetchCalls.find((c) => c.url.indexOf('/api/auth') !== -1);
+    expect(call).toBeTruthy();
+    expect(call.body.clientMac).toBe(CONTEXT.clientMac);
+    expect(call.body.voucher).toBe('123456');
+    // ... and the successful login persists it for status.html as well.
+    expect(portal.storage.get('device_mac')).toBe(CONTEXT.clientMac);
+  });
+
+  test('a fresh controller redirect still wins over a stale device_mac', async () => {
+    const storage = new Map([['device_mac', '11:22:33:44:55:66']]);
+    const portal = loadPortal({ search: REDIRECT_SEARCH, storage });
+
+    portal.getEl('voucher-input').value = '123456';
+    portal.getEl('terms-checkbox').checked = true;
+    portal.getEl('sel:form.auth-form').fire('submit', { preventDefault() {} });
+    await portal.flush();
+    await portal.flush();
+
+    const call = portal.fetchCalls.find((c) => c.url.indexOf('/api/auth') !== -1);
+    expect(call.body.clientMac).toBe(CONTEXT.clientMac);
   });
 
   test('pasting a full reference number keeps only its last 4 digits', () => {

@@ -199,6 +199,16 @@
     ssidName:  'portalSsidName',
   };
 
+  // Where status.html looks for the device a claim belongs to. The portal is
+  // served through a cloud tunnel, so when status.html asks the backend for
+  // "this device" the address the backend sees is the tunnel's public address,
+  // never the guest's LAN address recorded by the landing beacon — the
+  // address-based lookup therefore answers MISSING_PORTAL_CONTEXT. Saving the
+  // claimed MAC here (same origin as status.html) is what lets that page fall
+  // back to /api/session/status?mac=<mac> instead of giving up, and it is also
+  // the last-resort MAC for the voucher form below (see getStoredContext).
+  var DEVICE_MAC_STORAGE_KEY = 'device_mac';
+
   /**
    * getStoredContext — read the persisted Omada context.
    * Never throws: private mode / disabled storage degrades to URL-only.
@@ -211,6 +221,15 @@
         if (!CONTEXT_STORAGE_KEYS.hasOwnProperty(name)) continue;
         var value = window.localStorage.getItem(CONTEXT_STORAGE_KEYS[name]);
         if (value) stored[name] = value;
+      }
+      // A guest who claimed a payment was authorized by MAC without ever
+      // typing a voucher: the only device identity on this origin is the MAC
+      // the claim saved. Without this fallback the voucher form on a bare URL
+      // would submit an empty clientMac and the backend could not authorize
+      // the device by itself.
+      if (!stored.clientMac) {
+        var claimedMac = window.localStorage.getItem(DEVICE_MAC_STORAGE_KEY);
+        if (claimedMac) stored.clientMac = claimedMac;
       }
     } catch (e) { /* storage unavailable — this page load falls back to the URL */ }
     return stored;
@@ -484,10 +503,16 @@
   }
 
   function buildClientContext() {
+    // The device MAC is sent explicitly (`clientMac`) as the PRIMARY identity.
+    // Behind the cloud tunnel the backend's req.ip is the tunnel's public
+    // address, so its address-based lookup finds no portal context; the value
+    // here is the controller's URL param when present, otherwise whatever this
+    // device saved earlier (portalClientMac, or device_mac from a claim).
+    var device = getDeviceContext();
     return {
-      clientMac:  normalizeMac(queryParams.clientMac) || queryParams.clientMac || '',
+      clientMac:  device.clientMac,
       clientIp:   queryParams.clientIp  || '',
-      apMac:      normalizeMac(queryParams.apMac) || queryParams.apMac || '',
+      apMac:      device.apMac,
       gatewayMac: normalizeMac(queryParams.gatewayMac) || queryParams.gatewayMac || '',
       vid:        queryParams.vid        || '',
       ssidName:   queryParams.ssidName   || '',
@@ -653,12 +678,15 @@
         window.sessionStorage.setItem('portalSessionId', result.sessionId);
       }
       // Persist the client MAC so a later silent re-authorization can still
-      // identify this device even if the Omada query params are gone.
-      if (queryParams.clientMac) {
-        window.localStorage.setItem(
-          'portalClientMac',
-          normalizeMac(queryParams.clientMac) || queryParams.clientMac
-        );
+      // identify this device even if the Omada query params are gone. The MAC
+      // the backend just authorized wins (it echoes it back on success); the
+      // page's own context is the fallback. Both keys are written because
+      // status.html reads device_mac, while this page and success.html read
+      // portalClientMac.
+      var authorizedMac = normalizeMac(result.clientMac) || getDeviceContext().clientMac;
+      if (authorizedMac) {
+        window.localStorage.setItem(CONTEXT_STORAGE_KEYS.clientMac, authorizedMac);
+        window.localStorage.setItem(DEVICE_MAC_STORAGE_KEY, authorizedMac);
       }
     } catch (e) { /* storage unavailable — URL param still works */ }
 
@@ -1670,15 +1698,6 @@
       apMac: normalizeMac(apMac) || apMac,
     };
   }
-
-  // Where status.html looks for the device a claim belongs to. The portal is
-  // served through a cloud tunnel, so when status.html asks the backend for
-  // "this device" the address the backend sees is the tunnel's public address,
-  // never the guest's LAN address recorded by the landing beacon — the
-  // address-based lookup therefore answers MISSING_PORTAL_CONTEXT. Saving the
-  // claimed MAC here (same origin as status.html) is what lets that page fall
-  // back to /api/session/status?mac=<mac> instead of giving up.
-  var DEVICE_MAC_STORAGE_KEY = 'device_mac';
 
   /**
    * rememberDeviceIdentity — persist the device a successful claim belongs to.

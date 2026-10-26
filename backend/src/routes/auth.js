@@ -26,6 +26,7 @@ const {
 } = require('../services/session');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 const { normalizeMac: normalizeDeviceMac, isSameMac } = require('../utils/device-id');
+const { resolveClientMacByIp } = require('../utils/portal-context');
 const { getDb } = require('../db/client');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
@@ -54,7 +55,9 @@ router.post('/', async (req, res, next) => {
   );
 
   try {
-        const {
+    // `let` (not const) so the context-enrichment step below can fill in
+    // ssidName / radioId when the body omitted them; the rest stays read-only.
+    let {
       voucher,
       clientMac,
       clientIp,
@@ -87,18 +90,58 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    // MAC address normalization and validation (shared helper —
-    // canonical format: uppercase, colon-separated, e.g. AA:BB:CC:DD:EE:FF)
-    const normalizedMac = normalizeDeviceMac(clientMac || '');
-    if (clientMac && !normalizedMac) {
+    // ── Device identity: explicit MAC first, request address second ────────
+    // The portal page sends the MAC it read from the controller's portal URL
+    // (or restored from localStorage) as `clientMac`. That value is the only
+    // reliable identity when the portal is reached through a cloud tunnel:
+    // req.ip is then the tunnel's PUBLIC address while the landing beacon
+    // recorded the guest's LAN address, so the reverse lookup finds nothing.
+    //
+    // Priority: body clientMac (client_mac accepted as an alias) → the device
+    // that landed on the portal from req.ip. The explicit value is stripped to
+    // hex and re-emitted in the canonical AA:BB:CC:DD:EE:FF form, or rejected
+    // with 400 when it is present but malformed — nothing unvalidated ever
+    // reaches extPortal/auth.
+    const rawClientMac = firstProvidedMac(clientMac, req.body && req.body.client_mac);
+    let normalizedMac = rawClientMac ? normalizeDeviceMac(rawClientMac) : null;
+    if (rawClientMac && !normalizedMac) {
       return res.status(400).json({ success: false, error: 'Invalid client MAC address.', code: 'INVALID_MAC' });
+    }
+    if (!normalizedMac) {
+      // No explicit MAC: identify the device by the address it reached the
+      // portal from. This is the LAN-direct case, where req.ip IS the client.
+      try {
+        const resolved = await resolveClientMacByIp(req.ip);
+        if (resolved.stale) {
+          // The address once belonged to a device whose context is older than
+          // the freshness window; DHCP may have handed it to someone else, so
+          // binding this voucher to that MAC would authorize the wrong guest.
+          // Proceed unidentified — the same outcome as having no fallback.
+          logger.warn(
+            '[auth] refusing stale portal context for ip ' + String(req.ip || '(none)') +
+            ' (device ' + String(resolved.clientMac || '(none)') + ') — ' +
+            'no clientMac in body; the voucher is not bound to that device'
+          );
+        } else {
+          normalizedMac = normalizeDeviceMac(resolved.clientMac);
+          logger.info(
+            '[auth] no clientMac in body — resolved ' + String(normalizedMac || '(none)') +
+            ' from ip ' + String(req.ip || '(none)')
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          '[auth] no clientMac in body and none resolved from ip ' +
+          String(req.ip || '(none)') + ': ' + (err && err.message ? err.message : String(err))
+        );
+      }
     }
 
     // AP / gateway MACs are the identifiers Omada put in the portal URL and
     // expects back in the extPortal/auth body, so send them in the same
     // canonical form (uppercase, colon-separated). Invalid values are passed
     // through unchanged (Omada rejects them) rather than 400'ing here.
-    const normalizedApMac = apMac ? (normalizeDeviceMac(apMac) || String(apMac).trim()) : '';
+    let normalizedApMac = apMac ? (normalizeDeviceMac(apMac) || String(apMac).trim()) : '';
     const normalizedGatewayMac = gatewayMac ? (normalizeDeviceMac(gatewayMac) || String(gatewayMac).trim()) : '';
 
     // Validate client IP format (basic)
@@ -147,10 +190,55 @@ router.post('/', async (req, res, next) => {
     const duration = voucherResult.duration || 60; // minutes
     const voucherTypeResolved = voucherResult.type || voucherType || 'standard';
 
+    // ── Context enrichment from the portal landing record ────────────────
+    // extPortal/auth is connection-type specific: Omada will not accept the
+    // authorization without apMac + ssidName + radioId for a wireless client.
+    // The form normally submits them, but a body that omits them (or sends
+    // null) would otherwise reach the controller incomplete and be rejected.
+    // Fill ONLY the missing fields from the most recent context the landing
+    // beacon stored for this MAC; anything the client did supply is never
+    // overwritten. Best-effort: a missing/legacy table must not fail the login.
+    const missingApMac = !normalizedApMac;
+    const missingSsidName = !ssidName || String(ssidName).trim() === '';
+    const missingRadioId = rawRadioId === undefined || rawRadioId === null || String(rawRadioId).trim() === '';
+    if (normalizedMac && (missingApMac || missingSsidName || missingRadioId)) {
+      try {
+        const ctxRow = await getDb().getOne(
+          `SELECT ap_mac, ssid_name, radio_id
+             FROM portal_client_context
+            WHERE client_mac = ?
+            ORDER BY seen_at DESC LIMIT 1`,
+          [normalizedMac]
+        );
+        if (ctxRow) {
+          if (missingApMac && ctxRow.ap_mac) {
+            normalizedApMac = normalizeDeviceMac(ctxRow.ap_mac) || String(ctxRow.ap_mac).trim();
+          }
+          if (missingSsidName && ctxRow.ssid_name) {
+            ssidName = String(ctxRow.ssid_name).trim();
+          }
+          if (missingRadioId && ctxRow.radio_id !== null && ctxRow.radio_id !== undefined) {
+            const ctxRadioId = parseInt(ctxRow.radio_id, 10);
+            if (Number.isInteger(ctxRadioId) && ctxRadioId >= 0 && ctxRadioId <= 255) {
+              rawRadioId = ctxRadioId;
+            }
+          }
+        }
+      } catch (ctxErr) {
+        // Legacy DBs may predate the context table, and a lookup failure is not
+        // a reason to refuse a voucher — proceed with what the client sent.
+        logger.warn(
+          '[auth] portal context lookup failed for ' + String(normalizedMac || '(none)') +
+          ': ' + (ctxErr && ctxErr.message ? ctxErr.message : String(ctxErr))
+        );
+      }
+    }
+
     // ── Call Omada extPortal/auth ──────────────────────────
     // The portal URL already carries the controller's connection context
     // (radioId, gatewayMac, vid, ...). Prefer the radioId submitted by the
-    // form; fall back to the portal_client_context captured at landing, then 0.
+    // form (or recovered above from the landing record); fall back to the
+    // portal_client_context captured at landing, then 0.
     let radioId = null;
     if (rawRadioId !== undefined && rawRadioId !== null && String(rawRadioId).trim() !== '') {
       const parsedRadioId = parseInt(rawRadioId, 10);
@@ -613,6 +701,29 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
       },
     },
   };
+}
+
+/**
+ * firstProvidedMac — the first MAC value the client actually supplied.
+ *
+ * An absent field (undefined/null) or an empty/whitespace-only string means
+ * "not provided" and is skipped, so the caller can fall through to the
+ * address-based lookup. Anything else is returned as-is for validation — a
+ * non-string (an object, a number) is deliberately NOT skipped: it is a
+ * malformed client payload and must reach the 400 INVALID_MAC branch rather
+ * than silently degrade to an address lookup.
+ *
+ * @param {...*} values candidate values, highest priority first
+ * @returns {*} the first provided value, or '' when none was supplied
+ */
+function firstProvidedMac() {
+  for (let i = 0; i < arguments.length; i += 1) {
+    const value = arguments[i];
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && value.trim() === '') continue;
+    return value;
+  }
+  return '';
 }
 
 function isAllowedRedirect(url) {

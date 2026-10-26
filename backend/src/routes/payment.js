@@ -29,7 +29,7 @@ const {
 } = require('../utils/qos');
 const omadaService = require('../services/omada');
 const { recordSession } = require('../services/session');
-const { loadPortalContext } = require('../utils/portal-context');
+const { loadPortalContext, resolveClientMacByIp } = require('../utils/portal-context');
 const { v4: uuidv4 } = require('uuid');
 const SITE = process.env.OMADA_SITE || 'Default';
 
@@ -525,17 +525,46 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       });
     }
 
-    // client_mac — required for the DIRECT AUTHORIZATION below, but not for the
-    // claim itself. An older portal build, or a device whose Omada context
-    // never reached the beacon, still gets its voucher code; it simply is not
-    // auto-connected. A malformed value is still a client bug worth a 400.
-    const clientMac = parseMac(body.client_mac);
-    if (body.client_mac !== undefined && body.client_mac !== null && body.client_mac !== '' && !clientMac) {
+    // client_mac — the DIRECT AUTHORIZATION target. The portal page sends the
+    // MAC it read from the controller's portal URL (or restored from
+    // localStorage), and that EXPLICIT value wins: behind the cloud tunnel
+    // req.ip is the tunnel's public address while the landing beacon recorded
+    // the guest's LAN address, so the address reverse-lookup finds nothing.
+    // Only a claim that carries no MAC at all is resolved from req.ip — the
+    // LAN-direct case, where the address really is the client.
+    //
+    // Validation is strict: a malformed explicit value is a 400, and a valid
+    // variant (dashes, no separators, lowercase) is sanitized to the canonical
+    // AA:BB:CC:DD:EE:FF form before it is logged, stored or handed to
+    // extPortal/auth. The claim itself does not depend on it: an older portal
+    // build, or a device whose Omada context never reached the beacon, still
+    // gets its voucher code — it simply is not auto-connected.
+    let clientMac = parseMac(body.client_mac);
+    const explicitMacSupplied =
+      body.client_mac !== undefined && body.client_mac !== null && body.client_mac !== '';
+    if (explicitMacSupplied && !clientMac) {
       return res.status(400).json({
         success: false,
         error: 'client_mac must be a valid MAC address.',
         code: 'INVALID_CLIENT_MAC',
       });
+    }
+    let macSource = clientMac ? 'body' : null;
+    if (!clientMac) {
+      try {
+        const resolved = await resolveClientMacByIp(req.ip);
+        clientMac = parseMac(resolved.clientMac);
+        if (clientMac) macSource = 'ip';
+      } catch (err) {
+        // No portal context for this address (normal behind the tunnel until
+        // the page supplies a MAC): the claim proceeds without a direct
+        // authorization, exactly as it did before.
+        console.log(
+          '[payment/claim] no client_mac in body and none resolved from ip ' +
+          String(req.ip || '(none)') + ': ' +
+          (err && err.message ? err.message : String(err))
+        );
+      }
     }
 
     // ap_mac — recorded for traceability in the logs only. The Omada CLOUD
@@ -551,6 +580,7 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     console.log(
       '[payment/claim] attempt suffix=' + refSuffix +
       ' client_mac=' + (clientMac || '(none)') +
+      ' client_mac_source=' + (macSource || 'none') +
       ' ap_mac=' + (apMac || '(none)')
     );
 

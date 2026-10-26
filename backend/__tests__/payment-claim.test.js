@@ -59,13 +59,13 @@ const CLIENT_IP = '10.0.0.5';
  * (POST /api/payment/context). extPortal/auth cannot be called without it, so
  * every authorized claim in this suite depends on this row.
  */
-async function seedPortalContext(clientMac = MAC) {
+async function seedPortalContext(clientMac = MAC, clientIp = CLIENT_IP) {
   const now = new Date().toISOString();
   await getDb().run(
     `INSERT INTO portal_client_context
        (client_mac, client_ip, ap_mac, ssid_name, radio_id, site, seen_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, 0, 'Default', ?, ?, ?)`,
-    [clientMac, CLIENT_IP, AP_MAC, SSID, now, now, now]
+    [clientMac, clientIp, AP_MAC, SSID, now, now, now]
   );
 }
 
@@ -359,6 +359,107 @@ describe('POST /api/payment/claim', () => {
     // in between (not skipped).
     expect(omadaService.authenticateClient.mock.invocationCallOrder[0])
       .toBeLessThan(omadaService.setClientRateLimit.mock.invocationCallOrder[0]);
+  });
+
+  // ── Which device does the claim authorize? ────────────────────────────
+  // The portal arrives through a cloud tunnel, so req.ip is the tunnel's public
+  // address and the landing beacon's LAN address never matches it. The MAC the
+  // page POSTs is therefore the authoritative identity; the address lookup is
+  // only the LAN-direct fallback.
+
+  test('an explicit client_mac wins over the device at the request address', async () => {
+    const OTHER_MAC = '11:22:33:44:55:66';
+    const OTHER_IP = '10.0.0.6';
+    // The request address belongs to a DIFFERENT device: trusting it would
+    // authorize the wrong guest.
+    await seedPortalContext(OTHER_MAC, OTHER_IP);
+    await seedUnclaimed('REF-PICK0001', 50);
+    await seedVoucher('898989', 5000, 'active', null, 30);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .set('X-Forwarded-For', CLIENT_IP)          // the address of MAC, not OTHER_MAC
+      .send({
+        ref_suffix: '0001',
+        mobile_number: MOBILE,
+        client_mac: '11-22-33-44-55-66',           // dashed + lowercase: must be sanitized
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.authorized).toBe(true);
+    // Sanitized to the canonical form before it reaches extPortal/auth.
+    expect(omadaService.authenticateClient).toHaveBeenCalledWith({
+      clientMac: OTHER_MAC,
+      clientIp: OTHER_IP,
+      apMac: AP_MAC,
+      ssidName: SSID,
+      radioId: 0,
+      durationMinutes: 30,
+    });
+
+    const session = await getDb().getOne(
+      'SELECT client_mac, client_ip FROM sessions ORDER BY id DESC LIMIT 1'
+    );
+    expect(session.client_mac).toBe(OTHER_MAC);
+    expect(session.client_ip).toBe(OTHER_IP);
+  });
+
+  test('authorizes an explicit MAC even when the request address has no portal context (cloud tunnel)', async () => {
+    // The deployment case: the request arrives from the tunnel's public
+    // address, which no portal_client_context row can match, while the guest's
+    // own context is stored under its LAN address.
+    await seedUnclaimed('REF-PICK0004', 50);
+    await seedVoucher('929292', 5000, 'active', null, 15);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .set('X-Forwarded-For', '203.0.113.9')     // tunnel egress: unknown to the DB
+      .send({ ref_suffix: '0004', mobile_number: MOBILE, client_mac: MAC });
+
+    expect(res.status).toBe(200);
+    expect(res.body.authorized).toBe(true);
+    expect(omadaService.authenticateClient).toHaveBeenCalledWith({
+      ...AUTH_CTX,
+      durationMinutes: 15,
+    });
+
+    const session = await getDb().getOne('SELECT client_mac FROM sessions ORDER BY id DESC LIMIT 1');
+    expect(session.client_mac).toBe(MAC);
+  });
+
+  test('falls back to the device at the request address when the body has no MAC', async () => {
+    await seedUnclaimed('REF-PICK0002', 50);
+    await seedVoucher('909090', 5000);             // 60-minute voucher
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .set('X-Forwarded-For', CLIENT_IP)
+      .send({ ref_suffix: '0002', mobile_number: MOBILE });
+
+    expect(res.status).toBe(200);
+    expect(res.body.authorized).toBe(true);
+    expect(omadaService.authenticateClient).toHaveBeenCalledWith({
+      ...AUTH_CTX,
+      durationMinutes: 60,
+    });
+
+    const session = await getDb().getOne(
+      'SELECT client_mac FROM sessions ORDER BY id DESC LIMIT 1'
+    );
+    expect(session.client_mac).toBe(MAC);
+  });
+
+  test('a malformed explicit MAC is rejected before any controller call', async () => {
+    await seedUnclaimed('REF-PICK0003', 50);
+    await seedVoucher('919191', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0003', mobile_number: MOBILE, client_mac: 'not-a-mac' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_CLIENT_MAC');
+    expect(omadaService.authenticateClient).not.toHaveBeenCalled();
   });
 
   test('records the granted session so the status page can report time', async () => {

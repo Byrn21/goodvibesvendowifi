@@ -206,6 +206,107 @@ describe('POST /api/auth — Omada context passthrough', () => {
     expect(ctx.vid).toBe('20');
   });
 
+  // ── Which device is being authorized? ─────────────────────────────────
+  // Behind the cloud tunnel req.ip is the tunnel's public address, so the MAC
+  // the page POSTs is the authoritative identity. The address lookup is only
+  // the fallback for a LAN-direct request that carries no MAC at all.
+
+  async function seedContext(clientMac, clientIp, radioId = 0, seenAt = new Date().toISOString()) {
+    const now = seenAt;
+    await getDb().run(
+      `INSERT INTO portal_client_context
+         (client_mac, client_ip, ap_mac, ssid_name, radio_id, site, seen_at, created_at, updated_at)
+       VALUES (?, ?, 'AA:AA:AA:AA:AA:AA', 'GuestWiFi', ?, 'Default', ?, ?, ?)`,
+      [clientMac, clientIp, radioId, now, now, now]
+    );
+  }
+
+  test('the body clientMac wins over the device at the request address', async () => {
+    // The request address belongs to a DIFFERENT device: trusting it would
+    // authorize the wrong guest.
+    await seedContext('AA:AA:AA:AA:AA:11', '10.0.0.5', 1);
+    const spy = jest
+      .spyOn(omada, 'authenticateClient')
+      .mockResolvedValue({ success: true, raw: {} });
+
+    const res = await request(app)
+      .post('/api/auth')
+      .set('X-Forwarded-For', '10.0.0.5')
+      .send({
+        ...BASE,
+        clientMac: 'aa-bb-cc-dd-ee-ff', // dashed + lowercase: sanitized before Omada
+        apMac: 'aa:aa:aa:aa:aa:aa',
+        ssidName: 'GuestWiFi',
+      });
+
+    expect(res.status).toBe(200);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const ctx = spy.mock.calls[0][0];
+    expect(ctx.clientMac).toBe('AA:BB:CC:DD:EE:FF');
+    // radio_id is read for the MAC the page named (unknown → 0), never from
+    // the other device's context row.
+    expect(ctx.radioId).toBe(0);
+  });
+
+  test('resolves the device from the request address when the body omits clientMac', async () => {
+    // Canonical uppercase: the route looks radio_id up by exact MAC match.
+    await seedContext('AA:BB:CC:DD:EE:FF', '10.0.0.5', 1);
+    const spy = jest
+      .spyOn(omada, 'authenticateClient')
+      .mockResolvedValue({ success: true, raw: {} });
+
+    const res = await request(app)
+      .post('/api/auth')
+      .set('X-Forwarded-For', '10.0.0.5')
+      .send({ ...BASE, apMac: 'aa:aa:aa:aa:aa:aa', ssidName: 'GuestWiFi' });
+
+    expect(res.status).toBe(200);
+    const ctx = spy.mock.calls[0][0];
+    expect(ctx.clientMac).toBe('AA:BB:CC:DD:EE:FF');
+    expect(ctx.radioId).toBe(1);
+
+    const voucher = await getDb().getOne('SELECT state, used_by_mac FROM vouchers WHERE code = ?', ['123456']);
+    expect(voucher.state).toBe('used');
+    expect(voucher.used_by_mac).toBe('AA:BB:CC:DD:EE:FF');
+  });
+
+  test('does not bind the voucher to a stale address mapping', async () => {
+    // The address once belonged to a device whose context is hours old: DHCP
+    // may have reassigned it, so the voucher must not be bound to that MAC.
+    const stale = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    await seedContext('AA:BB:CC:DD:EE:FF', '10.0.0.5', 1, stale);
+    const spy = jest
+      .spyOn(omada, 'authenticateClient')
+      .mockResolvedValue({ success: true, raw: {} });
+
+    const res = await request(app)
+      .post('/api/auth')
+      .set('X-Forwarded-For', '10.0.0.5')
+      .send({ ...BASE, apMac: 'aa:aa:aa:aa:aa:aa', ssidName: 'GuestWiFi' });
+
+    expect(res.status).toBe(200);
+    expect(spy.mock.calls[0][0].clientMac).not.toBe('AA:BB:CC:DD:EE:FF');
+
+    const voucher = await getDb().getOne('SELECT used_by_mac FROM vouchers WHERE code = ?', ['123456']);
+    expect(voucher.used_by_mac).not.toBe('AA:BB:CC:DD:EE:FF');
+  });
+
+  test('rejects a malformed body clientMac instead of falling back to the address', async () => {
+    await seedContext('AA:BB:CC:DD:EE:FF', '10.0.0.5');
+    const spy = jest
+      .spyOn(omada, 'authenticateClient')
+      .mockResolvedValue({ success: true, raw: {} });
+
+    const res = await request(app)
+      .post('/api/auth')
+      .set('X-Forwarded-For', '10.0.0.5')
+      .send({ ...BASE, clientMac: 'not-a-mac' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_MAC');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   test('rejects an out-of-range radioId with 400 before calling Omada', async () => {
     const spy = jest
       .spyOn(omada, 'authenticateClient')

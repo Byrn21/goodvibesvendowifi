@@ -601,7 +601,7 @@ limited to 16 kB.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/auth` | Voucher authentication (6-digit code) + Omada authorization. |
+| `POST` | `/api/auth` | Voucher authentication (6-digit code) + Omada authorization. The device MAC is taken from the body `clientMac` (or `client_mac`); only when it is absent is the device resolved from the request address, so a tunnel-fronted portal still authorizes the right guest. |
 | `GET` | `/api/session/status` | Session remaining time. With no query string it resolves the device from the request IP through `portal_client_context` (MAC-direct flow; `502 MISSING_PORTAL_CONTEXT` when the device never loaded the portal). `?sessionId=…`, `?mac=…` (validated, `400 INVALID_MAC` otherwise) and `?voucher=…` still work; behind the cloud tunnel `status.html` uses `?mac=` with the MAC that `assets/portal.js` saved as `device_mac` after a successful claim, since the tunnel's public address never matches `client_ip`. |
 | `POST` | `/api/session/pause` | Pause a premium session. |
 | `POST` | `/api/session/resume` | Resume a paused premium session. |
@@ -635,7 +635,7 @@ Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac? }`
 |---|---|---|
 | `ref_suffix` | yes | Last 4 digits of the payment reference. |
 | `mobile_number` | yes | 11-digit PH mobile (`09XXXXXXXXX`). Saved on the reconciled `webhook_events` row and used as the SMS destination. |
-| `client_mac` | no | The device to authorize. Without it the claim still succeeds, it is just not auto-connected. |
+| `client_mac` | no | The device to authorize. An explicit value is sanitized and always wins; only when it is absent does the backend fall back to the device at the request address (LAN-direct). Without either, the claim still succeeds, it is just not auto-connected. |
 | `ap_mac` | no | Recorded in logs for traceability; the authorization itself uses the AP MAC / SSID / radio ID captured by `POST /api/payment/context`. |
 
 The paying device is authorized **directly** through the controller's web UI API
