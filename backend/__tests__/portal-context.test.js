@@ -461,6 +461,62 @@ describe('Claim Voucher (reference number) submission', () => {
     expect(portal.window.location.href).toBe('');
   });
 
+  test('a successful claim saves the device MAC for status.html (device_mac)', async () => {
+    // The portal is reached through a cloud tunnel, so status.html cannot be
+    // identified by its request address; the claimed MAC saved here is what its
+    // MISSING_PORTAL_CONTEXT fallback queries with.
+    const storage = new Map([['portalClientMac', 'aa-bb-cc-dd-ee-ff']]);
+    const portal = loadPortal({
+      search: '',
+      storage,
+      fetchJson: () => ({ success: true, authorized: true, message: 'Device authorized' }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    // Canonical form, not the dashed value that was stored before the claim.
+    expect(portal.storage.get('device_mac')).toBe(CONTEXT.clientMac);
+    expect(portal.storage.get('portalClientMac')).toBe(CONTEXT.clientMac);
+  });
+
+  test('a voucherCode-only claim saves the device MAC as well', async () => {
+    const portal = loadPortal({
+      search: REDIRECT_SEARCH,
+      fetchJson: () => ({ success: true, authorized: false, voucherCode: '777777' }),
+    });
+
+    expect(portal.storage.has('device_mac')).toBe(false);
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    expect(portal.storage.get('device_mac')).toBe(CONTEXT.clientMac);
+  });
+
+  test('a failed claim saves nothing (no stale device MAC is left behind)', async () => {
+    const portal = loadPortal({
+      search: REDIRECT_SEARCH,
+      fetchOk: false,
+      fetchStatus: 404,
+      fetchJson: () => ({ success: false, code: 'PAYMENT_NOT_FOUND', error: 'Payment not found or already claimed.' }),
+    });
+
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    expect(portal.storage.has('device_mac')).toBe(false);
+  });
+
   test('a voucherCode-only response still falls back to the manual code flow', async () => {
     // The backend replies this way when it could not auto-authorize the device
     // (no MAC context, or Omada refused), so the guest must still get the code.

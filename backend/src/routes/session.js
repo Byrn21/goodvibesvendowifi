@@ -100,20 +100,32 @@ router.get('/status', async (req, res, next) => {
       sessionId = latest.session_id;
     }
 
-    // The payment QR flow does not have a sessionId yet, so it polls with
-    // ?mac=<client_mac>. Resolve the newest non-terminal session for that
-    // device (case-insensitive MAC match); polling continues on 404.
+    // ?mac=<client_mac> — resolve the newest non-terminal session for that
+    // device (case-insensitive MAC match); callers keep polling on 404.
+    //
+    // This is the fallback status.html uses behind the cloud tunnel: the
+    // address-based lookup above answers MISSING_PORTAL_CONTEXT there, because
+    // req.ip is the tunnel's public address rather than the guest's LAN
+    // address, so the page retries with the MAC saved by assets/portal.js when
+    // the claim succeeded. The value is validated (any accepted representation
+    // is canonicalized, anything else is a 400) exactly like ?clientMac= on
+    // the other routes, and only sessions belonging to that MAC are returned.
     if (!sessionId && mac && typeof mac === 'string') {
       const normalized = normalizeMac(mac);
-      const row = normalized
-        ? await getDb().getOne(
-            `SELECT session_id FROM sessions
-              WHERE LOWER(client_mac) = LOWER(?)
-                AND state IN ('active', 'paused', 'pending_payment', 'pending_verification')
-              ORDER BY id DESC LIMIT 1`,
-            [normalized]
-          )
-        : null;
+      if (!normalized) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid client MAC address.',
+          code: 'INVALID_MAC',
+        });
+      }
+      const row = await getDb().getOne(
+        `SELECT session_id FROM sessions
+          WHERE LOWER(client_mac) = LOWER(?)
+            AND state IN ('active', 'paused', 'pending_payment', 'pending_verification')
+          ORDER BY id DESC LIMIT 1`,
+        [normalized]
+      );
       if (row && row.session_id) {
         sessionId = row.session_id;
       } else {

@@ -602,7 +602,7 @@ limited to 16 kB.
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/api/auth` | Voucher authentication (6-digit code) + Omada authorization. |
-| `GET` | `/api/session/status` | Session remaining time. With no query string it resolves the device from the request IP through `portal_client_context` (MAC-direct flow; `502 MISSING_PORTAL_CONTEXT` when the device never loaded the portal). `?sessionId=…`, `?mac=…` and `?voucher=…` still work. |
+| `GET` | `/api/session/status` | Session remaining time. With no query string it resolves the device from the request IP through `portal_client_context` (MAC-direct flow; `502 MISSING_PORTAL_CONTEXT` when the device never loaded the portal). `?sessionId=…`, `?mac=…` (validated, `400 INVALID_MAC` otherwise) and `?voucher=…` still work; behind the cloud tunnel `status.html` uses `?mac=` with the MAC that `assets/portal.js` saved as `device_mac` after a successful claim, since the tunnel's public address never matches `client_ip`. |
 | `POST` | `/api/session/pause` | Pause a premium session. |
 | `POST` | `/api/session/resume` | Resume a paused premium session. |
 | `POST` | `/api/session/expire` | Expire a session (admin/internal). |
@@ -642,6 +642,10 @@ The paying device is authorized **directly** through the controller's web UI API
 (`omadaService.authenticateClient` → `POST …/api/v2/hotspot/extPortal/auth`)
 **before** the claim is written — so the customer does not have to type a code at
 all — and only once the controller has accepted is the payment marked claimed.
+That same transaction records the guest's `sessions` row (duration, tier,
+bandwidth snapshot and the controller context the authorization used), because
+the MAC-direct flow never passes through `POST /api/auth`: without it, status
+polling, Pause/Resume and the expiration worker would have nothing to act on.
 Because that call needs the device's AP MAC / SSID / radio ID, a device that has
 never loaded the portal cannot be auto-connected; the request answers
 `502 MISSING_PORTAL_CONTEXT` and consumes nothing (see

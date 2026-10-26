@@ -22,9 +22,15 @@ const { rateLimit } = require('express-rate-limit');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
 const { computeMinutesFromAmount } = require('../utils/duration');
-const { resolveCustomRateLimit } = require('../utils/qos');
+const {
+  normalizeBandwidthKbps,
+  normalizeVoucherType,
+  resolveCustomRateLimit,
+} = require('../utils/qos');
 const omadaService = require('../services/omada');
+const { recordSession } = require('../services/session');
 const { loadPortalContext } = require('../utils/portal-context');
+const { v4: uuidv4 } = require('uuid');
 const SITE = process.env.OMADA_SITE || 'Default';
 
 // ── Per-IP rate limiter (stricter than the global apiLimiter) ──────────
@@ -610,7 +616,7 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // milliseconds and must never be divided by 60000 — it is already the
     // exact total-minutes value the session, Omada and the SMS report.
     const voucher = await db.getOne(
-      `SELECT id, code, duration_minutes FROM vouchers
+      `SELECT id, code, type, duration_minutes, down_kbps, up_kbps FROM vouchers
         WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
         ORDER BY id ASC LIMIT 1`,
       [amountCentavos]
@@ -650,11 +656,15 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     let authorized = false;
     let authError = null;
     let authErrorCode = null;
+    // Kept beyond the try below: the session recorded after the commit reuses
+    // the exact controller context the authorization was built from.
+    let portalContext = null;
 
     if (clientMac && minutes > 0) {
       authAttempted = true;
       try {
         const portal = await loadPortalContext(clientMac);
+        portalContext = portal;
         const auth = await omadaService.authenticateClient({
           clientMac,
           clientIp: portal.clientIp,
@@ -738,7 +748,43 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
           throw httpError(404, 'PAYMENT_NOT_FOUND', 'Payment not found or already claimed.');
         }
 
-        return { voucherCode: voucher.code, refNo: event.ref_no };
+        // ── Record the granted session ──────────────────────────────────
+        // /api/auth records a session when a voucher is redeemed. A claim never
+        // goes through that route (it authorizes the MAC on the controller
+        // itself), so without this insert the guest would hold a live Omada
+        // authorization that no local row accounts for: /api/session/status
+        // would answer SESSION_NOT_FOUND for the very device that paid, the
+        // expiration worker would never sweep the session, and Pause/Resume
+        // would have nothing to act on.
+        //
+        // Written INSIDE this transaction, immediately after the authorization
+        // has been accepted, so a session row exists exactly when the claim
+        // committed: if the conditional updates above roll back, this insert
+        // rolls back with them and no orphan session is left for a payment that
+        // was never claimed.
+        let sessionId = null;
+        if (authorized) {
+          sessionId = 'sess_' + uuidv4().replace(/-/g, '').slice(0, 16);
+          await recordSession({
+            sessionId,
+            clientMac,
+            // The controller connection context the authorization used, so a
+            // later re-authorization / pause rebuilds the same request.
+            clientIp: portalContext ? portalContext.clientIp : '',
+            apMac: (portalContext && portalContext.apMac) || apMac || '',
+            ssidName: portalContext ? portalContext.ssidName : '',
+            duration: minutes,                 // minutes, never seconds
+            voucherUsed: voucher.code,
+            voucherType: normalizeVoucherType(voucher.type),
+            // NULL (tier/default caps) unless the voucher carries its own pair,
+            // matching what a voucher login records.
+            downKbps: normalizeBandwidthKbps(voucher.down_kbps),
+            upKbps: normalizeBandwidthKbps(voucher.up_kbps),
+            totalDurationSeconds: minutes * 60,
+          }, tx);
+        }
+
+        return { voucherCode: voucher.code, refNo: event.ref_no, sessionId };
       });
     } catch (err) {
       if (err.code === 'PAYMENT_NOT_FOUND' || err.code === 'NO_VOUCHER_AVAILABLE') {
@@ -781,7 +827,10 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         : {}),
     });
 
-    console.log('[payment/claim] claimed voucher ' + claim.voucherCode + ' for ref ' + claim.refNo);
+    console.log(
+      '[payment/claim] claimed voucher ' + claim.voucherCode + ' for ref ' + claim.refNo +
+      ' (session ' + (claim.sessionId || '(none)') + ')'
+    );
 
     res.json({
       success: true,

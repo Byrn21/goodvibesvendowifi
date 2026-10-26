@@ -433,6 +433,33 @@
         return cleaned.match(/.{2}/g).join(':');
       }
 
+      // localStorage keys that may hold this device's MAC, most specific first.
+      //  - device_mac      written by assets/portal.js when /api/payment/claim
+      //                    succeeds (the MAC-direct flow saves it for this page)
+      //  - portalClientMac written by the login / auto-reconnect / success pages
+      // This page and the portal share an origin, so a claim made on the portal
+      // page is visible here even though the tunnel hides the guest's address.
+      var SAVED_MAC_KEYS = ['device_mac', 'portalClientMac'];
+
+      /**
+       * readSavedMac — the MAC last saved on this origin, canonicalized.
+       * Never throws: storage may be blocked in a captive mini browser.
+       * @returns {string} canonical MAC, or '' when nothing usable is stored
+       */
+      function readSavedMac() {
+        for (var i = 0; i < SAVED_MAC_KEYS.length; i += 1) {
+          var raw = '';
+          try {
+            raw = window.localStorage.getItem(SAVED_MAC_KEYS[i])
+              || window.sessionStorage.getItem(SAVED_MAC_KEYS[i])
+              || '';
+          } catch (e) { raw = ''; }
+          var mac = normalizeMac(raw);
+          if (mac) return mac;
+        }
+        return '';
+      }
+
       // Plan tiers allowed to pause/resume. Mirrors the backend policy
       // (services/session.js → isPausableVoucherType, which routes/session.js
       // returns as 403 PREMIUM_ONLY for any other tier). Keep the two in sync.
@@ -486,6 +513,15 @@
       var countdownTimer = null;
       var localSeconds = null;
       var totalSeconds = null;   // used to calculate ring fill ratio
+
+      // The query string that last produced a session. Behind the cloud tunnel
+      // the identifier-less (address-based) query can NEVER succeed, so once a
+      // fallback has worked — ?mac=<device_mac>, say — every later poll starts
+      // with that query instead of re-sending the doomed one every 30 s. It is
+      // cleared as soon as the pinned query stops finding a session, so the page
+      // returns to the full order (a different identifier may now be the one
+      // that answers).
+      var pinnedQuery = null;
 
       // ---- Helpers ----
       function pad(n) { return String(n).padStart(2, '0'); }
@@ -565,13 +601,13 @@
       // ---- API calls ----
       // Query strings this page will try, in order.
       //
-      // '' (no query at all) is the MAC-direct path and is ALWAYS tried: the
+      // '' (no query at all) is the MAC-direct path and is tried first: the
       // status API maps the caller's address to the device MAC captured when the
-      // guest landed on the portal, so this page needs no voucher code, session
-      // id or MAC from its URL or storage. The identifier lookups stay as
-      // fallbacks — a sessionId handed over by success.html is fresher than the
-      // device lookup, and a stored session id is what still reports a genuinely
-      // expired session.
+      // guest landed on the portal. The saved-identity lookups follow as the
+      // fallback — a sessionId handed over by success.html is fresher than the
+      // device lookup, and the MAC / stored session id still answer when the
+      // address is useless (every guest behind the cloud tunnel, where the
+      // backend only ever sees the tunnel's public address).
       function statusQueries() {
         var list = [];
         var bySession = SESSION_ID ? '?sessionId=' + encodeURIComponent(SESSION_ID) : '';
@@ -584,9 +620,29 @@
         return list;
       }
 
+      // The identity saved on this origin for THIS device, as a query string.
+      // The MAC comes first: assets/portal.js saves it as `device_mac` when a
+      // claim succeeds, and that is the value the backend authorized. A session
+      // id is the fallback for links handed over by success.html / the login
+      // flow. '' means this device has never been identified on this origin.
+      function savedIdentityQuery() {
+        if (CLIENT_MAC) return '?mac=' + encodeURIComponent(CLIENT_MAC);
+        if (SESSION_ID) return '?sessionId=' + encodeURIComponent(SESSION_ID);
+        return '';
+      }
+
       function fetchStatus(index) {
         var queries = statusQueries();
-        var at = (typeof index === 'number') ? index : 0;
+        var at;
+        if (typeof index === 'number') {
+          at = index;
+        } else if (pinnedQuery !== null) {
+          // A periodic poll (or a Refresh) re-uses the query that last worked.
+          var pinnedAt = queries.indexOf(pinnedQuery);
+          at = pinnedAt === -1 ? 0 : pinnedAt;
+        } else {
+          at = 0;
+        }
 
         // Every identifier and the device lookup itself are exhausted.
         if (!queries.length || at >= queries.length) {
@@ -609,13 +665,28 @@
                 // No session under this identifier — try the next one (e.g. the
                 // device lookup found nothing because the plan ended; the stored
                 // session id then answers "expired" instead of "not found").
+                // A pinned query that stopped matching is no longer preferred,
+                // so the next poll runs the full order again.
+                if (queries[at] === pinnedQuery) pinnedQuery = null;
                 fetchStatus(at + 1);
               } else if (res.status === 502 && errCode === 'MISSING_PORTAL_CONTEXT') {
-                // The server could not map this request to a device. Another
-                // identifier may still find the session; when none does, say
-                // what fixes it instead of claiming the session is gone.
-                if (at + 1 < queries.length) fetchStatus(at + 1);
-                else showUnknown(MISSING_CONTEXT_MESSAGE);
+                // The server could not map this request to a device. Behind the
+                // cloud tunnel that is the EXPECTED answer for the
+                // identifier-less query: req.ip is the tunnel's public address,
+                // so it can never match the LAN address the guest landed on the
+                // portal from. Fall back at once to the identity saved on this
+                // origin (?mac=<device_mac>, else ?sessionId=<stored id>).
+                var fallback = savedIdentityQuery();
+                var fallbackAt = fallback ? queries.indexOf(fallback) : -1;
+                if (fallbackAt > at) {
+                  fetchStatus(fallbackAt);
+                } else if (at + 1 < queries.length) {
+                  fetchStatus(at + 1);
+                } else {
+                  // Nothing saved either — say what fixes it instead of
+                  // claiming the session is gone.
+                  showUnknown(MISSING_CONTEXT_MESSAGE);
+                }
               } else {
                 // Server error (5xx), rate limit, or other failure —
                 // NOT a "not found" case; show the retry-friendly screen.
@@ -624,6 +695,10 @@
               }
               return;
             }
+            // This query identified the device — prefer it for the rest of
+            // the page's life so the polls stop repeating the request that
+            // cannot work (the address lookup behind the tunnel).
+            pinnedQuery = queries[at];
             renderStatus(res.body);
           })
           .catch(function (err) {
@@ -680,7 +755,13 @@
         var resolvedMac = normalizeMac(data.clientMac) || '';
         if (resolvedMac) CLIENT_MAC = resolvedMac;
         try {
-          if (resolvedMac) window.localStorage.setItem('portalClientMac', resolvedMac);
+          // device_mac is what this page (and assets/portal.js) reads first, so
+          // a poll that identified the device by address keeps the tunnel
+          // fallback working on the next visit.
+          if (resolvedMac) {
+            window.localStorage.setItem('device_mac', resolvedMac);
+            window.localStorage.setItem('portalClientMac', resolvedMac);
+          }
           window.localStorage.setItem('portalSessionId', SESSION_ID);
           window.sessionStorage.setItem('portalSessionId', SESSION_ID);
         } catch (e) { /* storage unavailable */ }
@@ -825,8 +906,10 @@
       // even when all of these are empty):
       //   1. URL ?sessionId=  (set by portal.js / success.html after login)
       //   2. URL ?clientMac=  (Omada's own parameter name; ?mac= accepted too)
-      //   3. localStorage     (persisted at login — survives redirects, but may
-      //                        be stale, which is why a URL MAC outranks it)
+      //   3. localStorage     (device_mac saved by assets/portal.js after a
+      //                        successful claim, else portalClientMac persisted
+      //                        at login — survives redirects, but may be stale,
+      //                        which is why a URL MAC outranks it)
       //   4. sessionStorage   (tab-scoped fallback)
       var params = new URLSearchParams(window.location.search);
       var urlSessionId = params.get('sessionId') || '';
@@ -836,9 +919,8 @@
       try {
         storedSessionId = window.localStorage.getItem('portalSessionId')
           || window.sessionStorage.getItem('portalSessionId') || '';
-        storedClientMac = window.localStorage.getItem('portalClientMac')
-          || window.sessionStorage.getItem('portalClientMac') || '';
       } catch (e) { /* storage unavailable */ }
+      storedClientMac = readSavedMac();
 
       SESSION_ID = urlSessionId || storedSessionId || (CONFIG.sessionId || '');
       SESSION_ID_FROM_URL = Boolean(urlSessionId);
@@ -852,7 +934,10 @@
             window.localStorage.setItem('portalSessionId', urlSessionId);
             window.sessionStorage.setItem('portalSessionId', urlSessionId);
           }
-          if (CLIENT_MAC) window.localStorage.setItem('portalClientMac', CLIENT_MAC);
+          if (CLIENT_MAC) {
+            window.localStorage.setItem('device_mac', CLIENT_MAC);
+            window.localStorage.setItem('portalClientMac', CLIENT_MAC);
+          }
         } catch (e) { /* storage unavailable */ }
       }
 

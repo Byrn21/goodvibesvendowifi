@@ -1671,6 +1671,37 @@
     };
   }
 
+  // Where status.html looks for the device a claim belongs to. The portal is
+  // served through a cloud tunnel, so when status.html asks the backend for
+  // "this device" the address the backend sees is the tunnel's public address,
+  // never the guest's LAN address recorded by the landing beacon — the
+  // address-based lookup therefore answers MISSING_PORTAL_CONTEXT. Saving the
+  // claimed MAC here (same origin as status.html) is what lets that page fall
+  // back to /api/session/status?mac=<mac> instead of giving up.
+  var DEVICE_MAC_STORAGE_KEY = 'device_mac';
+
+  /**
+   * rememberDeviceIdentity — persist the device a successful claim belongs to.
+   *
+   * The claim response carries no device id (it reports the voucher and the
+   * granted minutes), so the MAC comes from this page's own context — the very
+   * value the claim POSTed as client_mac and the backend authorized.
+   * `portalClientMac` is written alongside it because success.html and
+   * status.html already read that key.
+   *
+   * Called only AFTER the claim succeeded, so a failed attempt never leaves a
+   * stale MAC behind. Never throws: with storage blocked the page keeps
+   * working and status.html simply stays on the address lookup.
+   */
+  function rememberDeviceIdentity() {
+    var mac = normalizeMac(getDeviceContext().clientMac) || '';
+    if (!mac) return;
+    try {
+      window.localStorage.setItem(DEVICE_MAC_STORAGE_KEY, mac);
+      window.localStorage.setItem(CONTEXT_STORAGE_KEYS.clientMac, mac);
+    } catch (e) { /* storage unavailable — status.html falls back to the address lookup */ }
+  }
+
   // POST /api/payment/claim { ref_suffix, mobile_number, client_mac, ap_mac }
   // and drive the modal states. The device context is sent with the claim so the
   // backend can authorize THIS device directly (no code to type).
@@ -1751,8 +1782,13 @@
           'Your payment may still be fine \u2014 please tap Try Again in a moment.'
         );
       } else if (res.ok && data.success && data.authorized) {
+        // Remember the device before the hand-off to success.html / status.html.
+        rememberDeviceIdentity();
         showClaimAuthorized();
       } else if (data.voucherCode) {
+        // Claimed but not auto-authorized (the guest still connects manually).
+        // The device is still known here, so the status page gets the same help.
+        rememberDeviceIdentity();
         showClaimSuccess(data.voucherCode);
       } else {
         showClaimFailure(data.error || 'We could not verify that payment. Please check the digits and try again.');

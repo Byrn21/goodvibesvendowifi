@@ -361,6 +361,84 @@ describe('POST /api/payment/claim', () => {
       .toBeLessThan(omadaService.setClientRateLimit.mock.invocationCallOrder[0]);
   });
 
+  test('records the granted session so the status page can report time', async () => {
+    await seedUnclaimed('REF-SESS0001', 50);
+    await seedVoucher('868686', 5000, 'active', null, 30);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: MOBILE, client_mac: MAC });
+
+    expect(res.status).toBe(200);
+    expect(res.body.authorized).toBe(true);
+
+    const session = await getDb().getOne(
+      'SELECT * FROM sessions WHERE client_mac = ? ORDER BY id DESC LIMIT 1',
+      [MAC]
+    );
+    expect(session).toBeTruthy();
+    // Same id shape as the voucher-login route (/api/auth).
+    expect(session.session_id).toMatch(/^sess_[0-9a-f]{16}$/);
+    expect(session.state).toBe('active');
+    expect(session.duration_minutes).toBe(30);
+    expect(session.voucher_used).toBe('868686');
+    expect(session.voucher_type).toBe('standard');
+    // The controller context the authorization used travels with the session.
+    expect(session.client_ip).toBe(CLIENT_IP);
+    expect(session.ap_mac).toBe(AP_MAC);
+    expect(session.ssid_name).toBe(SSID);
+    expect(session.total_duration_seconds).toBe(30 * 60);
+    expect(new Date(session.expires_at).getTime() - new Date(session.started_at).getTime())
+      .toBe(30 * 60 * 1000);
+
+    // The point of the row: the MAC-direct status lookup now resolves it.
+    const status = await request(app).get('/api/session/status?mac=' + encodeURIComponent(MAC));
+    expect(status.status).toBe(200);
+    expect(status.body.sessionId).toBe(session.session_id);
+    expect(status.body.state).toBe('active');
+    expect(status.body.remainingSeconds).toBeGreaterThan(29 * 60);
+  });
+
+  test('records the voucher tier and its per-voucher bandwidth caps', async () => {
+    await seedUnclaimed('REF-SESS0002', 25);
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, down_kbps, up_kbps, state)
+       VALUES ('878787', 'Premium', 45, 2500, 5000, 1024, 'active')`
+    );
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0002', mobile_number: MOBILE, client_mac: MAC });
+    expect(res.body.authorized).toBe(true);
+
+    const session = await getDb().getOne(
+      `SELECT voucher_type, down_kbps, up_kbps, duration_minutes
+         FROM sessions WHERE client_mac = ?`,
+      [MAC]
+    );
+    // Stored lowercased, so pause/resume and the QoS rules agree on the tier.
+    expect(session.voucher_type).toBe('premium');
+    expect(session.down_kbps).toBe(5000);
+    expect(session.up_kbps).toBe(1024);
+    expect(session.duration_minutes).toBe(45);
+  });
+
+  test('records no session when the claim could not authorize the device', async () => {
+    await seedUnclaimed('REF-SESS0003', 50);
+    await seedVoucher('888888', 5000);
+
+    // No client_mac: the voucher is claimed but nothing is connected.
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0003', mobile_number: MOBILE });
+
+    expect(res.status).toBe(200);
+    expect(res.body.authorized).toBe(false);
+
+    const sessions = await getDb().getOne('SELECT COUNT(*) AS n FROM sessions');
+    expect(sessions.n).toBe(0);
+  });
+
   test('applies the premium caps when the amount is a premium tier price', async () => {
     const savedDown = process.env.PREMIUM_DOWN_MBPS;
     const savedUp = process.env.PREMIUM_UP_KBPS;
@@ -759,6 +837,17 @@ describe('GET /api/session/status?mac=', () => {
     expect(res.status).toBe(200);
     expect(res.body.state).toBe('active');
     expect(res.body.sessionId).toBe('sess_status1');
+  });
+
+  test('rejects a malformed MAC with 400 INVALID_MAC', async () => {
+    // The tunnel fallback sends whatever MAC was saved on the page, so a
+    // corrupted value must be refused explicitly instead of quietly reported
+    // as "no session".
+    for (const bad of ['not-a-mac', 'aa:bb:cc:dd:ee', 'aa:bb:cc:dd:ee:ff:00']) {
+      const res = await request(app).get('/api/session/status?mac=' + encodeURIComponent(bad));
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('INVALID_MAC');
+    }
   });
 
   test('returns 404 when no session exists for the MAC', async () => {
