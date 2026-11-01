@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#2d6a4f">
   <title>GoodVibesVendoWifi</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <link rel="stylesheet" href="assets/style.css?v=8">
+  <link rel="stylesheet" href="assets/style.css?v=9">
   <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <style>
     /* ============================================================
@@ -437,7 +437,8 @@
       // session can be found for it yet. That is a different problem from "your
       // session ended", and reloading the portal is what fixes it.
       var MISSING_CONTEXT_MESSAGE =
-        'We could not identify this device yet. Open the Wi-Fi portal page once, then tap Refresh.';
+        'We could not identify this device yet. If you are on mobile data, turn off mobile data ' +
+        'and reconnect to the Wi-Fi, then tap Refresh. Otherwise open the Wi-Fi portal page once.';
 
       function normalizeMac(mac) {
         if (!mac) return null;
@@ -623,7 +624,41 @@
         }
       }
 
+      // ---- Auto-return to the login page ----
+      // A session that has ended (the local ticker reached zero, the backend
+      // reported it expired, or no session could be found at all) leaves this
+      // page with nothing left to show, so the guest is handed back to
+      // index.html to enter a new voucher — after a short grace period, so the
+      // reason on screen can actually be read first.
+      //
+      // A missing portal context is deliberately NOT redirected: that guest is
+      // usually on mobile data and needs the screen to stay put while they read
+      // the warning and fix their connection.
+      var LOGIN_REDIRECT_DELAY = 5000;
+      var loginRedirectTimer = null;
+
+      function cancelLoginRedirect() {
+        if (loginRedirectTimer !== null) {
+          clearTimeout(loginRedirectTimer);
+          loginRedirectTimer = null;
+        }
+      }
+
+      function scheduleLoginRedirect() {
+        // Idempotent: a zero-tick, the expired answer it triggers and a later
+        // not-found answer can all describe the same ended session, and the
+        // guest must still be sent back exactly once.
+        if (loginRedirectTimer !== null) return;
+        loginRedirectTimer = setTimeout(function () {
+          loginRedirectTimer = null;
+          window.location.href = 'index.html';
+        }, LOGIN_REDIRECT_DELAY);
+      }
+
       function showSection(name) {
+        // A live (or frozen) session is not going anywhere: make sure a redirect
+        // armed by an earlier zero-tick cannot fire while it is on screen.
+        if (name === 'active' || name === 'paused') cancelLoginRedirect();
         if (name !== 'active') stopCountdown();
         [els.loading, els.active, els.paused, els.expired, els.unknown, els.connError]
           .forEach(function (el) { if (el) el.classList.add('hidden'); });
@@ -634,11 +669,15 @@
 
       // Show the not-found screen. `message` replaces the default explanation
       // when this device could not be identified at all (MISSING_PORTAL_CONTEXT).
-      function showUnknown(message) {
+      function showUnknown(message, autoRedirect) {
         if (els.unknownMessage) {
           els.unknownMessage.textContent = message || DEFAULT_UNKNOWN_MESSAGE;
         }
         showSection('unknown');
+        // "No session for this device" is terminal, so head back to login. The
+        // missing-context screen passes false: it is a fixable device-identity
+        // problem, not an ended session, and the guest must read it first.
+        if (autoRedirect !== false) scheduleLoginRedirect();
       }
 
       function updateCountdownDisplay(totalSecs) {
@@ -700,6 +739,9 @@
           els.expiredMessage.textContent = hard
             ? 'This Premium pass reached its absolute expiry, so it can no longer be paused or resumed — even if it still had frozen time left. Purchase a new session or enter a voucher to reconnect.'
             : 'Your WiFi session has ended. Purchase a new session or enter a voucher to reconnect.';
+          // Say what happens next, so the automatic return to login is not a
+          // surprise: the redirect is armed for LOGIN_REDIRECT_DELAY ms.
+          els.expiredMessage.textContent += ' Returning to the login page shortly.';
         }
 
         if (els.expiredTimestamp) {
@@ -724,6 +766,10 @@
         updateCountdownDisplay(localSeconds);
         if (localSeconds <= 0) {
           stopCountdown();
+          // Time is up locally. Confirm with the backend (which is the
+          // authority) and start the return trip; a poll that still reports a
+          // live session cancels it through showSection().
+          scheduleLoginRedirect();
           fetchStatus();
         }
       }
@@ -841,7 +887,7 @@
                 } else {
                   // Nothing saved either — say what fixes it instead of
                   // claiming the session is gone.
-                  showUnknown(MISSING_CONTEXT_MESSAGE);
+                  showUnknown(MISSING_CONTEXT_MESSAGE, false);
                 }
               } else {
                 // Server error (5xx), rate limit, or other failure —
@@ -1004,6 +1050,7 @@
           localSeconds = 0;
           renderExpired(data);
           showSection('expired');
+          scheduleLoginRedirect();
         } else {
           showUnknown();
         }

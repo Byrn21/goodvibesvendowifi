@@ -38,8 +38,12 @@ const STATUS_JS = (() => {
 const MAC = 'AA:BB:CC:DD:EE:FF';
 const SESSION_ID = 'sess_tunnel_1';
 
+// Mirrors status.html's MISSING_CONTEXT_MESSAGE. The mobile-data sentence is
+// deliberate: that warning is most often seen by a guest whose phone dropped
+// the Wi-Fi, and it names the fix instead of only saying "open the portal".
 const MISSING_CONTEXT_MESSAGE =
-  'We could not identify this device yet. Open the Wi-Fi portal page once, then tap Refresh.';
+  'We could not identify this device yet. If you are on mobile data, turn off mobile data ' +
+  'and reconnect to the Wi-Fi, then tap Refresh. Otherwise open the Wi-Fi portal page once.';
 
 // ── Minimal DOM stub ────────────────────────────────────────────
 function makeClassList() {
@@ -559,6 +563,55 @@ describe('status.html — Premium hard expiry notice and expired screen', () => 
     expect(status.getEl('expired-heading').textContent).toBe('Session Expired');
     expect(status.getEl('expired-message').textContent).toContain('Your WiFi session has ended');
     expect(status.getEl('expired-timestamp').textContent).toContain('Session expired on');
+  });
+
+  test('an expired session returns the guest to login after the 5 s grace period', async () => {
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      responses: [MISSING_CONTEXT, {
+        test: /[?&]mac=/,
+        status: 200,
+        body: {
+          ...ACTIVE_SESSION.body,
+          state: 'expired',
+          remainingSeconds: 0,
+          expireReason: 'time_expired',
+          expire_reason: 'time_expired',
+        },
+      }],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.getEl('session-expired').classList.contains('hidden')).toBe(false);
+    // The guest is told what is about to happen before it happens.
+    expect(status.getEl('expired-message').textContent).toContain('Returning to the login page');
+
+    const redirect = (status.timers || []).find((t) => t.ms === 5000);
+    expect(redirect).toBeTruthy();
+    expect(status.window.location.href).toBe('');
+
+    redirect.fn();
+    expect(status.window.location.href).toBe('index.html');
+  });
+
+  test('the missing-context warning stays put instead of redirecting', async () => {
+    // A device the server cannot identify (mobile data, tunnel, no beacon) is a
+    // fixable identity problem, not an ended session: the warning must stay on
+    // screen long enough to be read.
+    const status = loadStatus({
+      search: '',
+      responses: [{ test: /\/api\/session\/status/, status: 502, body: { code: 'MISSING_PORTAL_CONTEXT' } }],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.getEl('session-unknown').classList.contains('hidden')).toBe(false);
+    expect(status.getEl('unknown-message').textContent).toBe(MISSING_CONTEXT_MESSAGE);
+    expect((status.timers || []).some((t) => t.ms === 5000)).toBe(false);
   });
 });
 
