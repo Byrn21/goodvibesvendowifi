@@ -2545,14 +2545,17 @@
     );
   }
 
-  // A session that exists and has time left behind it. These are exactly the
-  // states the backend binds to this browser (it sets portal_session on the
-  // response), so they are the only ones worth redirecting to status.html.
-  function isLiveSessionState(state) {
-    return state === 'active'
-      || state === 'paused'
-      || state === 'pending_payment'
-      || state === 'pending_verification';
+  // Did this response actually bind the browser to a session?
+  //
+  // GET /api/session/status?voucher= answers a FLAT object. When it finds a
+  // live session it sets the portal_session cookie, echoes the same signed
+  // value as `statusToken`, and includes the `sessionId`; when it does not
+  // (an unused voucher, an expired one, an unknown code) all three are absent.
+  // The payload itself is therefore the authority on whether status.html can
+  // identify this device — no list of state names kept in sync with the
+  // server, which is how this gate drifted out of step before.
+  function hasBoundSession(data) {
+    return !!(data && (data.statusToken || data.sessionId));
   }
 
   // Navigate to the status page, carrying the signed identity when the backend
@@ -2622,13 +2625,13 @@
         return;
       }
 
-      // Live session: this response just set the identity cookie, so hand the
+      // Bound session: this response set the identity cookie, so hand the
       // guest straight to the status page instead of reporting the time inside
       // the modal. Every other outcome (unused voucher, expired, not found)
       // has no session to bind and stays here — redirecting on those would
       // land on status.html with no identity, i.e. the "open the portal once"
       // warning, which is not what the guest asked for.
-      if (isLiveSessionState(data.state)) {
+      if (hasBoundSession(data)) {
         setStatusResult('Session found \u2014 opening your status page\u2026', 'success');
         openSessionStatusPage(data.statusToken);
         return;

@@ -614,8 +614,24 @@ async function handleVoucherStatus(req, res, voucher) {
     });
   }
 
-  // Unconsumed voucher: its full duration is still available.
-  if (row.state === 'active' || row.state === 'claimed') {
+  // The session this code already created, if any. Resolved BEFORE the
+  // "unused voucher" answer below, because a CLAIMED voucher can own a LIVE
+  // session: POST /api/payment/claim authorizes the paying device and marks
+  // the voucher 'claimed' in the same transaction. Answering "unused, full
+  // duration available" there would hide a session that is already counting
+  // down — and deny the browser the identity that keeps status.html working
+  // once it drops to mobile data (the mobile-data bug this lookup fixes).
+  //
+  // getSessionByVoucher -> getSession() applies server-side expiry, so an
+  // active-but-timed-out session comes back as state 'expired'.
+  const session = await getSessionByVoucher(code);
+
+  // Unconsumed voucher with NO session behind it at all: its full duration is
+  // still available. A claimed voucher whose claim never authorized a device
+  // lands here too, which is correct — nothing is running yet. A voucher with
+  // any session row (live OR elapsed) must fall through instead, so an elapsed
+  // claim answers EXPIRED rather than pretending the code was never used.
+  if (!session && (row.state === 'active' || row.state === 'claimed')) {
     return res.json({
       success: true,
       active: true,
@@ -626,11 +642,6 @@ async function handleVoucherStatus(req, res, voucher) {
       durationMinutes: row.duration_minutes || 60,
     });
   }
-
-  // Consumed ('used'): the answer lives on the session the code created.
-  // getSessionByVoucher -> getSession() applies server-side expiry, so an
-  // active-but-timed-out session comes back as state 'expired'.
-  const session = await getSessionByVoucher(code);
 
   // ── Live session found: bind this browser to it ─────────────────────
   // The voucher code is the one credential a returning guest always has, so

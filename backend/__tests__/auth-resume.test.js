@@ -712,4 +712,76 @@ describe('GET /api/session/status?voucher= — identity cookie', () => {
     expect(res.body.code).toBe('VOUCHER_NOT_FOUND');
     expect(readSessionCookieLine(res)).toBe('');
   });
+
+  /**
+   * A voucher left 'claimed' by POST /api/payment/claim, plus (optionally) the
+   * session that claim recorded when it authorized the paying device. The
+   * claim commits BOTH in one transaction (routes/payment.js), so the live
+   * session and the 'claimed' voucher state genuinely coexist on a real claim.
+   */
+  async function seedClaimedVoucher(code, minutes, sessionId) {
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, state, assigned_ref_no)
+       VALUES (?, 'standard', ?, 'claimed', ?)`,
+      [code, minutes, 'PAY-' + code]
+    );
+    if (!sessionId) return;
+    await sessionService.recordSession({
+      sessionId,
+      clientMac: MAC,
+      duration: minutes,
+      voucherUsed: code,
+      voucherType: 'standard',
+    });
+  }
+
+  // The claim flow marks the voucher 'claimed' and records its live session in
+  // the same transaction. Answering "unused" for that code would hide a
+  // session already counting down — and leave the browser unbound, which is
+  // exactly the skipped redirect this regression covers.
+  test('a CLAIMED voucher with a live session reports the session and binds the browser', async () => {
+    await seedClaimedVoucher('810008', 60, 'sess_claim_cookie');
+
+    const res = await request(app).get('/api/session/status?voucher=810008');
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.state).toBe('active');
+    expect(res.body.sessionId).toBe('sess_claim_cookie');
+    expect(res.body.remainingSeconds).toBeGreaterThan(3500);
+    expect(readSessionCookieLine(res)).not.toBe('');
+    expect(res.body.statusToken).toBe(readCookieToken(res));
+
+    // The browser is now identified by that identity alone — the mobile-data
+    // case the redirect depends on.
+    const status = await request(app).get(
+      '/api/session/status?token=' + encodeURIComponent(res.body.statusToken)
+    );
+    expect(status.status).toBe(200);
+    expect(status.body.sessionId).toBe('sess_claim_cookie');
+  });
+
+  test('a CLAIMED voucher that never authorized a device still reports unused', async () => {
+    await seedClaimedVoucher('810009', 30, null);
+
+    const res = await request(app).get('/api/session/status?voucher=810009');
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('unused');
+    expect(res.body.remainingSeconds).toBe(30 * 60);
+    expect(readSessionCookieLine(res)).toBe('');
+    expect(res.body.statusToken).toBeUndefined();
+  });
+
+  test('a CLAIMED voucher whose session elapsed reports EXPIRED without binding', async () => {
+    await seedClaimedVoucher('810010', 60, 'sess_claim_elapsed');
+    await sessionService.expireSession('sess_claim_elapsed', 'time_expired');
+
+    const res = await request(app).get('/api/session/status?voucher=810010');
+
+    expect(res.status).toBe(200);
+    expect(res.body.active).toBe(false);
+    expect(res.body.error).toBe('EXPIRED');
+    expect(readSessionCookieLine(res)).toBe('');
+  });
 });
