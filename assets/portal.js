@@ -1505,6 +1505,23 @@
       var name = def.name || method;
       var badge = tile.querySelector('.payment-tile__badge');
 
+      // Custom logo uploaded in the admin panel (a data URI stored in the
+      // payment_methods table). When present it replaces the bundled
+      // assets/images/<method>.png; a null/absent value keeps the bundled one,
+      // so a failed or never-configured logo can never blank the tile.
+      if (typeof def.logoBase64 === 'string' && def.logoBase64) {
+        var logo = tile.querySelector('.payment-tile__logo');
+        if (logo) {
+          var currentSrc = (typeof logo.getAttribute === 'function' && logo.getAttribute('src')) || logo.src || '';
+          if (currentSrc !== def.logoBase64) {
+            // Assigned through the property so the browser resolves and
+            // repaints it immediately (works for data URIs and http(s) URLs).
+            logo.src = def.logoBase64;
+          }
+          logo.alt = name + ' logo';
+        }
+      }
+
       if (def.enabled) {
         tile.classList.remove('payment-tile--unavailable');
         tile.removeAttribute('disabled');

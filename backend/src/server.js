@@ -178,7 +178,25 @@ app.use(cors((req, cb) => {
 }));
 
 app.use(compression());
-app.use(express.json({ limit: '16kb' }));
+
+// JSON bodies are capped at 16 kB — that is plenty for every portal and admin
+// call, and keeping it small bounds what an unauthenticated client can push.
+//
+// The ONE exception is an admin logo upload
+// (PUT /api/admin/payment-methods/:key): a Base64 image cannot fit in 16 kB, so
+// that exact request gets a 2 MB parser instead (the route then rejects
+// anything over 200 kB of Base64 with a clear 400 — see routes/admin.js).
+//
+// The choice has to be made HERE, in a single middleware ahead of routing: an
+// express.json() mounted on the route would never run, because this parser has
+// already consumed the stream — and answered 413 — by then.
+const jsonDefault = express.json({ limit: '16kb' });
+const jsonLogoUpload = express.json({ limit: '2mb' });
+app.use((req, res, next) => {
+  const isLogoUpload = req.method === 'PUT' &&
+    /^\/api\/admin\/payment-methods\/[^/]+$/.test(req.path);
+  return (isLogoUpload ? jsonLogoUpload : jsonDefault)(req, res, next);
+});
 app.use(express.urlencoded({ extended: true, limit: '16kb' }));
 
 // ── Rate limiting ────────────────────────────────────────────

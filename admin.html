@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GoodVibesVendoWifi</title>
-  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="assets/style.css?v=7">
   <style>
     body {
       background: var(--surface-2);
@@ -798,31 +798,54 @@
       // toggle here takes effect for the next guest that opens the portal — no
       // restart and no redeploy.
 
+      // Bundled fallback logos, used when a method has no custom upload.
+      var PAYMENT_METHOD_DEFAULT_LOGOS = {
+        gcash: 'assets/images/gcash.png',
+        maya: 'assets/images/maya.png',
+        qrph: 'assets/images/qrph.png'
+      };
+
       function renderPaymentMethods(methods) {
-        var html = '<ul class="admin-method-list">';
+        var html = '<div class="admin-method-list">';
         methods.forEach(function (m) {
           var key = escapeHtml(m.key);
           var name = escapeHtml(m.name);
+          var hasCustomLogo = !!m.logoBase64;
+          var logoSrc = hasCustomLogo ? m.logoBase64 : (PAYMENT_METHOD_DEFAULT_LOGOS[m.key] || '');
           html +=
-            '<li class="admin-method-row' + (m.enabled ? '' : ' is-disabled') + '">' +
+            '<div class="admin-method-row' + (m.enabled ? '' : ' is-disabled') + '">' +
               '<div class="admin-method-row__info">' +
-                '<span class="admin-method-row__name">' + name + '</span>' +
-                '<span class="admin-method-row__status' + (m.enabled ? ' is-on' : '') + '">' +
-                  (m.enabled ? 'Live' : 'Temporarily unavailable') +
-                '</span>' +
+                '<img class="admin-method-row__thumb" alt="' + name + ' logo" src="' + escapeHtml(logoSrc) + '">' +
+                '<div class="admin-method-row__text">' +
+                  '<span class="admin-method-row__name">' + name + '</span>' +
+                  '<span class="admin-method-row__status' + (m.enabled ? ' is-on' : '') + '">' +
+                    (m.enabled ? 'Live' : 'Temporarily unavailable') +
+                  '</span>' +
+                '</div>' +
               '</div>' +
-              '<label class="admin-toggle">' +
-                '<input type="checkbox" role="switch" class="admin-toggle__input"' +
-                  ' data-method-key="' + key + '"' + (m.enabled ? ' checked' : '') +
-                  ' aria-label="Enable ' + name + '">' +
-                '<span class="admin-toggle__track" aria-hidden="true">' +
-                  '<span class="admin-toggle__thumb"></span>' +
-                '</span>' +
-              '</label>' +
-            '</li>';
+              '<div class="admin-method-row__controls">' +
+                '<label class="admin-method-row__upload" data-upload-label="' + key + '">' +
+                  'Upload logo' +
+                  '<input type="file" class="admin-method-row__file" accept="image/*"' +
+                    ' data-logo-key="' + key + '" aria-label="Upload a custom logo for ' + name + '">' +
+                '</label>' +
+                (hasCustomLogo
+                  ? '<button type="button" class="admin-method-row__reset" data-reset-logo="' + key + '">Reset</button>'
+                  : '') +
+                '<label class="admin-toggle">' +
+                  '<input type="checkbox" role="switch" class="admin-toggle__input"' +
+                    ' data-method-key="' + key + '"' + (m.enabled ? ' checked' : '') +
+                    ' aria-label="Enable ' + name + '">' +
+                  '<span class="admin-toggle__track" aria-hidden="true">' +
+                    '<span class="admin-toggle__thumb"></span>' +
+                  '</span>' +
+                '</label>' +
+              '</div>' +
+            '</div>';
         });
-        html += '</ul>';
-        html += '<p class="muted admin-method-hint">Guests who open the portal after a change see the new state immediately.</p>';
+        html += '</div>';
+        html += '<p class="muted admin-method-hint">Changes apply to the next guest who opens the portal. ' +
+          'Uploaded logos are resized to 160 px and stored in the database (max 200 kB).</p>';
         return html;
       }
 
@@ -887,15 +910,135 @@
         });
       }
 
-      // One delegated listener for every switch: the list is re-rendered after
-      // each successful save, so per-element handlers would go stale.
+      // ---- Custom Base64 logos ----
+      // The chosen file is read with FileReader, downscaled on a canvas and sent
+      // as a data URI. Downscaling is what keeps a phone-camera photo from
+      // becoming a multi-megabyte request: a 160 px PNG is normally a few kB,
+      // far below the API's 200 kB cap and the 2 MB body limit.
+      var LOGO_MAX_DIMENSION = 160;      // px on the long edge
+      var LOGO_MAX_CHARS = 200 * 1024;   // matches routes/admin.js MAX_LOGO_LENGTH
+
+      function readLogoFile(file) {
+        return new Promise(function (resolve, reject) {
+          if (!file) { reject(new Error('No file selected.')); return; }
+          if (!/^image\//.test(file.type || '')) {
+            reject(new Error('Please choose an image file.'));
+            return;
+          }
+
+          var reader = new FileReader();
+          reader.onerror = function () { reject(new Error('The image could not be read.')); };
+          reader.onload = function () {
+            var img = new Image();
+            img.onerror = function () { reject(new Error('That file is not a supported image.')); };
+            img.onload = function () {
+              try {
+                var scale = Math.min(1, LOGO_MAX_DIMENSION / Math.max(img.width || 1, img.height || 1));
+                var w = Math.max(1, Math.round((img.width || 1) * scale));
+                var h = Math.max(1, Math.round((img.height || 1) * scale));
+
+                var canvas = document.createElement('canvas');
+                canvas.width = w;
+                canvas.height = h;
+                var ctx = canvas.getContext('2d');
+                if (!ctx) { reject(new Error('This browser cannot process images.')); return; }
+                ctx.drawImage(img, 0, 0, w, h);
+
+                // PNG keeps transparency (most wallet logos are transparent).
+                // A photographic image can still exceed the cap, so fall back
+                // to JPEG before giving up.
+                var dataUri = canvas.toDataURL('image/png');
+                if (dataUri.length > LOGO_MAX_CHARS) {
+                  dataUri = canvas.toDataURL('image/jpeg', 0.85);
+                }
+                if (dataUri.length > LOGO_MAX_CHARS) {
+                  reject(new Error('That image is too detailed to store. Please use a simpler or smaller logo.'));
+                  return;
+                }
+
+                resolve(dataUri);
+              } catch (e) {
+                reject(new Error('The image could not be processed.'));
+              }
+            };
+            img.src = String(reader.result);
+          };
+          reader.readAsDataURL(file);
+        });
+      }
+
+      // Shared PUT for the logo controls. `logoBase64: null` clears the custom
+      // logo. Only the logo is sent, so the availability switch is never
+      // touched by an upload.
+      function savePaymentMethodLogo(key, logoBase64) {
+        var container = els.paymentMethods;
+        var input = container && container.querySelector('.admin-method-row__file[data-logo-key="' + key + '"]');
+        var label = container && container.querySelector('[data-upload-label="' + key + '"]');
+        var resetBtn = container && container.querySelector('[data-reset-logo="' + key + '"]');
+
+        if (input) input.disabled = true;
+        if (label) label.classList.add('is-busy');
+        if (resetBtn) resetBtn.disabled = true;
+
+        return api('/api/admin/payment-methods/' + encodeURIComponent(key), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ logoBase64: logoBase64 })
+        }).then(function (res) {
+          if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to save the logo');
+          var methods = (res.data && res.data.methods) || [];
+          if (els.paymentMethods && methods.length) {
+            els.paymentMethods.innerHTML = renderPaymentMethods(methods);
+          }
+          showPaymentMethodsMessage((res.data && res.data.message) || 'Logo saved.', false);
+        }).catch(function (err) {
+          showPaymentMethodsMessage(err.message, true);
+          // The list was NOT re-rendered on failure, so the original controls
+          // are still in the DOM and can be re-enabled.
+          if (input) { input.disabled = false; input.value = ''; }
+          if (label) label.classList.remove('is-busy');
+          if (resetBtn) resetBtn.disabled = false;
+        });
+      }
+
+      function handleLogoFileSelected(key, file) {
+        readLogoFile(file).then(function (dataUri) {
+          return savePaymentMethodLogo(key, dataUri);
+        }).catch(function (err) {
+          showPaymentMethodsMessage(err.message, true);
+          var container = els.paymentMethods;
+          var input = container && container.querySelector('.admin-method-row__file[data-logo-key="' + key + '"]');
+          if (input) input.value = '';
+        });
+      }
+
+      // Delegated listeners: the list is re-rendered after each successful save,
+      // so per-element handlers would go stale immediately.
       if (els.paymentMethods) {
+        // Availability switch (sends enabled only).
         els.paymentMethods.addEventListener('change', function (e) {
           var input = e.target.closest('.admin-toggle__input');
           if (!input) return;
           var key = input.getAttribute('data-method-key');
           if (!key) return;
           updatePaymentMethod(key, input.checked, input);
+        });
+
+        // Logo upload — saves immediately, no separate Save button.
+        els.paymentMethods.addEventListener('change', function (e) {
+          var fileInput = e.target.closest('.admin-method-row__file');
+          if (!fileInput) return;
+          var key = fileInput.getAttribute('data-logo-key');
+          var file = fileInput.files && fileInput.files[0];
+          if (!key || !file) return;
+          handleLogoFileSelected(key, file);
+        });
+
+        // Revert to the bundled logo.
+        els.paymentMethods.addEventListener('click', function (e) {
+          var btn = e.target.closest('[data-reset-logo]');
+          if (!btn) return;
+          savePaymentMethodLogo(btn.getAttribute('data-reset-logo'), null);
         });
       }
 

@@ -13,8 +13,9 @@
  *   PUT    /api/admin/vouchers/:id — Update a voucher
  *   DELETE /api/admin/vouchers/:id — Delete a voucher
  *   GET    /api/admin/sessions   — List active sessions
- *   POST   /api/admin/sessions/:id/expire — Force-expire a session
- *   GET    /api/admin/stats      — Dashboard statistics
+ *   POST   /api/admin/sessions/:id/expire — Force-expire a session *   GET    /api/admin/stats     — Dashboard statistics
+ *   GET    /api/admin/payment-methods        — Payment method availability + logos
+ *   PUT    /api/admin/payment-methods/:key   — Enable/disable a method, set/clear its logo
  *   GET    /api/admin/transactions — Paginated webhook payment transactions
  *   DELETE /api/admin/transactions — Clear all webhook payment transaction logs
  */
@@ -33,7 +34,7 @@ const {
 const {
   isKnownMethod,
   listPaymentMethodStates,
-  setPaymentMethodActive,
+  updatePaymentMethod,
 } = require('../services/payment-methods');
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
@@ -735,12 +736,64 @@ router.get('/payment-methods', async (req, res, next) => {
   }
 });
 
-// Enable or disable one method. Body: { enabled: boolean }.
+// Custom logo limits. The body is capped at 2 MB for this route (server.js);
+// MAX_LOGO_LENGTH keeps the stored value — and everything the captive portal
+// downloads on every page load — an order of magnitude below that.
+const MAX_LOGO_LENGTH = 200 * 1024; // 200 kB of Base64 text
+// A complete data URI of a raster image. SVG is deliberately NOT accepted: an
+// inline SVG can carry script, and it is rendered as an image in the portal.
+const LOGO_DATA_URI_RE = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=\r\n]+$/;
+
+/**
+ * Validate the logo field of a delivery-method update.
+ *
+ * `null` or '' clears the custom logo (revert to the bundled asset); anything
+ * else must be a Base64 data URI of an allowed raster type within the size cap.
+ *
+ * @param {*} raw
+ * @returns {{ok: true, value: string|null}|{ok: false, error: string}}
+ */
+function parseLogoBase64(raw) {
+  if (raw === null || raw === '') return { ok: true, value: null };
+  if (typeof raw !== 'string') {
+    return { ok: false, error: 'logoBase64 must be a Base64 data URI string or null.' };
+  }
+
+  // The portal drops the value straight into <img src>, so surrounding
+  // whitespace (a pasted line break, a BOM) must not reach the database.
+  const value = raw.trim();
+
+  if (value.length > MAX_LOGO_LENGTH) {
+    return {
+      ok: false,
+      error: 'Logo is too large (' + Math.round(value.length / 1024) +
+        ' kB). Maximum is ' + Math.round(MAX_LOGO_LENGTH / 1024) + ' kB — use a smaller image.',
+    };
+  }
+  if (!LOGO_DATA_URI_RE.test(value)) {
+    return {
+      ok: false,
+      error: 'logoBase64 must be a data URI of type png, jpeg, webp or gif (e.g. data:image/png;base64,…).',
+    };
+  }
+
+  return { ok: true, value };
+}
+
+// Enable/disable a method and/or replace its logo.
 //
-// The key is checked against the known list (not passed through to SQL) and
-// `enabled` must be a real boolean: accepting "false" as a truthy string would
-// silently enable the method the admin just tried to turn off. The response
-// carries the whole list so the admin UI can re-render from one answer.
+// Body: { enabled?: boolean, logoBase64?: string | null }
+//   - both fields are optional, but at least one is required
+//   - only the supplied fields change (a toggle cannot wipe a logo, an upload
+//     cannot flip the switch)
+//   - `enabled` must be a real boolean: accepting "false" as a truthy string
+//     would silently enable the method the admin just tried to turn off
+//   - `logoBase64: null` clears the custom logo; the portal falls back to the
+//     bundled assets/images/<method>.png
+//
+// The key is checked against the known list (never passed through to SQL) and
+// the response carries the whole list so the admin UI can re-render from one
+// answer.
 router.put('/payment-methods/:key', async (req, res, next) => {
   try {
     const key = String(req.params.key || '').toLowerCase();
@@ -753,7 +806,24 @@ router.put('/payment-methods/:key', async (req, res, next) => {
     }
 
     const body = req.body || {};
-    if (typeof body.enabled !== 'boolean') {
+    const hasEnabled = Object.prototype.hasOwnProperty.call(body, 'enabled');
+    // logoBase64 is the documented name; logo_base64 is accepted as an alias so
+    // an integration written against the snake_case spelling still works.
+    const hasLogo = Object.prototype.hasOwnProperty.call(body, 'logoBase64') ||
+      Object.prototype.hasOwnProperty.call(body, 'logo_base64');
+    const rawLogo = Object.prototype.hasOwnProperty.call(body, 'logoBase64')
+      ? body.logoBase64
+      : body.logo_base64;
+
+    if (!hasEnabled && !hasLogo) {
+      return res.status(400).json({
+        success: false,
+        error: 'Send enabled and/or logoBase64.',
+        code: 'NOTHING_TO_UPDATE',
+      });
+    }
+
+    if (hasEnabled && typeof body.enabled !== 'boolean') {
       return res.status(400).json({
         success: false,
         error: 'enabled must be a boolean (true or false).',
@@ -761,14 +831,35 @@ router.put('/payment-methods/:key', async (req, res, next) => {
       });
     }
 
-    const updated = await setPaymentMethodActive(key, body.enabled);
+    const updates = {};
+    if (hasEnabled) updates.enabled = body.enabled;
+    if (hasLogo) {
+      const logo = parseLogoBase64(rawLogo);
+      if (!logo.ok) {
+        return res.status(400).json({
+          success: false,
+          error: logo.error,
+          code: 'INVALID_LOGO',
+        });
+      }
+      updates.logoBase64 = logo.value;
+    }
+
+    const updated = await updatePaymentMethod(key, updates);
     const methods = await listPaymentMethodStates();
+
+    let message;
+    if (hasEnabled && hasLogo) message = updated.name + ' saved.';
+    else if (hasLogo) message = updated.logoBase64
+      ? updated.name + ' logo updated.'
+      : updated.name + ' logo reset to the default image.';
+    else message = updated.name + (updated.enabled ? ' enabled.' : ' disabled.');
 
     res.json({
       success: true,
       method: updated,
       methods,
-      message: updated.name + (updated.enabled ? ' enabled.' : ' disabled.'),
+      message,
     });
   } catch (err) {
     next(err);

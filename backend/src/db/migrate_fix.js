@@ -103,6 +103,24 @@ const WEBHOOK_EVENTS_COLUMNS = [
   { name: 'processed_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP', after: 'status' },
 ];
 
+// Columns that may be missing from older production databases
+// Derived from schema.sql — payment_methods table.
+//
+// logo_base64 holds an admin-uploaded data URI (or NULL for the bundled logo).
+// TEXT on both engines: SQLite has no fixed width, and PostgreSQL TEXT is
+// unlimited, which is what a Base64 image needs.
+//
+// The table itself is created by schema.sql (Phase 2 of migrate.js), so
+// reconcileTable() finds no table on a legacy database and skips it — the
+// CREATE TABLE then brings the column along. This list exists for databases
+// that already had payment_methods before the logo feature was added.
+const PAYMENT_METHODS_COLUMNS = [
+  { name: 'display_name', type: 'VARCHAR(64)', after: 'method_key' },
+  { name: 'is_active', type: 'BOOLEAN DEFAULT TRUE', after: 'display_name' },
+  { name: 'logo_base64', type: 'TEXT', after: 'is_active' },
+  { name: 'updated_at', type: 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP', after: 'logo_base64' },
+];
+
 /**
  * Check if a column exists in a given table.
  * @param {Object} db - Database connection
@@ -216,6 +234,14 @@ async function fixMissingColumns() {
   // (ref_no, amount, status, processed_at may all be missing on legacy DBs —
   //  the webhook INSERT and its duplicate-payment guard need every one.)
   await reconcileTable(db, 'webhook_events', WEBHOOK_EVENTS_COLUMNS);
+
+  // --- Payment methods table (admin availability + custom logos) ---
+  // Adds logo_base64 (and any other missing column) to a payment_methods table
+  // that predates the logo feature. ALTER TABLE ADD COLUMN cannot add a NOT NULL
+  // column without a DEFAULT, so the types here are nullable-friendly; the
+  // duplicate-column error is swallowed by reconcileTable, which makes this
+  // safe to re-run on every deploy.
+  await reconcileTable(db, 'payment_methods', PAYMENT_METHODS_COLUMNS);
 
   // --- Pending payment verification table (new — ensure it exists on old DBs) ---
   // Written by POST /api/payment/claim before MacroDroid is asked to read the

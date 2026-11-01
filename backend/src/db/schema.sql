@@ -197,6 +197,11 @@ CREATE TABLE IF NOT EXISTS payment_methods (
     method_key   VARCHAR(32) PRIMARY KEY, -- 'gcash' | 'maya' | 'qrph'
     display_name VARCHAR(64) NOT NULL,
     is_active    BOOLEAN NOT NULL DEFAULT TRUE, -- SQLite stores 1/0; PostgreSQL stores true/false
+    -- Admin-uploaded logo as a complete data URI (data:image/png;base64,…).
+    -- NULL = use the bundled asset (assets/images/<method>.png). Written by
+    -- PUT /api/admin/payment-methods/:key and served to the portal as
+    -- logoBase64 on GET /api/payment/methods.
+    logo_base64  TEXT,
     updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

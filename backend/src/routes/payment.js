@@ -31,7 +31,7 @@ const omadaService = require('../services/omada');
 const { recordSession } = require('../services/session');
 const { loadPortalContext, resolveClientMacByIp } = require('../utils/portal-context');
 const { macroDroidVerifyUrl, PENDING_CLAIM_TTL_MS } = require('../config');
-const { getPaymentMethodAvailability } = require('../services/payment-methods');
+const { listPaymentMethodStates } = require('../services/payment-methods');
 const { v4: uuidv4 } = require('uuid');
 const SITE = process.env.OMADA_SITE || 'Default';
 
@@ -443,6 +443,10 @@ router.post('/context', contextLimiter, async (req, res, next) => {
  * badge instead of silently dropping the option. A method with no row is
  * reported as enabled, so an unmigrated database keeps every option working.
  *
+ * `logoBase64` is an optional admin-uploaded logo (a complete data URI) stored
+ * in the same table. When it is null the portal keeps the bundled asset
+ * (assets/images/<method>.png).
+ *
  * UNAUTHENTICATED by design: the captive portal must fetch this before the
  * client has been authorized. The payload is read-only and the QR it exposes
  * is exactly what the customer is meant to scan; it grants no access on its
@@ -454,12 +458,19 @@ function envOrEmpty(name) {
 }
 
 async function buildPaymentMethods() {
-  const availability = await getPaymentMethodAvailability();
+  const states = await listPaymentMethodStates();
+  const byKey = {};
+  states.forEach((state) => { byKey[state.key] = state; });
+  const stateOf = (key) => byKey[key] || {};
 
   return {
     gcash: {
       name: 'GCash',
-      enabled: availability.gcash !== false,
+      enabled: stateOf('gcash').enabled !== false,
+      // Admin-uploaded logo (data URI) or null when the bundled asset is used.
+      // The portal swaps <img src> when this is present; the receiver details
+      // below are unrelated and always come from the environment.
+      logoBase64: stateOf('gcash').logoBase64 || null,
       qrImage: envOrEmpty('GCASH_QR_B64'),
       accountName: envOrEmpty('GCASH_NAME'),
       accountNumber: envOrEmpty('GCASH_NUMBER'),
@@ -473,7 +484,8 @@ async function buildPaymentMethods() {
     },
     maya: {
       name: 'Maya',
-      enabled: availability.maya !== false,
+      enabled: stateOf('maya').enabled !== false,
+      logoBase64: stateOf('maya').logoBase64 || null,
       qrImage: envOrEmpty('MAYA_QR_B64'),
       accountName: envOrEmpty('MAYA_NAME'),
       accountNumber: envOrEmpty('MAYA_NUMBER'),
@@ -487,7 +499,8 @@ async function buildPaymentMethods() {
     },
     qrph: {
       name: 'QR Ph',
-      enabled: availability.qrph !== false,
+      enabled: stateOf('qrph').enabled !== false,
+      logoBase64: stateOf('qrph').logoBase64 || null,
       qrImage: envOrEmpty('QRPH_QR_B64'),
       accountName: envOrEmpty('QRPH_NAME'),
       accountNumber: envOrEmpty('QRPH_NUMBER'),

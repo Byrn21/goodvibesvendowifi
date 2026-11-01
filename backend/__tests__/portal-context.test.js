@@ -39,6 +39,16 @@ const REDIRECT_SEARCH =
   '&ssidName=GoodVibesVendoWifi&radioId=1&clientIp=10.0.0.5';
 
 // ── Minimal DOM stub ────────────────────────────────────────────
+// portal.js resolves a tile's <img class="payment-tile__logo"> so it can swap
+// in an admin-uploaded logo. Child lookups return a stable element for that one
+// selector so the assignment is observable from a test; every other child
+// lookup still returns null, exactly as before.
+const TILE_LOGOS = new Map();
+function tileLogo(id) {
+  if (!TILE_LOGOS.has(id)) TILE_LOGOS.set(id, createElement('img:' + id));
+  return TILE_LOGOS.get(id);
+}
+
 function createElement(id) {
   const listeners = {};
   return {
@@ -62,7 +72,10 @@ function createElement(id) {
     appendChild() {},
     removeChild() {},
     insertAdjacentHTML() {},
-    querySelector() { return null; },
+    querySelector(sel) {
+      if (sel === '.payment-tile__logo') return tileLogo(id);
+      return null;
+    },
     querySelectorAll() { return []; },
     closest() { return null; },
     focus() {},
@@ -702,5 +715,53 @@ describe('Claim Voucher (reference number) submission', () => {
 
     // Let resetClaimModal's focus timeout settle so no timer leaks.
     await new Promise((resolve) => setTimeout(resolve, 80));
+  });
+});
+
+// ── Admin-uploaded payment logos ────────────────────────────────
+// GET /api/payment/methods reports an optional `logoBase64` per method (the
+// data URI an admin uploaded). The portal swaps the tile's <img> to it on page
+// load; methods without one keep the bundled assets/images/<method>.png.
+describe('custom payment-method logos', () => {
+  const CUSTOM_LOGO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA';
+
+  function methodsPayload() {
+    return {
+      gcash: { name: 'GCash', enabled: true, logoBase64: CUSTOM_LOGO },
+      maya: { name: 'Maya', enabled: true, logoBase64: null },
+      qrph: { name: 'QR Ph', enabled: false, logoBase64: null },
+    };
+  }
+
+  function tileLogoImg(portal, method) {
+    return portal
+      .getEl('sel:.payment-tile[data-payment="' + method + '"]')
+      .querySelector('.payment-tile__logo');
+  }
+
+  test('renders the uploaded logo instead of the bundled asset', async () => {
+    const portal = loadPortal({
+      search: '',
+      fetchResponse: (url) => (url.indexOf('/api/payment/methods') !== -1
+        ? { ok: true, status: 200, payload: methodsPayload() }
+        : null),
+    });
+    await portal.flush();
+
+    expect(tileLogoImg(portal, 'gcash').src).toBe(CUSTOM_LOGO);
+    expect(tileLogoImg(portal, 'gcash').alt).toBe('GCash logo');
+  });
+
+  test('leaves the bundled asset in place when no custom logo exists', async () => {
+    const portal = loadPortal({
+      search: '',
+      fetchResponse: (url) => (url.indexOf('/api/payment/methods') !== -1
+        ? { ok: true, status: 200, payload: methodsPayload() }
+        : null),
+    });
+    await portal.flush();
+
+    // Never assigned: the tile keeps whatever src index.html shipped with.
+    expect(tileLogoImg(portal, 'maya').src).toBeUndefined();
   });
 });

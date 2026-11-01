@@ -540,7 +540,15 @@ Served to the frontend by `GET /api/payment/methods`; each defaults to `''`
 when unset. Whether a method is offered at all is **not** an environment
 variable: it is the `is_active` column of the `payment_methods` table, toggled
 from the admin panel's **Payment Methods** page (`npm run db:migrate` creates and
-seeds the table; the seed never overwrites an admin's choice). The `*_QR_B64` values are complete data-URI strings
+seeds the table; the seed never overwrites an admin's choice).
+
+A custom logo uploaded on that page is stored in `payment_methods.logo_base64`
+and overrides the default `assets/images/<method>.png` in the portal. Images are
+resized to 160 px in the browser before upload (PNG, falling back to JPEG for
+detailed photos), and the API accepts at most 200 kB of Base64 in a
+data-URI-encoded raster format (`png`, `jpeg`, `webp`, `gif`; SVG is rejected
+because an inline SVG can carry script). That one route gets a 2 MB JSON body
+limit; every other route keeps the 16 kB cap. The `*_QR_B64` values are complete data-URI strings
 (e.g. `data:image/png;base64,iVBORw0KGgo…`).
 
 | Variable | Description |
@@ -751,6 +759,13 @@ the table (migration not run) degrades the same way instead of taking the paymen
 page down. The guest portal does not hide a disabled method: it greys the tile
 out, sets the `disabled` attribute and shows a "Temporarily Unavailable" badge.
 
+Each method also carries `logoBase64`: the data URI of a logo uploaded in the
+admin panel, or `null` to keep the bundled `assets/images/<method>.png`. The
+portal swaps the tile's `<img src>` when it is set, so a custom logo appears on
+the next page load with no HTML or rebuild change. The value is stored in
+`payment_methods.logo_base64` — a `TEXT` column, since a Base64 image cannot live
+in a fixed width.
+
 #### `POST /api/payment/claim`
 
 Manual fallback: submit a reference number when the automatic interception has
@@ -851,7 +866,7 @@ returns `voucherCode` and `minutes`. `Cache-Control: no-store`; an unknown
 | `POST` | `/api/admin/sessions/:id/expire` | Force-expire a session. |
 | `GET` | `/api/admin/stats` | Dashboard statistics. |
 | `GET` | `/api/admin/payment-methods` | Payment method availability (`gcash`, `maya`, `qrph`). |
-| `PUT` | `/api/admin/payment-methods/:key` | Enable/disable one method. Body `{ "enabled": true|false }`; the response carries the updated full list. |
+| `PUT` | `/api/admin/payment-methods/:key` | Enable/disable a method and/or replace its logo. Body `{ "enabled": true|false, "logoBase64": "data:image/png;base64,…" }` — both fields optional, but at least one required; `logoBase64: null` reverts to the bundled image. Only supplied fields change. The response carries the updated full list. |
 
 ### Static pages
 

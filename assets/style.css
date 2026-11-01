@@ -1430,19 +1430,24 @@ body {
    "Temporarily Unavailable" badge, so a guest sees that the option exists but
    is not currently accepted instead of wondering where it went. */
 .payment-tile--unavailable {
-  opacity: 0.55;
-  filter: grayscale(1);
+  filter: grayscale(100%);
+  opacity: 0.5;
+  pointer-events: none;
   cursor: not-allowed;
   background: var(--surface-2, #f1f5f9);
 }
 
-.payment-tile--unavailable:hover {
-  border-color: var(--border);
-  box-shadow: none;
-  transform: none;
-  background: var(--surface-2, #f1f5f9);
+/* Explicit on the child <img> as well: filter is inherited by the tile's whole
+   subtree, but stating it on the logo means the grayscale survives any future
+   rule that isolates the image (its own stacking context, an opacity/animation
+   on the icon wrapper, a browser that drops filters on inherited elements). */
+.payment-tile--unavailable .payment-tile__logo,
+.payment-tile--unavailable img {
+  filter: grayscale(100%);
+  opacity: 0.9;
 }
 
+.payment-tile--unavailable:hover,
 .payment-tile--unavailable:active {
   border-color: var(--border);
   box-shadow: none;
@@ -2247,9 +2252,10 @@ body {
 }
 
 /* ── Payment Methods settings (admin) ─────────────────────────────
-   One row per e-wallet with a switch. The source of truth is the
-   payment_methods table; the switch only reflects what the backend
-   accepted (the row is re-rendered from the PUT response). */
+   One row per e-wallet: thumbnail + name + status pill on the left, logo
+   control + availability switch on the right. Rendered as plain <div>s (not
+   <ul>/<li>) so no list reset is needed and an unstyled page degrades to
+   readable blocks instead of a bulleted run-on. */
 .admin-method-list {
   list-style: none;
   margin: 16px 0 0;
@@ -2268,7 +2274,7 @@ body {
   border: 1px solid var(--border-color, #e2e8f0);
   border-radius: 8px;
   background-color: var(--card-bg, #fff);
-  transition: opacity 0.2s ease, border-color 0.2s ease;
+  transition: opacity 0.2s ease, background-color 0.2s ease;
 }
 
 .admin-method-row.is-disabled {
@@ -2279,27 +2285,122 @@ body {
   opacity: 0.65;
 }
 
+/* Left group: logo + wording */
 .admin-method-row__info {
   display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.admin-method-row__thumb {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  border: 1px solid var(--border-color, #e2e8f0);
+  background-color: #fff;
+  object-fit: contain;
+  padding: 3px;
+}
+
+.admin-method-row__text {
+  display: flex;
   flex-direction: column;
-  gap: 2px;
+  align-items: flex-start;
+  gap: 4px;
   min-width: 0;
 }
 
 .admin-method-row__name {
+  display: block;
   font-size: 0.95rem;
   font-weight: 600;
   color: var(--text-color, #0f172a);
+  line-height: 1.2;
 }
 
+/* Status pill — the margin/gap above is what keeps the method name and its
+   availability from ever rendering as one run-together string. */
 .admin-method-row__status {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: #b45309; /* amber — not offering this method right now */
+  display: inline-block;
+  margin-left: 0;
+  margin-top: 2px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background-color: #fef3c7; /* amber — not offering this method right now */
+  color: #92400e;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .admin-method-row__status.is-on {
-  color: #15803d; /* green — live in the portal */
+  background-color: #dcfce7; /* green — live in the portal */
+  color: #166534;
+}
+
+/* Right group: logo upload + switch */
+.admin-method-row__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.admin-method-row__upload {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color, #e2e8f0);
+  background-color: #fff;
+  color: var(--text-color, #0f172a);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.admin-method-row__upload:hover {
+  background-color: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.admin-method-row__upload.is-busy {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+/* The real file input is visually hidden; the label above is the control. */
+.admin-method-row__file {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.admin-method-row__reset {
+  padding: 4px 6px;
+  border: 0;
+  background: none;
+  color: #b91c1c;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.admin-method-row__reset:hover {
+  color: #7f1d1d;
 }
 
 .admin-method-hint {
@@ -2307,13 +2408,17 @@ body {
   font-size: 0.8rem;
 }
 
-/* Accessible switch: the real checkbox is visually hidden but still receives
-   focus and keyboard (Space) toggling; the track/thumb are pure decoration. */
+/* Accessible sliding switch. The real checkbox sits on top of the track at
+   full size (so it still receives pointer, keyboard and screen-reader events)
+   and is made invisible with opacity — NOT display:none, which would remove it
+   from the tab order. All native checkbox chrome is reset first. */
 .admin-toggle {
   position: relative;
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
+  width: 46px;
+  height: 26px;
   cursor: pointer;
 }
 
@@ -2323,8 +2428,14 @@ body {
   width: 100%;
   height: 100%;
   margin: 0;
+  padding: 0;
+  border: 0;
   opacity: 0;
+  background: none;
+  -webkit-appearance: none;
+  appearance: none;
   cursor: pointer;
+  z-index: 1;
 }
 
 .admin-toggle__input:disabled {
@@ -2332,13 +2443,11 @@ body {
 }
 
 .admin-toggle__track {
-  display: inline-block;
-  width: 46px;
-  height: 26px;
+  position: absolute;
+  inset: 0;
   border-radius: 999px;
   background-color: #cbd5e1;
   transition: background-color 0.2s ease;
-  position: relative;
 }
 
 .admin-toggle__thumb {
@@ -2364,6 +2473,24 @@ body {
 .admin-toggle__input:focus-visible + .admin-toggle__track {
   outline: 2px solid var(--primary, #3b82f6);
   outline-offset: 2px;
+}
+
+.admin-toggle__input:disabled + .admin-toggle__track {
+  opacity: 0.6;
+}
+
+/* Mobile: stack the label block and the controls so nothing squeezes. */
+@media (max-width: 480px) {
+  .admin-method-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .admin-method-row__controls {
+    align-self: stretch;
+    justify-content: space-between;
+  }
 }
 
 /* Mobile stats grid - compact 2-column layout */

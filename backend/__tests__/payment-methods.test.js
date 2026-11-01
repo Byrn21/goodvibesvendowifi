@@ -15,6 +15,9 @@
  *     choice — the seed is INSERT ... ON CONFLICT DO NOTHING
  *   - 401 without a token/API key on both admin routes
  *   - 400 for an unknown method key and for a non-boolean `enabled`
+ *   - custom logos: upload, public exposure as logoBase64, preservation across a
+ *     toggle, clearing with null, and rejection of bad/oversized/SVG values
+ *   - a ~100 kB logo is accepted (the body-limit exception in server.js works)
  *
  * Patterns follow backend/__tests__/admin.test.js:
  *   - Temp SQLite database created before requiring db/client.js
@@ -80,9 +83,9 @@ afterAll(async () => {
   }
 });
 
-// Every test starts from "all methods enabled".
+// Every test starts from "all methods enabled, no custom logo".
 beforeEach(async () => {
-  await getDb().run('UPDATE payment_methods SET is_active = 1');
+  await getDb().run('UPDATE payment_methods SET is_active = 1, logo_base64 = NULL');
 });
 
 describe('GET /api/payment/methods — availability defaults', () => {
@@ -163,10 +166,93 @@ describe('PUT /api/admin/payment-methods/:key — validation', () => {
     expect((await publicAvailability()).gcash).toBe(true);
   });
 
-  test('rejects a missing enabled field with 400', async () => {
-    const res = await setEnabled('gcash', {});
+  test('rejects an explicit non-boolean with 400 (and reports what to send instead)', async () => {
+    const res = await setEnabled('gcash', { enabled: 1 });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('INVALID_ENABLED_VALUE');
+  });
+});
+
+describe('PUT /api/admin/payment-methods/:key — custom Base64 logo', () => {
+  // A valid 1x1 PNG, the shape the admin panel uploads after resizing.
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+  test('stores a logo and exposes it to the portal as logoBase64', async () => {
+    const res = await setEnabled('gcash', { logoBase64: PNG });
+    expect(res.status).toBe(200);
+    expect(res.body.method).toMatchObject({ key: 'gcash', logoBase64: PNG });
+
+    const portal = await request(app).get('/api/payment/methods');
+    expect(portal.status).toBe(200);
+    expect(portal.body.gcash.logoBase64).toBe(PNG);
+    // Untouched methods still carry an explicit null, never undefined.
+    expect(portal.body.maya.logoBase64).toBeNull();
+    expect(portal.body.qrph.logoBase64).toBeNull();
+  });
+
+  test('accepts logo_base64 as an alias for the same field', async () => {
+    const res = await setEnabled('maya', { logo_base64: PNG });
+    expect(res.status).toBe(200);
+    expect(res.body.method.logoBase64).toBe(PNG);
+  });
+
+  test('a logo upload does not change the availability switch', async () => {
+    await setEnabled('gcash', { enabled: false });
+    const res = await setEnabled('gcash', { logoBase64: PNG });
+    expect(res.status).toBe(200);
+    expect(res.body.method).toMatchObject({ enabled: false, logoBase64: PNG });
+    expect(await publicAvailability()).toEqual({ gcash: false, maya: true, qrph: true });
+  });
+
+  test('a toggle does not wipe an uploaded logo', async () => {
+    await setEnabled('gcash', { logoBase64: PNG });
+    await setEnabled('gcash', { enabled: false });
+    const res = await setEnabled('gcash', { enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body.method).toMatchObject({ enabled: true, logoBase64: PNG });
+  });
+
+  test('null clears the custom logo', async () => {
+    await setEnabled('gcash', { logoBase64: PNG });
+    const res = await setEnabled('gcash', { logoBase64: null });
+    expect(res.status).toBe(200);
+    expect(res.body.method.logoBase64).toBeNull();
+    expect((await request(app).get('/api/payment/methods')).body.gcash.logoBase64).toBeNull();
+  });
+
+  test('rejects a non-data-URI value with 400 INVALID_LOGO', async () => {
+    const res = await setEnabled('gcash', { logoBase64: 'assets/images/gcash.png' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_LOGO');
+    expect((await request(app).get('/api/payment/methods')).body.gcash.logoBase64).toBeNull();
+  });
+
+  test('rejects an SVG data URI (script-capable image format)', async () => {
+    const res = await setEnabled('gcash', { logoBase64: 'data:image/svg+xml;base64,PHN2Zy8+' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_LOGO');
+  });
+
+  test('rejects a logo larger than the 200 kB cap', async () => {
+    const tooBig = 'data:image/png;base64,' + 'A'.repeat(210 * 1024);
+    const res = await setEnabled('gcash', { logoBase64: tooBig });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('INVALID_LOGO');
+  });
+
+  test('accepts a ~100 kB logo — the route gets a larger body limit than the 16 kB default', async () => {
+    // Without the routed body-limit exception in server.js this request dies with
+    // 413 before the route ever runs.
+    const big = 'data:image/png;base64,' + 'A'.repeat(100 * 1024);
+    const res = await setEnabled('gcash', { logoBase64: big });
+    expect(res.status).toBe(200);
+    expect(res.body.method.logoBase64).toBe(big);
+  });
+
+  test('rejects a request with neither enabled nor logoBase64', async () => {
+    const res = await setEnabled('gcash', {});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('NOTHING_TO_UPDATE');
   });
 });
 
@@ -191,5 +277,6 @@ describe('admin payment-method routes require authentication', () => {
     expect(res.body.methods).toHaveLength(3);
     expect(res.body.methods.map((m) => m.key)).toEqual(['gcash', 'maya', 'qrph']);
     res.body.methods.forEach((m) => expect(typeof m.enabled).toBe('boolean'));
+    res.body.methods.forEach((m) => expect('logoBase64' in m).toBe(true));
   });
 });

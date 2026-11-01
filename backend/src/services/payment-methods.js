@@ -75,13 +75,18 @@ function toBindValue(enabled) {
  * missing table must not take the payment page down — it is logged and every
  * method stays on the menu.
  *
- * @returns {Promise<Array<{key: string, name: string, enabled: boolean, updatedAt: string|null}>>}
+ * `logoBase64` is the admin-uploaded data URI, or null when the method still
+ * uses its bundled asset. It is passed through verbatim — the value was
+ * validated on the way in (routes/admin.js) and is re-assigned to an <img>
+ * `src` by the portal (assets/portal.js).
+ *
+ * @returns {Promise<Array<{key: string, name: string, enabled: boolean, logoBase64: string|null, updatedAt: string|null}>>}
  */
 async function listPaymentMethodStates() {
   let rows = [];
   try {
     rows = await getDb().query(
-      'SELECT method_key, display_name, is_active, updated_at FROM payment_methods'
+      'SELECT method_key, display_name, is_active, logo_base64, updated_at FROM payment_methods'
     );
   } catch (err) {
     // Most likely: `npm run db:migrate` has not been run since this table was
@@ -105,34 +110,29 @@ async function listPaymentMethodStates() {
       key: method.key,
       name: method.name,
       enabled: row ? isActiveValue(row.is_active) : true,
+      logoBase64: row && row.logo_base64 ? String(row.logo_base64) : null,
       updatedAt: (row && row.updated_at) || null,
     };
   });
 }
 
 /**
- * Convenience view of listPaymentMethodStates(): { gcash: true, maya: false, … }.
- * @returns {Promise<Record<string, boolean>>}
- */
-async function getPaymentMethodAvailability() {
-  const states = await listPaymentMethodStates();
-  const availability = {};
-  states.forEach((state) => { availability[state.key] = state.enabled; });
-  return availability;
-}
-
-/**
- * Enable or disable one method.
+ * Update one method's availability and/or custom logo.
  *
- * UPSERT so a database whose seed never ran (or a future method added to this
- * file but not to schema.sql's seed) still ends up with a real row. The caller
- * is responsible for validating that `key` is known.
+ * Only the fields actually supplied are changed: a toggle request therefore
+ * cannot wipe an uploaded logo, and a logo upload cannot flip a method that
+ * the admin had switched off. The other field is carried over from the current
+ * row (defaults: enabled, no logo) and the whole row is then UPSERTed, so a
+ * database whose seed never ran still ends up with a real row.
+ *
+ * `logoBase64` must already have been validated by the caller
+ * (routes/admin.js). Pass `null` to clear it and fall back to the bundled asset.
  *
  * @param {string} key method key ('gcash' | 'maya' | 'qrph')
- * @param {boolean} enabled
- * @returns {Promise<{key: string, name: string, enabled: boolean, updatedAt: string|null}>}
+ * @param {{enabled?: boolean, logoBase64?: string|null}} updates
+ * @returns {Promise<{key: string, name: string, enabled: boolean, logoBase64: string|null, updatedAt: string|null}>}
  */
-async function setPaymentMethodActive(key, enabled) {
+async function updatePaymentMethod(key, updates = {}) {
   const method = PAYMENT_METHODS.find((m) => m.key === key);
   if (!method) {
     const err = new Error('Unknown payment method: ' + String(key));
@@ -140,22 +140,58 @@ async function setPaymentMethodActive(key, enabled) {
     throw err;
   }
 
+  const hasEnabled = typeof updates.enabled === 'boolean';
+  const hasLogo = Object.prototype.hasOwnProperty.call(updates, 'logoBase64');
+  if (!hasEnabled && !hasLogo) {
+    const err = new Error('Nothing to update: send enabled and/or logoBase64.');
+    err.code = 'NOTHING_TO_UPDATE';
+    throw err;
+  }
+
+  const db = getDb();
+  const current = await db.getOne(
+    'SELECT is_active, logo_base64 FROM payment_methods WHERE method_key = ?',
+    [method.key]
+  );
+
+  const nextEnabled = hasEnabled
+    ? updates.enabled
+    : (current ? isActiveValue(current.is_active) : true);
+  const nextLogo = hasLogo
+    ? (updates.logoBase64 ? String(updates.logoBase64) : null)
+    : ((current && current.logo_base64) ? String(current.logo_base64) : null);
+
   const now = new Date().toISOString();
-  await getDb().run(
-    `INSERT INTO payment_methods (method_key, display_name, is_active, updated_at)
-     VALUES (?, ?, ?, ?)
+  await db.run(
+    `INSERT INTO payment_methods (method_key, display_name, is_active, logo_base64, updated_at)
+     VALUES (?, ?, ?, ?, ?)
      ON CONFLICT (method_key) DO UPDATE SET
        display_name = excluded.display_name,
        is_active    = excluded.is_active,
+       logo_base64  = excluded.logo_base64,
        updated_at   = excluded.updated_at`,
-    [method.key, method.name, toBindValue(enabled), now]
+    [method.key, method.name, toBindValue(nextEnabled), nextLogo, now]
   );
 
-  console.log(
-    '[payment-methods] ' + method.key + ' is now ' + (enabled ? 'ENABLED' : 'DISABLED')
-  );
+  if (hasEnabled) {
+    console.log(
+      '[payment-methods] ' + method.key + ' is now ' + (nextEnabled ? 'ENABLED' : 'DISABLED')
+    );
+  }
+  if (hasLogo) {
+    console.log(
+      '[payment-methods] ' + method.key + ' logo ' +
+      (nextLogo ? 'updated (' + nextLogo.length + ' chars)' : 'reset to the bundled asset')
+    );
+  }
 
-  return { key: method.key, name: method.name, enabled: !!enabled, updatedAt: now };
+  return {
+    key: method.key,
+    name: method.name,
+    enabled: !!nextEnabled,
+    logoBase64: nextLogo,
+    updatedAt: now,
+  };
 }
 
 module.exports = {
@@ -164,6 +200,5 @@ module.exports = {
   isKnownMethod,
   isActiveValue,
   listPaymentMethodStates,
-  getPaymentMethodAvailability,
-  setPaymentMethodActive,
+  updatePaymentMethod,
 };
