@@ -217,6 +217,36 @@ async function fixMissingColumns() {
   //  the webhook INSERT and its duplicate-payment guard need every one.)
   await reconcileTable(db, 'webhook_events', WEBHOOK_EVENTS_COLUMNS);
 
+  // --- Pending payment verification table (new — ensure it exists on old DBs) ---
+  // Written by POST /api/payment/claim before MacroDroid is asked to read the
+  // e-wallet screen, and read by POST /api/webhooks/macrodroid/verify-result
+  // and GET /api/payment/claim/status. CREATE TABLE IF NOT EXISTS keeps this
+  // idempotent; the column set matches schema.sql exactly.
+  try {
+    const createPendingSql = `
+      CREATE TABLE IF NOT EXISTS pending_claims (
+          id              INTEGER PRIMARY KEY AUTOINCREMENT,
+          claim_id        VARCHAR(32) NOT NULL UNIQUE,
+          ref_suffix      VARCHAR(4) NOT NULL,
+          client_mac      VARCHAR(32),
+          mobile_number   VARCHAR(15) NOT NULL,
+          requested_tier  VARCHAR(16),
+          state           VARCHAR(16) NOT NULL DEFAULT 'pending',
+          ref_no          VARCHAR(64),
+          amount          INTEGER,
+          failure_reason  VARCHAR(255),
+          created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          expires_at      TIMESTAMP
+      )`;
+    await db.exec(createPendingSql);
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_pending_claims_claim_id ON pending_claims(claim_id)');
+    await db.exec('CREATE INDEX IF NOT EXISTS idx_pending_claims_lookup ON pending_claims(ref_suffix, state)');
+    console.log('[migrate_fix] pending_claims table ready.');
+  } catch (err) {
+    console.warn('[migrate_fix] pending_claims creation skipped:', err.message);
+  }
+
   // --- Portal client context table (new — ensure it exists on old DBs) ---
   try {
     const createSql = `

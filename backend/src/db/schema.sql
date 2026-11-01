@@ -82,6 +82,41 @@ CREATE TABLE IF NOT EXISTS webhook_events (
     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- ================================================================
+-- Pending payment verification (MacroDroid screen-scraping)
+-- ================================================================
+-- Written by POST /api/payment/claim when the 4 digits the customer typed do
+-- not match any recorded webhook_events row. The row holds everything needed to
+-- finish the claim once the Android handset has read the receipt: the device to
+-- authorize, the number to text, the tier the customer asked for, and the
+-- reference digits.
+--
+-- state:
+--   pending  — MacroDroid has been asked to look at the e-wallet screen
+--   verified — it found the payment; ref_no + amount were filled in and an
+--              'unclaimed' webhook_events row now carries that payment
+--   failed   — it could not find/confirm the payment (see failure_reason)
+--   expired  — no answer within PENDING_CLAIM_TTL_MS (config/index.js)
+--   claimed  — the verified claim has since produced a voucher
+CREATE TABLE IF NOT EXISTS pending_claims (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id        VARCHAR(32) NOT NULL UNIQUE, -- 'clm_…' returned to the portal
+    ref_suffix      VARCHAR(4) NOT NULL,         -- last 4 digits the customer typed
+    client_mac      VARCHAR(32),                 -- NULL when the device is unknown
+    mobile_number   VARCHAR(15) NOT NULL,        -- SMS destination once claimed
+    requested_tier  VARCHAR(16),                 -- 'standard' | 'premium' | NULL
+    state           VARCHAR(16) NOT NULL DEFAULT 'pending',
+    ref_no          VARCHAR(64),                 -- full reference, filled in by MacroDroid
+    amount          INTEGER,                     -- pesos, exactly as scraped
+    failure_reason  VARCHAR(255),
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at      TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_claims_claim_id ON pending_claims(claim_id);
+CREATE INDEX IF NOT EXISTS idx_pending_claims_lookup   ON pending_claims(ref_suffix, state);
+
 -- ----------------------------------------------------------------
 -- ref_no duplicate protection
 -- Payment reference numbers are unique per transaction. SQLite
@@ -141,6 +176,35 @@ CREATE TABLE IF NOT EXISTS portal_client_context (
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ================================================================
+-- Payment method availability (admin toggle)
+-- ================================================================
+-- One row per e-wallet the captive portal can offer. The receiver details
+-- and QR images stay in the environment (GCASH_* / MAYA_* / QRPH_* — see
+-- routes/payment.js); this table only owns the on/off state so an admin can
+-- disable a method without a redeploy.
+--
+-- Read by GET /api/payment/methods (public, captive portal) and by the admin
+-- routes GET/PUT /api/admin/payment-methods. A method with NO row is treated
+-- as ENABLED, so a database created before this table existed keeps every
+-- payment option working.
+--
+-- The seed below is idempotent and never overwrites an admin's choice: a row
+-- that already exists is left untouched, so re-running `npm run db:migrate`
+-- after toggling a method off does NOT turn it back on.
+CREATE TABLE IF NOT EXISTS payment_methods (
+    method_key   VARCHAR(32) PRIMARY KEY, -- 'gcash' | 'maya' | 'qrph'
+    display_name VARCHAR(64) NOT NULL,
+    is_active    BOOLEAN NOT NULL DEFAULT TRUE, -- SQLite stores 1/0; PostgreSQL stores true/false
+    updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO payment_methods (method_key, display_name, is_active) VALUES
+    ('gcash', 'GCash', TRUE),
+    ('maya',  'Maya',  TRUE),
+    ('qrph',  'QR Ph', TRUE)
+ON CONFLICT (method_key) DO NOTHING;
 
 -- ================================================================
 -- Notes:

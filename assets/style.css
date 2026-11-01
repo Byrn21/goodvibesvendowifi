@@ -1425,6 +1425,51 @@ body {
   text-align: center;
 }
 
+/* A method the admin has switched off (payment_methods.is_active = false).
+   The tile stays in the grid — greyscaled and non-interactive — with a
+   "Temporarily Unavailable" badge, so a guest sees that the option exists but
+   is not currently accepted instead of wondering where it went. */
+.payment-tile--unavailable {
+  opacity: 0.55;
+  filter: grayscale(1);
+  cursor: not-allowed;
+  background: var(--surface-2, #f1f5f9);
+}
+
+.payment-tile--unavailable:hover {
+  border-color: var(--border);
+  box-shadow: none;
+  transform: none;
+  background: var(--surface-2, #f1f5f9);
+}
+
+.payment-tile--unavailable:active {
+  border-color: var(--border);
+  box-shadow: none;
+  transform: none;
+  background: var(--surface-2, #f1f5f9);
+}
+
+.payment-tile__badge {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #fff;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+.payment-tile__badge[hidden] {
+  display: none;
+}
+
 .auth-divider {
   display: flex;
   align-items: center;
@@ -2199,6 +2244,126 @@ body {
   font-size: 0.85rem;
   color: var(--text-muted, #64748b);
   margin-top: 4px;
+}
+
+/* ── Payment Methods settings (admin) ─────────────────────────────
+   One row per e-wallet with a switch. The source of truth is the
+   payment_methods table; the switch only reflects what the backend
+   accepted (the row is re-rendered from the PUT response). */
+.admin-method-list {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-method-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 8px;
+  background-color: var(--card-bg, #fff);
+  transition: opacity 0.2s ease, border-color 0.2s ease;
+}
+
+.admin-method-row.is-disabled {
+  background-color: var(--surface-2, #f8fafc);
+}
+
+.admin-method-row.is-saving {
+  opacity: 0.65;
+}
+
+.admin-method-row__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.admin-method-row__name {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-color, #0f172a);
+}
+
+.admin-method-row__status {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #b45309; /* amber — not offering this method right now */
+}
+
+.admin-method-row__status.is-on {
+  color: #15803d; /* green — live in the portal */
+}
+
+.admin-method-hint {
+  margin-top: 12px;
+  font-size: 0.8rem;
+}
+
+/* Accessible switch: the real checkbox is visually hidden but still receives
+   focus and keyboard (Space) toggling; the track/thumb are pure decoration. */
+.admin-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.admin-toggle__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.admin-toggle__input:disabled {
+  cursor: progress;
+}
+
+.admin-toggle__track {
+  display: inline-block;
+  width: 46px;
+  height: 26px;
+  border-radius: 999px;
+  background-color: #cbd5e1;
+  transition: background-color 0.2s ease;
+  position: relative;
+}
+
+.admin-toggle__thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background-color: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.2s ease;
+}
+
+.admin-toggle__input:checked + .admin-toggle__track {
+  background-color: var(--primary, #3b82f6);
+}
+
+.admin-toggle__input:checked + .admin-toggle__track .admin-toggle__thumb {
+  transform: translateX(20px);
+}
+
+.admin-toggle__input:focus-visible + .admin-toggle__track {
+  outline: 2px solid var(--primary, #3b82f6);
+  outline-offset: 2px;
 }
 
 /* Mobile stats grid - compact 2-column layout */

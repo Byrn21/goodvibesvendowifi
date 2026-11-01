@@ -58,6 +58,12 @@
             </button>
           </li>
           <li class="admin-sidebar__nav-item">
+            <button class="admin-sidebar__nav-link" data-page="payment-methods">
+              <span class="admin-sidebar__nav-link-icon">&#128179;</span>
+              <span class="admin-sidebar__nav-link-text">Payment Methods</span>
+            </button>
+          </li>
+          <li class="admin-sidebar__nav-item">
             <button class="admin-sidebar__nav-link" data-page="logout">
               <span class="admin-sidebar__nav-link-icon">&#8617;</span>
               <span class="admin-sidebar__nav-link-text">Logout</span>
@@ -150,6 +156,22 @@
         <h2>Import Vouchers</h2>
         <div id="tab-import"></div>
       </div>
+
+      <!-- Payment Methods Section -->
+      <div class="admin-card content-section" id="section-payment-methods">
+        <h2>Payment Methods</h2>
+        <p class="muted">
+          Choose which e-wallets the guest portal offers. A disabled method stays visible to
+          guests but is greyed out and cannot be selected.
+        </p>
+        <div id="payment-methods-msg"></div>
+        <div id="payment-methods-settings" aria-busy="true">
+          <div class="loading-container" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <p class="muted">Loading&hellip;</p>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -193,6 +215,9 @@
         sectionVouchers: document.getElementById('section-vouchers'),
         sectionSessions:   document.getElementById('section-sessions'),
         sectionImport:     document.getElementById('section-import'),
+        sectionPaymentMethods: document.getElementById('section-payment-methods'),
+        paymentMethods:        document.getElementById('payment-methods-settings'),
+        paymentMethodsMsg:     document.getElementById('payment-methods-msg'),
         sidebar:        document.getElementById('admin-sidebar'),
         sidebarToggle:  document.getElementById('sidebar-toggle'),
         sidebarNav:     document.getElementById('admin-sidebar-nav'),
@@ -264,6 +289,7 @@
           { el: els.sectionVouchers, name: 'vouchers' },
           { el: els.sectionSessions, name: 'sessions' },
           { el: els.sectionImport, name: 'import' },
+          { el: els.sectionPaymentMethods, name: 'payment-methods' },
         ];
         sections.forEach(function (s) {
           if (s.el) {
@@ -274,6 +300,7 @@
         if (page === 'vouchers') { loadVouchers(); }
         else if (page === 'sessions') { loadSessions(); }
         else if (page === 'import') { renderImportForm(); }
+        else if (page === 'payment-methods') { loadPaymentMethodsSettings(); }
       }
 
 
@@ -763,6 +790,113 @@
               });
           });
         }
+      }
+
+      // ---- Payment Methods (availability toggles) ----
+      // Which e-wallets the guest portal offers. The state lives in the backend
+      // (payment_methods table) and is read by the portal on page load, so a
+      // toggle here takes effect for the next guest that opens the portal — no
+      // restart and no redeploy.
+
+      function renderPaymentMethods(methods) {
+        var html = '<ul class="admin-method-list">';
+        methods.forEach(function (m) {
+          var key = escapeHtml(m.key);
+          var name = escapeHtml(m.name);
+          html +=
+            '<li class="admin-method-row' + (m.enabled ? '' : ' is-disabled') + '">' +
+              '<div class="admin-method-row__info">' +
+                '<span class="admin-method-row__name">' + name + '</span>' +
+                '<span class="admin-method-row__status' + (m.enabled ? ' is-on' : '') + '">' +
+                  (m.enabled ? 'Live' : 'Temporarily unavailable') +
+                '</span>' +
+              '</div>' +
+              '<label class="admin-toggle">' +
+                '<input type="checkbox" role="switch" class="admin-toggle__input"' +
+                  ' data-method-key="' + key + '"' + (m.enabled ? ' checked' : '') +
+                  ' aria-label="Enable ' + name + '">' +
+                '<span class="admin-toggle__track" aria-hidden="true">' +
+                  '<span class="admin-toggle__thumb"></span>' +
+                '</span>' +
+              '</label>' +
+            '</li>';
+        });
+        html += '</ul>';
+        html += '<p class="muted admin-method-hint">Guests who open the portal after a change see the new state immediately.</p>';
+        return html;
+      }
+
+      function showPaymentMethodsMessage(message, isError) {
+        if (!els.paymentMethodsMsg) return;
+        els.paymentMethodsMsg.innerHTML = message
+          ? '<p class="' + (isError ? 'error-msg' : 'success-msg') + '">' + escapeHtml(message) + '</p>'
+          : '';
+      }
+
+      function loadPaymentMethodsSettings() {
+        if (!els.paymentMethods) return;
+        setTableLoading(els.paymentMethods, 'Loading payment methods\u2026');
+        showPaymentMethodsMessage('', false);
+        api('/api/admin/payment-methods')
+          .then(function (res) {
+            if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load payment methods');
+            var methods = (res.data && res.data.methods) || [];
+            els.paymentMethods.innerHTML = renderPaymentMethods(methods);
+            setTableReady(els.paymentMethods);
+          })
+          .catch(function (err) {
+            els.paymentMethods.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
+            setTableReady(els.paymentMethods);
+          });
+      }
+
+      // PUT the new state. The switch is locked while the request runs and the
+      // checkbox is rolled back if the backend refuses, so the control can never
+      // display a state the server did not accept.
+      function updatePaymentMethod(key, enabled, input) {
+        if (!input) return;
+        input.disabled = true;
+        var row = input.closest('.admin-method-row');
+        if (row) row.classList.add('is-saving');
+
+        api('/api/admin/payment-methods/' + encodeURIComponent(key), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: enabled })
+        }).then(function (res) {
+          if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to update the payment method');
+          // The response carries the full list, so re-render from the server's
+          // answer instead of trusting the local checkbox state.
+          var methods = (res.data && res.data.methods) || [];
+          if (els.paymentMethods && methods.length) {
+            els.paymentMethods.innerHTML = renderPaymentMethods(methods);
+          }
+          showPaymentMethodsMessage((res.data && res.data.message) || 'Saved.', false);
+        }).catch(function (err) {
+          input.checked = !enabled;
+          showPaymentMethodsMessage(err.message, true);
+        }).finally(function () {
+          // The list may have been re-rendered above, so re-enable the CURRENT
+          // element for this method rather than the detached `input`.
+          var fresh = els.paymentMethods &&
+            els.paymentMethods.querySelector('.admin-toggle__input[data-method-key="' + key + '"]');
+          if (!fresh) return;
+          fresh.disabled = false;
+          var freshRow = fresh.closest('.admin-method-row');
+          if (freshRow) freshRow.classList.remove('is-saving');
+        });
+      }
+
+      // One delegated listener for every switch: the list is re-rendered after
+      // each successful save, so per-element handlers would go stale.
+      if (els.paymentMethods) {
+        els.paymentMethods.addEventListener('change', function (e) {
+          var input = e.target.closest('.admin-toggle__input');
+          if (!input) return;
+          var key = input.getAttribute('data-method-key');
+          if (!key) return;
+          updatePaymentMethod(key, input.checked, input);
+        });
       }
 
       function loadDashboard() {

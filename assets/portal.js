@@ -974,6 +974,12 @@
     tiles.forEach(function (tile) {
 
       tile.addEventListener('click', function () {
+        // Switched off by the admin: do nothing. The `disabled` attribute
+        // already suppresses this on real browsers; the guard covers a stale
+        // page whose status fetch has not repainted the tile yet, and a tile
+        // marked unavailable while the modal was open.
+        if (isPaymentMethodUnavailable(tile)) return;
+
         // Deselect all
         tiles.forEach(function (t) { t.classList.remove('is-selected'); });
         // Select this one
@@ -1470,6 +1476,75 @@
     });
   }
 
+  // ===============================================================
+  // PAYMENT METHOD AVAILABILITY (admin toggle)
+  // ===============================================================
+  // The admin panel can switch an e-wallet off (the backend's payment_methods
+  // table, exposed as `enabled` on GET /api/payment/methods). A disabled method
+  // is NOT hidden: its tile stays in the grid, greyed out and non-interactive,
+  // with a "Temporarily Unavailable" badge, so a guest can see that the option
+  // exists but is not being accepted right now.
+
+  /**
+   * Paint the availability flags onto the tiles. Defensive by design: an
+   * unknown method or a missing `enabled` flag leaves the tile untouched, and a
+   * failed fetch leaves every method enabled — the portal must never become
+   * unpayable because a status request failed.
+   * @param {Object} methods response body of GET /api/payment/methods
+   */
+  function applyPaymentMethodAvailability(methods) {
+    if (!methods || typeof methods !== 'object') return;
+
+    QR_METHOD_IDS.forEach(function (method) {
+      var tile = document.querySelector('.payment-tile[data-payment="' + method + '"]');
+      if (!tile) return;
+
+      var def = methods[method];
+      if (!def || typeof def.enabled !== 'boolean') return;
+
+      var name = def.name || method;
+      var badge = tile.querySelector('.payment-tile__badge');
+
+      if (def.enabled) {
+        tile.classList.remove('payment-tile--unavailable');
+        tile.removeAttribute('disabled');
+        tile.removeAttribute('aria-disabled');
+        tile.setAttribute('aria-label', 'Pay with ' + name);
+        if (badge) badge.hidden = true;
+      } else {
+        tile.classList.add('payment-tile--unavailable');
+        // A real `disabled` attribute blocks the click handler AND removes the
+        // tile from the tab order, so a keyboard/screen-reader guest cannot
+        // select the method either (aria-disabled alone does not).
+        tile.setAttribute('disabled', 'disabled');
+        tile.setAttribute('aria-disabled', 'true');
+        tile.setAttribute('aria-label', 'Pay with ' + name + ' — temporarily unavailable');
+        if (badge) badge.hidden = false;
+      }
+    });
+  }
+
+  /**
+   * Is this tile currently switched off by the admin?
+   * @param {Element|null} tile
+   * @returns {boolean}
+   */
+  function isPaymentMethodUnavailable(tile) {
+    if (!tile) return false;
+    if (typeof tile.hasAttribute === 'function' && tile.hasAttribute('disabled')) return true;
+    return tile.getAttribute('aria-disabled') === 'true';
+  }
+
+  // Fetch the flags on page load and paint the tiles. loadPaymentMethods()
+  // caches the response, so opening the QR modal afterwards costs no request.
+  function initPaymentMethodAvailability() {
+    loadPaymentMethods().then(function (methods) {
+      applyPaymentMethodAvailability(methods);
+    }).catch(function () {
+      /* Offline or backend hiccup: keep every tile enabled. */
+    });
+  }
+
   var qrState = {
     method: null,
     amountCents: 0,
@@ -1529,6 +1604,20 @@
     if (!def) {
       if (tile) tile.classList.remove('is-selected');
       setBanner('This payment method is currently unavailable.', 'error');
+      return;
+    }
+
+    // Disabled by the admin (payment_methods.is_active = false). The tile is
+    // greyed out on page load; this guards the case where the flag arrived
+    // after the tiles were bound (cached fetch, or a click before the paint).
+    if (def.enabled === false) {
+      if (tile) {
+        tile.classList.remove('is-selected');
+        tile.classList.add('payment-tile--unavailable');
+        tile.setAttribute('disabled', 'disabled');
+        tile.setAttribute('aria-disabled', 'true');
+      }
+      setBanner(def.name + ' is temporarily unavailable. Please choose another payment method.', 'error');
       return;
     }
 
@@ -1616,8 +1705,18 @@
     voucherCode: null,
     step: null,
     redirectTimer: null,
-    lastFocus: null
+    lastFocus: null,
+    // Pending-verification polling (see pollClaimStatus).
+    pollTimer: null,
+    pollAttempts: 0
   };
+
+  // While MacroDroid reads the e-wallet receipt the backend answers 202 and the
+  // modal stays on its loading step. The page polls the claim status on this
+  // cadence (the backend's retryAfterMs), for at most this many attempts before
+  // asking the customer to retry.
+  var CLAIM_POLL_INTERVAL_MS = 3000;
+  var CLAIM_POLL_MAX_ATTEMPTS = 20;
 
   // How long the auto-authorized confirmation stays on screen before the
   // guest is taken to status.html. success.html is bypassed entirely, so this
@@ -1718,6 +1817,7 @@
       window.clearTimeout(claimState.redirectTimer);
       claimState.redirectTimer = null;
     }
+    stopClaimPolling();
     claimState.submitting = false;
     claimState.voucherCode = null;
 
@@ -1765,6 +1865,7 @@
 
   function closeClaimModal() {
     if (!claimState.open) return;
+    stopClaimPolling();
     var modal = claimEl('claim-modal');
     if (modal) hide(modal);
     claimState.open = false;
@@ -1879,40 +1980,138 @@
     if (device.clientMac) claimBody.client_mac = device.clientMac;
     if (device.apMac) claimBody.ap_mac = device.apMac;
 
-    fetch((CONFIG.apiBaseUrl || '') + '/api/payment/claim', {
+    sendClaimRequest(claimBody).then(function (res) {
+      handleClaimResult(res, claimBody);
+    }).catch(function () {
+      showClaimFailure('The network could not be reached. Please check your connection and try again.');
+    });
+  }
+
+  /**
+   * sendClaimRequest — POST /api/payment/claim and normalize the answer.
+   *
+   * A body that is not JSON is a server/host problem, not a verdict on the
+   * payment, so `json:false` is kept distinct instead of collapsing to {}.
+   */
+  function sendClaimRequest(claimBody) {
+    return fetch((CONFIG.apiBaseUrl || '') + '/api/payment/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'same-origin',
       body: JSON.stringify(claimBody)
     }).then(function (r) {
-      // A body that is not JSON is a server/host problem, not a verdict on the
-      // payment — keep that distinction instead of collapsing it into {}.
       return r.json().then(
         function (data) { return { ok: r.ok, status: r.status, data: data, json: true }; },
         function () { return { ok: r.ok, status: r.status, data: {}, json: false }; }
       );
-    }).then(function (res) {
-      var data = res.data || {};
-      if (!res.json) {
-        showClaimFailure(
-          'The payment server did not answer properly (HTTP ' + res.status + '). ' +
-          'Your payment may still be fine \u2014 please tap Try Again in a moment.'
-        );
-      } else if (res.ok && data.success && data.authorized) {
-        // Remember the device before the hand-off to the status page.
-        rememberDeviceIdentity();
-        showClaimAuthorized();
-      } else if (data.voucherCode) {
-        // Claimed but not auto-authorized (the guest still connects manually).
-        // The device is still known here, so the status page gets the same help.
-        rememberDeviceIdentity();
-        showClaimSuccess(data.voucherCode);
-      } else {
-        showClaimFailure(data.error || 'We could not verify that payment. Please check the digits and try again.');
-      }
-    }).catch(function () {
-      showClaimFailure('The network could not be reached. Please check your connection and try again.');
     });
+  }
+
+  /**
+   * handleClaimResult — drive the modal from one /api/payment/claim answer.
+   *
+   *   202 pending      — MacroDroid is reading the receipt; keep the loading
+   *                      step and poll GET /api/payment/claim/status
+   *   authorized:true  — the MAC is online, so there is no code to show
+   *   voucherCode only — claimed, but not auto-authorized; manual code flow
+   *   anything else    — a real failure, shown on the error step (nothing is
+   *                      consumed, so the same digits can simply be retried)
+   */
+  function handleClaimResult(res, claimBody) {
+    var data = res.data || {};
+    if (!res.json) {
+      showClaimFailure(
+        'The payment server did not answer properly (HTTP ' + res.status + '). ' +
+        'Your payment may still be fine \u2014 please tap Try Again in a moment.'
+      );
+    } else if (res.ok && data.success && data.authorized) {
+      // Remember the device before the hand-off to the status page.
+      rememberDeviceIdentity();
+      showClaimAuthorized();
+    } else if (data.voucherCode) {
+      // Claimed but not auto-authorized (the guest still connects manually).
+      // The device is still known here, so the status page gets the same help.
+      rememberDeviceIdentity();
+      showClaimSuccess(data.voucherCode);
+    } else if (res.ok && data.pending && data.claimId) {
+      // The payment was not recorded by the notification webhook, so the
+      // backend asked the MacroDroid handset to read the receipt. The modal
+      // stays on its spinner until that check answers.
+      claimState.pollAttempts = 0;
+      pollClaimStatus(data.claimId, claimBody);
+    } else {
+      showClaimFailure(data.error || 'We could not verify that payment. Please check the digits and try again.');
+    }
+  }
+
+  /** Stop the pending-verification poll (modal closed, reset, or finished). */
+  function stopClaimPolling() {
+    if (claimState.pollTimer) {
+      window.clearTimeout(claimState.pollTimer);
+      claimState.pollTimer = null;
+    }
+    claimState.pollAttempts = 0;
+  }
+
+  /**
+   * pollClaimStatus — wait for MacroDroid's verdict, then finish the claim.
+   *
+   *   pending  — poll again (up to CLAIM_POLL_MAX_ATTEMPTS)
+   *   verified — the receipt is now a recorded payment: repeat the normal claim,
+   *              which authorizes this device and consumes the voucher
+   *   claimed  — a voucher already exists; show it
+   *   failed / expired — back to the error step so the customer can retry
+   *
+   * A failed poll request is not a verdict: it simply schedules another one.
+   */
+  function pollClaimStatus(claimId, claimBody) {
+    if (!claimState.open || claimState.step !== 'loading') return;
+
+    claimState.pollAttempts += 1;
+    if (claimState.pollAttempts > CLAIM_POLL_MAX_ATTEMPTS) {
+      showClaimFailure('We are still waiting for the payment check. Please tap Try Again in a moment.');
+      return;
+    }
+
+    claimState.pollTimer = window.setTimeout(function () {
+      claimState.pollTimer = null;
+      fetch((CONFIG.apiBaseUrl || '') + '/api/payment/claim/status?claimId=' + encodeURIComponent(claimId), {
+        method: 'GET',
+        credentials: 'same-origin'
+      }).then(function (r) {
+        return r.json().then(
+          function (data) { return { ok: r.ok, status: r.status, data: data, json: true }; },
+          function () { return { ok: r.ok, status: r.status, data: {}, json: false }; }
+        );
+      }).then(function (res) {
+        if (!claimState.open || claimState.step !== 'loading') return;
+        var data = res.data || {};
+
+        // Unreachable server or a non-JSON answer: keep waiting, the claim is
+        // still parked on the backend.
+        if (!res.json || !res.ok) { pollClaimStatus(claimId, claimBody); return; }
+
+        if (data.state === 'verified') {
+          sendClaimRequest(claimBody).then(function (claimRes) {
+            handleClaimResult(claimRes, claimBody);
+          }).catch(function () {
+            showClaimFailure('The network could not be reached. Please check your connection and tap Try Again.');
+          });
+        } else if (data.state === 'claimed' && data.voucherCode) {
+          rememberDeviceIdentity();
+          showClaimSuccess(data.voucherCode);
+        } else if (data.state === 'failed') {
+          showClaimFailure(data.reason || 'We could not find that payment. Please check the last 4 digits and try again.');
+        } else if (data.state === 'expired') {
+          showClaimFailure('The payment check timed out. Please tap Try Again.');
+        } else {
+          pollClaimStatus(claimId, claimBody);
+        }
+      }).catch(function () {
+        if (!claimState.open || claimState.step !== 'loading') return;
+        pollClaimStatus(claimId, claimBody);
+      });
+    }, CLAIM_POLL_INTERVAL_MS);
   }
 
   function claimClearBusy() {
@@ -1925,6 +2124,7 @@
   }
 
   function showClaimSuccess(voucherCode) {
+    stopClaimPolling();
     claimState.submitting = false;
     claimState.voucherCode = voucherCode;
     var codeEl = claimEl('claim-voucher-code');
@@ -1957,6 +2157,7 @@
   // Auto-authorized: the backend authorized this device's MAC, so there is no
   // code to display, copy, or re-enter — the guest is already online.
   function showClaimAuthorized() {
+    stopClaimPolling();
     claimState.submitting = false;
     claimState.voucherCode = null;
     claimClearBusy();
@@ -1967,6 +2168,7 @@
   }
 
   function showClaimFailure(message) {
+    stopClaimPolling();
     claimState.submitting = false;
     var errText = claimEl('claim-error-text');
     if (errText) errText.textContent = message || 'Something went wrong. Please try again.';
@@ -2542,6 +2744,9 @@
 
     // Set up payment tile interactions
     initPaymentTiles();
+
+    // Apply the admin's payment-method availability (greys out disabled tiles)
+    initPaymentMethodAvailability();
 
     // Set up the GCash / Maya / QR Ph payment modal
     initPaymentQrModal();

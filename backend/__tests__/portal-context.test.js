@@ -118,11 +118,18 @@ function loadPortal(opts) {
   const fetchStub = (url, init) => {
     fetchCalls.push({ url, init, body: init && init.body ? JSON.parse(init.body) : null });
     // opts.fetchJson lets a test drive a specific backend response shape
-    // (authorized:true vs voucherCode-only vs failure).
-    const payload = (opts.fetchJson && opts.fetchJson(url)) || { success: true };
+    // (authorized:true vs voucherCode-only vs failure). opts.fetchResponse does
+    // the same per URL, including the status/ok, for flows that mix a 202
+    // pending answer with a later 200 (the MacroDroid verification poll).
+    const response = opts.fetchResponse ? opts.fetchResponse(url) : null;
+    const payload = (response && response.payload) || (opts.fetchJson && opts.fetchJson(url)) || { success: true };
+    const ok = response && response.ok !== undefined
+      ? response.ok
+      : (opts.fetchOk === undefined ? true : opts.fetchOk);
+    const status = (response && response.status) || opts.fetchStatus || 200;
     return Promise.resolve({
-      ok: opts.fetchOk === undefined ? true : opts.fetchOk,
-      status: opts.fetchStatus || 200,
+      ok,
+      status,
       json: () => Promise.resolve(payload),
     });
   };
@@ -280,6 +287,71 @@ describe('Claim Voucher (reference number) submission', () => {
       client_mac: CONTEXT.clientMac,
       ap_mac: CONTEXT.apMac,
     });
+  });
+
+  test('a 202 pending answer keeps the spinner, polls, then completes the claim', async () => {
+    let claimPosts = 0;
+    const portal = loadPortal({
+      search: REDIRECT_SEARCH,
+      captureTimers: true,
+      fetchResponse: (url) => {
+        if (url.indexOf('/api/payment/claim/status') !== -1) {
+          return {
+            status: 200,
+            payload: { success: true, state: 'verified', claimId: 'clm_0123456789abcdef' },
+          };
+        }
+        if (url.indexOf('/api/payment/claim') !== -1) {
+          claimPosts += 1;
+          if (claimPosts === 1) {
+            return {
+              status: 202,
+              payload: {
+                success: true,
+                pending: true,
+                state: 'pending',
+                claimId: 'clm_0123456789abcdef',
+                retryAfterMs: 3000,
+              },
+            };
+          }
+          return {
+            status: 200,
+            payload: { success: true, authorized: true, voucherCode: 'ABC123', minutes: 60 },
+          };
+        }
+        return { payload: { success: true } };
+      },
+    });
+
+    // The poll only runs while the modal is open (closing it must stop it).
+    portal.getEl('claim-voucher-btn').fire('click');
+    portal.getEl('claim-ref-input').value = '1234';
+    portal.getEl('claim-mobile-input').value = '09171234567';
+    portal.getEl('claim-verify').onclick();
+    await portal.flush();
+    await portal.flush();
+
+    // Not a failure and not a voucher: the modal is waiting on MacroDroid.
+    expect(claimPosts).toBe(1);
+    expect(portal.getEl('claim-cancel').textContent).toBe('Cancel');
+
+    // Drive the poll the page scheduled (the 3 s status timer).
+    const poll = portal.timers.find((t) => t.ms === 3000);
+    expect(poll).toBeTruthy();
+    poll.fn();
+    await portal.flush();
+    await portal.flush();
+    await portal.flush();
+
+    const statusCalls = portal.fetchCalls.filter((c) => c.url.indexOf('/api/payment/claim/status') !== -1);
+    expect(statusCalls).toHaveLength(1);
+    expect(statusCalls[0].url).toBe('/api/payment/claim/status?claimId=clm_0123456789abcdef');
+
+    // Verified → the normal claim ran again and the device was authorized.
+    expect(claimPosts).toBe(2);
+    expect(portal.getEl('claim-cancel').textContent).toBe('Done');
+    expect(portal.storage.get('device_mac')).toBe(CONTEXT.clientMac);
   });
 
   test('sends the MAC saved by a previous claim (device_mac) on a bare URL', async () => {

@@ -30,6 +30,11 @@ const {
   normalizeVoucherType,
   MAX_BANDWIDTH_KBPS,
 } = require('../utils/qos');
+const {
+  isKnownMethod,
+  listPaymentMethodStates,
+  setPaymentMethodActive,
+} = require('../services/payment-methods');
 
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
@@ -708,6 +713,62 @@ router.delete('/transactions', async (req, res, next) => {
       success: true,
       deleted: before,
       message: `Deleted ${before} transaction log(s).`,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Payment method availability ─────────────────────────────────────────
+// Which e-wallets the captive portal offers. The guest-facing counterpart is
+// GET /api/payment/methods (routes/payment.js), which reads the same table and
+// reports each method's `enabled` flag so the portal can grey out a disabled
+// tile instead of hiding it.
+
+// List every supported method with its current state.
+router.get('/payment-methods', async (req, res, next) => {
+  try {
+    const methods = await listPaymentMethodStates();
+    res.json({ success: true, methods });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Enable or disable one method. Body: { enabled: boolean }.
+//
+// The key is checked against the known list (not passed through to SQL) and
+// `enabled` must be a real boolean: accepting "false" as a truthy string would
+// silently enable the method the admin just tried to turn off. The response
+// carries the whole list so the admin UI can re-render from one answer.
+router.put('/payment-methods/:key', async (req, res, next) => {
+  try {
+    const key = String(req.params.key || '').toLowerCase();
+    if (!isKnownMethod(key)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Unknown payment method. Supported: gcash, maya, qrph.',
+        code: 'UNKNOWN_PAYMENT_METHOD',
+      });
+    }
+
+    const body = req.body || {};
+    if (typeof body.enabled !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        error: 'enabled must be a boolean (true or false).',
+        code: 'INVALID_ENABLED_VALUE',
+      });
+    }
+
+    const updated = await setPaymentMethodActive(key, body.enabled);
+    const methods = await listPaymentMethodStates();
+
+    res.json({
+      success: true,
+      method: updated,
+      methods,
+      message: updated.name + (updated.enabled ? ' enabled.' : ' disabled.'),
     });
   } catch (err) {
     next(err);

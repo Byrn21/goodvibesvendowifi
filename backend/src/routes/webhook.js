@@ -1,9 +1,14 @@
 /**
  * routes/webhook.js — payment webhooks
  *
- *   POST /api/webhooks/macrodroid — records an UNCLAIMED voucher entitlement
- *   POST /api/webhooks/instapay   — authorizes the paying device directly via
- *                                   the controller web API (InstaPay / PESONet)
+ *   POST /api/webhooks/macrodroid              — records an UNCLAIMED voucher
+ *                                                entitlement
+ *   POST /api/webhooks/macrodroid/verify-result — answer to the screen-scrape
+ *                                                verification request fired by
+ *                                                POST /api/payment/claim
+ *   POST /api/webhooks/instapay                — authorizes the paying device
+ *                                                directly via the controller
+ *                                                web API (InstaPay / PESONet)
  *
  * Receives a payment notification from MacroDroid after an e-wallet
  * payment completes and records it as an UNCLAIMED voucher entitlement.
@@ -109,6 +114,228 @@ router.post('/macrodroid', async (req, res, next) => {
     }
 
     return res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ================================================================
+// MacroDroid screen-scrape verification result
+// ================================================================
+/**
+ * POST /api/webhooks/macrodroid/verify-result
+ *
+ * The answer to the GET /verify request that POST /api/payment/claim fires at
+ * the MacroDroid handset (MACRODROID_IP:MACRODROID_WEBHOOK_PORT) when the 4
+ * digits the customer typed match no recorded payment. The macro reads the
+ * receipt on screen and calls this back with what it found.
+ *
+ * Body:
+ *   { secret_token, status: 'verified'|'failed', ref_code, ref_no?, amount?,
+ *     tier?, reason?, client_mac? }
+ *   ref_code   — the same 4 digits the claim was started with ('ref' is
+ *                accepted as an alias, matching the outgoing query parameter)
+ *   ref_no     — the FULL reference read off the receipt (required to verify)
+ *   amount     — the amount read off the receipt, in PESOS (required to verify)
+ *   client_mac — the MAC the macro received in its own request URL. Echoing it
+ *                scopes the answer to that device when two guests are waiting
+ *                on the same 4 digits at once; omitted means "newest claim for
+ *                these digits", which is all a simple macro can provide.
+ *
+ * On 'verified' the payment is recorded as an 'unclaimed' webhook_events row —
+ * exactly what the normal notification webhook would have written — and the
+ * pending claim is marked verified. The portal's next poll turns into a normal
+ * POST /api/payment/claim, which consumes that row and authorizes the device.
+ * Nothing is authorized and no voucher is assigned here.
+ *
+ * Secret-gated with the same MACRODROID_WEBHOOK_SECRET and constant-time
+ * comparison as the payment webhook. The handset talks to the backend over the
+ * LAN, so this is the only authentication available.
+ */
+const VERIFY_STATES = {
+  verified: 'verified', verify: 'verified', success: 'verified', paid: 'verified', found: 'verified',
+  failed: 'failed', failure: 'failed', not_found: 'failed', unverified: 'failed', error: 'failed',
+};
+
+/** Accept only the two tiers the portal sells; anything else is "unknown". */
+function parseTier(value) {
+  if (typeof value !== 'string') return null;
+  const tier = value.trim().toLowerCase();
+  return tier === 'standard' || tier === 'premium' ? tier : null;
+}
+
+router.post('/macrodroid/verify-result', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+
+    // 1. Shared secret, compared in constant time (same gate as the payment
+    //    webhook above).
+    if (!body.secret_token || typeof body.secret_token !== 'string') {
+      return res.status(401).json({ success: false, error: 'Missing secret_token.', code: 'MISSING_SECRET' });
+    }
+    const expected = process.env.MACRODROID_WEBHOOK_SECRET || '';
+    if (!expected || !safeEqual(body.secret_token, expected)) {
+      return res.status(401).json({ success: false, error: 'Invalid secret.', code: 'INVALID_SECRET' });
+    }
+
+    // 2. The 4 digits identify the pending claim ('ref' is the alias the macro
+    //    received in its own request URL).
+    const refCode = String(body.ref_code || body.ref || '').trim();
+    if (!/^\d{4}$/.test(refCode)) {
+      return res.status(400).json({
+        success: false,
+        error: 'ref_code is required and must be 4 digits.',
+        code: 'INVALID_REF_CODE',
+      });
+    }
+
+    // 3. Outcome — anything the macro sends that is not a recognised verdict is
+    //    rejected rather than guessed at, so a typo cannot mark a real payment
+    //    as failed.
+    const state = VERIFY_STATES[String(body.status || body.result || '').trim().toLowerCase()];
+    if (!state) {
+      return res.status(400).json({
+        success: false,
+        error: 'status must be "verified" or "failed".',
+        code: 'INVALID_STATUS',
+      });
+    }
+
+    const db = getDb();
+
+    // Echoed MAC (optional) disambiguates two guests waiting on the same 4
+    // digits: the macro got both values in its own request URL, so sending the
+    // MAC back is free. Without it the newest open claim for those digits is
+    // the only possible match.
+    const claimMac = normalizeMac(body.client_mac || body.mac);
+    const claim = claimMac
+      ? await db.getOne(
+          `SELECT claim_id, state, expires_at FROM pending_claims
+            WHERE ref_suffix = ? AND state = 'pending' AND client_mac = ?
+            ORDER BY id DESC LIMIT 1`,
+          [refCode, claimMac]
+        )
+      : await db.getOne(
+          `SELECT claim_id, state, expires_at FROM pending_claims
+            WHERE ref_suffix = ? AND state = 'pending'
+            ORDER BY id DESC LIMIT 1`,
+          [refCode]
+        );
+    if (!claim) {
+      // Could be a late answer for an already-answered claim, or a macro that
+      // fired without the portal ever asking. Either way there is nothing to
+      // update, and 404 tells the macro not to retry blindly.
+      return res.status(404).json({
+        success: false,
+        error: 'No pending verification exists for those digits.',
+        code: 'PENDING_CLAIM_NOT_FOUND',
+      });
+    }
+
+    const nowIso = new Date().toISOString();
+    if (claim.expires_at && Date.parse(claim.expires_at) <= Date.now()) {
+      await db.run(
+        `UPDATE pending_claims SET state = 'expired', updated_at = ?
+          WHERE claim_id = ? AND state = 'pending'`,
+        [nowIso, claim.claim_id]
+      );
+      return res.status(410).json({
+        success: false,
+        error: 'The verification window for this claim has closed.',
+        code: 'PENDING_CLAIM_EXPIRED',
+      });
+    }
+
+    // 4. "Not found" is a final answer: the customer is told to check the
+    //    digits. No payment row, no voucher, nothing consumed.
+    if (state === 'failed') {
+      const reason = String(body.reason || body.message || 'The payment could not be matched.').slice(0, 240);
+      await db.run(
+        `UPDATE pending_claims
+            SET state = 'failed', failure_reason = ?, updated_at = ?
+          WHERE claim_id = ? AND state = 'pending'`,
+        [reason, nowIso, claim.claim_id]
+      );
+      console.warn(
+        '[webhook/verify] MacroDroid could not verify suffix ' + refCode +
+        ' (claim ' + claim.claim_id + '): ' + reason
+      );
+      return res.json({ success: true, claimId: claim.claim_id, state: 'failed' });
+    }
+
+    // 5. "Verified" needs the receipt's own data: the full reference and the
+    //    amount. Without them there is no payment to record.
+    const refNo = typeof body.ref_no === 'string' ? body.ref_no.trim() : '';
+    if (!refNo || refNo.length > 64) {
+      return res.status(400).json({
+        success: false,
+        error: 'ref_no is required (up to 64 characters) when status is "verified".',
+        code: 'INVALID_REF_NO',
+      });
+    }
+    const amount = Number(body.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'amount is required and must be a positive number (pesos) when status is "verified".',
+        code: 'INVALID_AMOUNT',
+      });
+    }
+
+    // 6. Record the payment FIRST — it is the thing that makes the customer's
+    //    money recoverable. The pending claim is marked verified afterwards; if
+    //    the process dies in between, the portal's retried claim still finds the
+    //    payment (it only needs webhook_events).
+    // The same receipt may already be on file: the notification webhook won the
+    // race, the payment was claimed earlier, or this callback was retried. That
+    // is not an error — the payment exists, which is all the portal needs.
+    let alreadyRecorded = false;
+    try {
+      alreadyRecorded = !!(await db.getOne(
+        'SELECT 1 FROM webhook_events WHERE ref_no = ? LIMIT 1',
+        [refNo]
+      ));
+      if (!alreadyRecorded) {
+        await db.run(
+          `INSERT INTO webhook_events (event_id, ref_no, amount, status, provider, event_type)
+           VALUES (?, ?, ?, 'unclaimed', 'macrodroid', 'payment.scraped')`,
+          ['evt_' + uuidv4().replace(/-/g, '').slice(0, 16), refNo, amount]
+        );
+      }
+    } catch (err) {
+      // A race between the existence check and the INSERT lands here. SQLite
+      // reports 'SQLITE_CONSTRAINT_UNIQUE', PostgreSQL '23505'.
+      const code = String((err && err.code) || '');
+      const isDuplicate = code === '23505'
+        || code.indexOf('SQLITE_CONSTRAINT') === 0
+        || /UNIQUE constraint failed/i.test((err && err.message) || '');
+      if (!isDuplicate) throw err;
+      alreadyRecorded = true;
+    }
+    if (alreadyRecorded) {
+      console.log('[webhook/verify] ref ' + refNo + ' was already recorded — reusing it');
+    }
+
+    const tier = parseTier(body.tier);
+    await db.run(
+      `UPDATE pending_claims
+          SET state = 'verified', ref_no = ?, amount = ?,
+              requested_tier = COALESCE(?, requested_tier), updated_at = ?
+        WHERE claim_id = ? AND state = 'pending'`,
+      [refNo, amount, tier, nowIso, claim.claim_id]
+    );
+
+    console.log(
+      '[webhook/verify] verified suffix ' + refCode + ' as ref ' + refNo +
+      ' (' + amount + ' pesos, claim ' + claim.claim_id + ')'
+    );
+    return res.json({
+      success: true,
+      claimId: claim.claim_id,
+      state: 'verified',
+      ref_no: refNo,
+      amount,
+    });
   } catch (err) {
     next(err);
   }

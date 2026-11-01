@@ -30,6 +30,8 @@ const {
 const omadaService = require('../services/omada');
 const { recordSession } = require('../services/session');
 const { loadPortalContext, resolveClientMacByIp } = require('../utils/portal-context');
+const { macroDroidVerifyUrl, PENDING_CLAIM_TTL_MS } = require('../config');
+const { getPaymentMethodAvailability } = require('../services/payment-methods');
 const { v4: uuidv4 } = require('uuid');
 const SITE = process.env.OMADA_SITE || 'Default';
 
@@ -147,6 +149,141 @@ function fireSmsWebhook(payload) {
     // not escape into the response path either.
     console.error('[payment/claim] SMS webhook could not be dispatched for ref ' + payload.ref_no + ': ' + (err && err.message));
   }
+}
+
+// ── MacroDroid screen-scrape verification ───────────────────────────────
+// How long the portal waits between GET /api/payment/claim/status polls while
+// the Android handset reads the e-wallet screen. Returned to the caller as
+// `retryAfterMs` so the browser and the backend cannot disagree.
+const CLAIM_VERIFICATION_POLL_MS = 3000;
+
+// A verification GET that has not been answered after this long is abandoned.
+// It is fire-and-forget (the customer is already holding a 202), so a hanging
+// socket must not keep the process alive.
+const MACRODROID_VERIFY_TIMEOUT_MS = 10000;
+
+/**
+ * normalizeRequestedTier — the tier the customer asked for, if any.
+ *
+ * The claim modal sends only the 4 digits and the mobile number today, so this
+ * is normally null and the tier is decided by the voucher MacroDroid finds.
+ * When a portal build does send one it is stored on the pending claim so the
+ * verification callback and any support lookup can see what was promised.
+ *
+ * @param {*} value
+ * @returns {'standard'|'premium'|null}
+ */
+function normalizeRequestedTier(value) {
+  if (typeof value !== 'string') return null;
+  const tier = value.trim().toLowerCase();
+  return tier === 'standard' || tier === 'premium' ? tier : null;
+}
+
+/**
+ * fireVerificationRequest — ask the MacroDroid handset to read the receipt.
+ *
+ * Fire-and-forget on purpose: the claim is already parked as 'pending' and the
+ * customer has already been answered with a 202, so an offline handset must not
+ * turn that into an error. Its eventual answer arrives out of band at
+ * POST /api/webhooks/macrodroid/verify-result.
+ *
+ * The reference suffix is the only thing logged — the mobile number is customer
+ * PII and never belongs in application logs.
+ *
+ * @param {string} url verification URL from config.macroDroidVerifyUrl()
+ * @param {string} refSuffix last 4 digits of the reference
+ */
+function fireVerificationRequest(url, refSuffix) {
+  try {
+    const options = { method: 'GET' };
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      options.signal = AbortSignal.timeout(MACRODROID_VERIFY_TIMEOUT_MS);
+    }
+    fetch(url, options).then((res) => {
+      if (res && res.ok) {
+        console.log('[payment/claim] MacroDroid accepted the verification request for suffix ' + refSuffix);
+      } else {
+        console.error(
+          '[payment/claim] MacroDroid verification returned HTTP ' +
+          (res && res.status) + ' for suffix ' + refSuffix
+        );
+      }
+    }).catch((err) => {
+      console.error(
+        '[payment/claim] MacroDroid verification failed for suffix ' + refSuffix + ': ' +
+        ((err && err.message) || String(err))
+      );
+    });
+  } catch (err) {
+    // A synchronous throw (unreachable/malformed URL) must not escape into the
+    // response path: the pending claim simply expires if nothing answers.
+    console.error(
+      '[payment/claim] MacroDroid verification could not be dispatched for suffix ' +
+      refSuffix + ': ' + ((err && err.message) || String(err))
+    );
+  }
+}
+
+/**
+ * beginPendingVerification — park an unmatched claim and ask MacroDroid to look.
+ *
+ * Returns null when MACRODROID_IP is not configured: the deployment has no way
+ * to check the screen, so the claim keeps the original 404 behaviour instead of
+ * hanging the customer on a spinner nobody will resolve.
+ *
+ * A retry (dropped response, double tap) reuses the newest still-open pending
+ * claim for the same digits + mobile + MAC rather than starting a second
+ * screen-scrape, and refreshes its TTL.
+ *
+ * @param {{db: Object, refSuffix: string, mobileNumber: string,
+ *          clientMac: string|null, requestedTier: string|null}} ctx
+ * @returns {Promise<{claimId: string, expiresAt: string}|null>}
+ */
+async function beginPendingVerification(ctx) {
+  const { db, refSuffix, mobileNumber, clientMac, requestedTier } = ctx;
+  const verifyUrl = macroDroidVerifyUrl(refSuffix, clientMac);
+  if (!verifyUrl) return null;
+
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const expiresAt = new Date(now.getTime() + PENDING_CLAIM_TTL_MS).toISOString();
+
+  // Two identifier variants rather than `client_mac IS ?`: PostgreSQL does not
+  // accept a placeholder after IS, and a device with no MAC must still be able
+  // to reopen its own claim.
+  const macClause = clientMac ? 'client_mac = ?' : 'client_mac IS NULL';
+  const params = clientMac ? [refSuffix, mobileNumber, clientMac, nowIso] : [refSuffix, mobileNumber, nowIso];
+  const existing = await db.getOne(
+    `SELECT claim_id FROM pending_claims
+      WHERE state = 'pending' AND ref_suffix = ? AND mobile_number = ?
+        AND ` + macClause + `
+        AND (expires_at IS NULL OR expires_at > ?)
+      ORDER BY id DESC LIMIT 1`,
+    params
+  );
+
+  if (existing) {
+    await db.run(
+      `UPDATE pending_claims
+          SET expires_at = ?, updated_at = ?
+        WHERE claim_id = ?`,
+      [expiresAt, nowIso, existing.claim_id]
+    );
+    fireVerificationRequest(verifyUrl, refSuffix);
+    return { claimId: existing.claim_id, expiresAt };
+  }
+
+  const claimId = 'clm_' + uuidv4().replace(/-/g, '').slice(0, 16);
+  await db.run(
+    `INSERT INTO pending_claims
+       (claim_id, ref_suffix, client_mac, mobile_number, requested_tier,
+        state, created_at, updated_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+    [claimId, refSuffix, clientMac, mobileNumber, requestedTier, nowIso, nowIso, expiresAt]
+  );
+
+  fireVerificationRequest(verifyUrl, refSuffix);
+  return { claimId, expiresAt };
 }
 
 /**
@@ -299,6 +436,13 @@ router.post('/context', contextLimiter, async (req, res, next) => {
  * (e.g. data:image/png;base64,iVBORw0KGgo...), which the portal assigns
  * directly to the <img> src.
  *
+ * `enabled` is the ADMIN-CONTROLLED availability flag (payment_methods table,
+ * toggled from the admin panel's Payment Methods settings). It is separate
+ * from the receiver details: a disabled method keeps its name/QR here so the
+ * portal can render the tile greyed out with a "Temporarily Unavailable"
+ * badge instead of silently dropping the option. A method with no row is
+ * reported as enabled, so an unmigrated database keeps every option working.
+ *
  * UNAUTHENTICATED by design: the captive portal must fetch this before the
  * client has been authorized. The payload is read-only and the QR it exposes
  * is exactly what the customer is meant to scan; it grants no access on its
@@ -309,10 +453,13 @@ function envOrEmpty(name) {
   return typeof value === 'string' ? value : '';
 }
 
-function buildPaymentMethods() {
+async function buildPaymentMethods() {
+  const availability = await getPaymentMethodAvailability();
+
   return {
     gcash: {
       name: 'GCash',
+      enabled: availability.gcash !== false,
       qrImage: envOrEmpty('GCASH_QR_B64'),
       accountName: envOrEmpty('GCASH_NAME'),
       accountNumber: envOrEmpty('GCASH_NUMBER'),
@@ -326,6 +473,7 @@ function buildPaymentMethods() {
     },
     maya: {
       name: 'Maya',
+      enabled: availability.maya !== false,
       qrImage: envOrEmpty('MAYA_QR_B64'),
       accountName: envOrEmpty('MAYA_NAME'),
       accountNumber: envOrEmpty('MAYA_NUMBER'),
@@ -339,6 +487,7 @@ function buildPaymentMethods() {
     },
     qrph: {
       name: 'QR Ph',
+      enabled: availability.qrph !== false,
       qrImage: envOrEmpty('QRPH_QR_B64'),
       accountName: envOrEmpty('QRPH_NAME'),
       accountNumber: envOrEmpty('QRPH_NUMBER'),
@@ -353,11 +502,16 @@ function buildPaymentMethods() {
   };
 }
 
-router.get('/methods', (req, res) => {
-  // Payment details are configurable and mostly static, but never cache them
-  // in shared/proxy storage in case an operator rotates them mid-deploy.
-  res.set('Cache-Control', 'no-store');
-  return res.json(buildPaymentMethods());
+router.get('/methods', async (req, res, next) => {
+  try {
+    // Payment details are configurable and mostly static, but never cache them
+    // in shared/proxy storage: an operator can rotate the receiver details, and
+    // an admin can disable a method, at any time.
+    res.set('Cache-Control', 'no-store');
+    return res.json(await buildPaymentMethods());
+  } catch (err) {
+    next(err);
+  }
 });
 
 // ── Centralized voucher claim ───────────────────────────────────────────
@@ -620,20 +774,56 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         });
       }
 
-      // 404 = no UNCLAIMED payment carries these digits, and no CLAIMED one
-      // carries them for this mobile number: either the webhook never recorded
-      // the payment, it was claimed by someone else, or it was claimed before
-      // the mobile number was stored. Nothing was read into an entitlement and
-      // nothing was consumed, so this line is the whole audit trail of the tap.
-      console.warn(
-        '[payment/claim] no claimable payment ends with ' + refSuffix +
-        ' for this mobile — nothing consumed (webhook not received yet, already' +
-        ' claimed by another number, or no number stored on the claim)'
+      // ── 1c. Ask MacroDroid to read the receipt ─────────────────────────
+      // The webhook is best-effort: a notification the handset never forwarded,
+      // or one that arrived without a reference, leaves a real, paid receipt
+      // with no webhook_events row. When the screen-scrape channel is
+      // configured, the claim is parked as 'pending' and the handset is asked
+      // to check the last 4 digits on the e-wallet screen; the portal polls
+      // GET /api/payment/claim/status and finishes the claim when it answers.
+      //
+      // Nothing is consumed here: no voucher is assigned and no payment row is
+      // written until the verification callback confirms a real payment.
+      const pending = await beginPendingVerification({
+        db,
+        refSuffix,
+        mobileNumber,
+        clientMac,
+        requestedTier: normalizeRequestedTier(body.tier || body.requested_tier),
+      });
+
+      if (!pending) {
+        // No verification channel: the original verdict stands. 404 = no
+        // UNCLAIMED payment carries these digits, and no CLAIMED one carries
+        // them for this mobile number — either the webhook never recorded the
+        // payment, it was claimed by someone else, or it was claimed before the
+        // mobile number was stored. Nothing was consumed, so this line is the
+        // whole audit trail of the tap.
+        console.warn(
+          '[payment/claim] no claimable payment ends with ' + refSuffix +
+          ' for this mobile — nothing consumed (webhook not received yet, already' +
+          ' claimed by another number, or no number stored on the claim)'
+        );
+        return res.status(404).json({
+          success: false,
+          error: 'Payment not found or already claimed.',
+          code: 'PAYMENT_NOT_FOUND',
+        });
+      }
+
+      console.log(
+        '[payment/claim] pending verification ' + pending.claimId +
+        ' for suffix ' + refSuffix + ' (client_mac ' + (clientMac || '(none)') + ')'
       );
-      return res.status(404).json({
-        success: false,
-        error: 'Payment not found or already claimed.',
-        code: 'PAYMENT_NOT_FOUND',
+      return res.status(202).json({
+        success: true,
+        pending: true,
+        state: 'pending',
+        claimId: pending.claimId,
+        ref_suffix: refSuffix,
+        message: 'We are checking your payment on the receipt. This can take a few seconds.',
+        retryAfterMs: CLAIM_VERIFICATION_POLL_MS,
+        expiresAt: pending.expiresAt,
       });
     }
 
@@ -883,6 +1073,125 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     if (authorized) {
       applyRateLimitAfterResponse({ clientMac, amount: Number(event.amount), refNo: claim.refNo });
     }
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Pending verification status ────────────────────────────────────────
+/**
+ * GET /api/payment/claim/status?claimId=…
+ *
+ * The polling endpoint behind the "verifying your payment" spinner. It reports
+ * the pending claim's state and, once the payment has been verified and the
+ * customer's retried claim produced a voucher, the voucher itself.
+ *
+ *   pending  — MacroDroid has not answered yet; poll again after retryAfterMs
+ *   verified — the payment is now recorded as 'unclaimed'; the portal re-sends
+ *              POST /api/payment/claim to convert it into the voucher
+ *   claimed  — a voucher exists for that payment; voucherCode/minutes are set
+ *   failed   — MacroDroid could not confirm the payment (see reason)
+ *   expired  — no answer within PENDING_CLAIM_TTL_MS; let the customer retry
+ *
+ * UNAUTHENTICATED like the claim itself, but the claimId is a random opaque
+ * token, so a poll cannot be used to enumerate other customers' claims. It is
+ * read-only apart from expiring the row it was asked about.
+ */
+router.get('/claim/status', async (req, res, next) => {
+  try {
+    const claimId = typeof req.query.claimId === 'string' ? req.query.claimId.trim() : '';
+    if (!/^clm_[A-Za-z0-9]{8,32}$/.test(claimId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'claimId is required.',
+        code: 'INVALID_CLAIM_ID',
+      });
+    }
+
+    const db = getDb();
+    const claim = await db.getOne(
+      `SELECT claim_id, ref_suffix, client_mac, mobile_number, requested_tier,
+              state, ref_no, amount, failure_reason, expires_at
+         FROM pending_claims
+        WHERE claim_id = ?`,
+      [claimId]
+    );
+    if (!claim) {
+      return res.status(404).json({
+        success: false,
+        error: 'There is no verification in progress for this claim.',
+        code: 'CLAIM_NOT_FOUND',
+      });
+    }
+
+    const now = Date.now();
+    let state = claim.state;
+
+    // Expire lazily: there is no worker for pending claims, and the only thing
+    // that ever reads them is this poll (or the callback, which checks the
+    // deadline itself).
+    if (state === 'pending' && claim.expires_at && Date.parse(claim.expires_at) <= now) {
+      state = 'expired';
+      await db.run(
+        `UPDATE pending_claims SET state = 'expired', updated_at = ?
+          WHERE claim_id = ? AND state = 'pending'`,
+        [new Date(now).toISOString(), claimId]
+      );
+    }
+
+    const payload = {
+      success: true,
+      claimId,
+      state,
+      ref_suffix: claim.ref_suffix,
+      requested_tier: claim.requested_tier || null,
+      expiresAt: claim.expires_at || null,
+    };
+
+    // A verified claim is only half the story: the portal completes it by
+    // re-sending POST /api/payment/claim, and the voucher it produced carries
+    // this payment's full reference in assigned_ref_no. Reporting 'claimed'
+    // here means a reload (or a second tab) sees the finished result instead of
+    // a spinner that will never move.
+    if (state === 'verified' && claim.ref_no) {
+      // The mobile number is part of the lookup for the same reason the
+      // idempotent retry in POST /claim requires it: a voucher must never be
+      // shown to someone who merely guessed the same 4 digits. A payment
+      // claimed by a DIFFERENT number stays 'verified' here and the customer's
+      // retried claim gets the generic failure instead.
+      const voucher = await db.getOne(
+        `SELECT v.code, v.duration_minutes
+           FROM webhook_events e
+           JOIN vouchers v ON v.assigned_ref_no = e.ref_no
+          WHERE e.ref_no = ? AND e.status = 'claimed' AND e.mobile_number = ?
+          ORDER BY v.id DESC LIMIT 1`,
+        [claim.ref_no, claim.mobile_number]
+      );
+      if (voucher) {
+        state = 'claimed';
+        payload.state = 'claimed';
+        payload.voucherCode = voucher.code;
+        const minutes = Math.floor(Number(voucher.duration_minutes));
+        payload.minutes = Number.isFinite(minutes) && minutes > 0 ? minutes : null;
+        await db.run(
+          `UPDATE pending_claims SET state = 'claimed', updated_at = ?
+            WHERE claim_id = ? AND state = 'verified'`,
+          [new Date(now).toISOString(), claimId]
+        );
+      }
+    }
+
+    if (state === 'failed' && claim.failure_reason) {
+      payload.reason = claim.failure_reason;
+    }
+    if (state === 'verified' && claim.ref_no) {
+      payload.ref_no = claim.ref_no;
+      payload.amount = claim.amount;
+    }
+
+    // Poll answers must never be cached by a proxy or the captive WebView.
+    res.set('Cache-Control', 'no-store');
+    return res.json(payload);
   } catch (err) {
     next(err);
   }

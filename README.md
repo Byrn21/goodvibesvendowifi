@@ -412,6 +412,8 @@ limit on how long a pass may stay paused. The expiration worker
 | `MACRODROID_WEBHOOK_SECRET` | `routes/webhook.js` | *(empty)* | Shared secret MacroDroid sends as `secret_token`; compared in constant time. |
 | `MACRODROID_PESOS_PER_MINUTE` | `config/index.js` | `10` | Whole units of currency granted per minute of Wi-Fi time. |
 | `MACRODROID_SMS_WEBHOOK_URL` | `routes/payment.js` | *(empty → no SMS)* | MacroDroid SMS macro endpoint. `POST /api/payment/claim` POSTs the claimed voucher here so the code can be texted to the customer. |
+| `MACRODROID_IP` | `config/index.js` | *(empty → channel off)* | LAN address of the Android handset running the receipt-verification macro. When set, a claim whose 4 digits match no recorded payment is parked in `pending_claims` and the backend fires `GET http://<IP>:<PORT>/verify?ref=<4 digits>&mac=<client MAC>` at the handset. |
+| `MACRODROID_WEBHOOK_PORT` | `config/index.js` | `8080` | Port of that handset's MacroDroid HTTP server. An unparsable or out-of-range value falls back to `8080`; an empty `MACRODROID_IP` disables the channel entirely. |
 
 `MACRODROID_SMS_WEBHOOK_URL` is optional and the call is **fire-and-forget**:
 it is dispatched without blocking the response and any failure is logged only,
@@ -424,6 +426,31 @@ variable whitelist can extract it straight from the request URL —
 6-digit code they need (with `ref_suffix` kept for correlation), and
 `status_link` (`BASE_URL` + `/status.html`) is included only when `BASE_URL`
 is set. A query string already present on the configured URL is preserved.
+
+### MacroDroid receipt verification (screen-scraping fallback)
+
+The payment webhook is best-effort: a notification the handset never forwarded
+leaves a real, paid receipt with no `webhook_events` row. When `MACRODROID_IP`
+is configured, `POST /api/payment/claim` covers that case by asking the handset
+to read the e-wallet screen:
+
+1. The 4 digits match no recorded payment → the claim is stored in
+   `pending_claims` (client MAC, mobile number, requested tier, TTL) and the
+   response is `202 { success: true, pending: true, claimId, retryAfterMs }`.
+2. The backend fires `GET http://<MACRODROID_IP>:<MACRODROID_WEBHOOK_PORT>/verify?ref=<4 digits>&mac=<client MAC>`
+   (fire-and-forget; no request body, so a MacroDroid variable whitelist can
+   read the parameters straight from the URL).
+3. The macro answers `POST /api/webhooks/macrodroid/verify-result` with the
+   verdict. `verified` records the scraped receipt as an `unclaimed`
+   `webhook_events` row; `failed` ends the claim with a reason.
+4. The portal polls `GET /api/payment/claim/status?claimId=…` and, once the
+   state is `verified`, repeats the normal claim — which authorizes the device
+   and consumes the voucher exactly like a webhook-recorded payment.
+
+Pending claims expire after 5 minutes (`PENDING_CLAIM_TTL_MS` in
+`config/index.js`) and report `state: 'expired'`; nothing is consumed by a
+pending, failed or expired claim. With `MACRODROID_IP` empty there is no channel
+to ask, so an unmatched claim keeps the original `404 PAYMENT_NOT_FOUND`.
 
 ### InstaPay / PESONet webhook + tiered QoS
 
@@ -510,7 +537,10 @@ resulting speed (`default`, `↓ 20 Mbps / ↑ 5 Mbps`, …).
 ### Captive-portal QR payment methods
 
 Served to the frontend by `GET /api/payment/methods`; each defaults to `''`
-when unset. The `*_QR_B64` values are complete data-URI strings
+when unset. Whether a method is offered at all is **not** an environment
+variable: it is the `is_active` column of the `payment_methods` table, toggled
+from the admin panel's **Payment Methods** page (`npm run db:migrate` creates and
+seeds the table; the seed never overwrites an admin's choice). The `*_QR_B64` values are complete data-URI strings
 (e.g. `data:image/png;base64,iVBORw0KGgo…`).
 
 | Variable | Description |
@@ -683,6 +713,25 @@ limited to 16 kB.
 
 Receives a verified payment from MacroDroid. See §3 for the body and flow.
 
+#### `POST /api/webhooks/macrodroid/verify-result`
+
+Answer to the receipt-verification request fired by `POST /api/payment/claim`
+when no recorded payment matches. Secret-gated with the same
+`MACRODROID_WEBHOOK_SECRET` (constant-time comparison).
+
+Body: `{ secret_token, status: 'verified'|'failed', ref_code, ref_no?, amount?, tier?, reason?, client_mac? }`
+
+`client_mac` is optional: echoing the MAC the macro received in its own `GET`
+scopes the answer to that device, which matters when two guests are waiting on
+the same 4 digits. Without it the newest open claim for those digits is used.
+
+`verified` requires the full `ref_no` (≤64 chars) and a positive `amount` in
+pesos; the backend writes an `unclaimed` `webhook_events` row so the portal's
+retried claim can consume it, and marks the pending claim `verified`. `failed`
+stores `reason` and marks the claim `failed`; nothing is consumed. A callback for
+digits with no open pending claim answers `404 PENDING_CLAIM_NOT_FOUND`, and one
+that arrives after the window closed answers `410 PENDING_CLAIM_EXPIRED`.
+
 #### `POST /api/payment/context`
 
 Fire-and-forget beacon called when a client lands on the portal. Stores the
@@ -693,14 +742,21 @@ design, protected by strict validation and a dedicated per-IP limiter.
 #### `GET /api/payment/methods`
 
 Returns GCash/Maya/QR Ph receiver names, numbers, and QR images from the
-environment. Cache-Control is `no-store`.
+environment, plus an `enabled` flag per method read from the `payment_methods`
+table (the admin panel's **Payment Methods** toggles). Cache-Control is
+`no-store`, so a toggle takes effect on the next portal page load.
+
+A method with no row is reported as `enabled: true`, and a database that predates
+the table (migration not run) degrades the same way instead of taking the payment
+page down. The guest portal does not hide a disabled method: it greys the tile
+out, sets the `disabled` attribute and shows a "Temporarily Unavailable" badge.
 
 #### `POST /api/payment/claim`
 
 Manual fallback: submit a reference number when the automatic interception has
 not arrived.
 
-Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac? }`
+Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac?, tier? }`
 
 | Field | Required | Notes |
 |---|---|---|
@@ -708,6 +764,7 @@ Body: `{ ref_suffix, mobile_number, client_mac?, ap_mac? }`
 | `mobile_number` | yes | 11-digit PH mobile (`09XXXXXXXXX`). Saved on the reconciled `webhook_events` row and used as the SMS destination. |
 | `client_mac` | no | The device to authorize. An explicit value is sanitized and always wins; only when it is absent does the backend fall back to the device at the request address (LAN-direct). Without either, the claim still succeeds, it is just not auto-connected. |
 | `ap_mac` | no | Recorded in logs for traceability; the authorization itself uses the AP MAC / SSID / radio ID captured by `POST /api/payment/context`. |
+| `tier` | no | `standard` or `premium`, stored on a pending verification so the receipt check knows what the customer asked for. Anything else is ignored. |
 
 The paying device is authorized **directly** through the controller's web UI API
 (`omadaService.authenticateClient` → `POST …/api/v2/hotspot/extPortal/auth`)
@@ -735,7 +792,8 @@ amount gets the `PREMIUM_*` caps and every other amount gets the
 | Already claimed by the SAME mobile number | `200 { success: true, authorized: false, alreadyClaimed: true, voucherCode, ref_no, minutes }` |
 | Omada refused | `502 { success: false, authorized: false, code: 'OMADA_AUTH_FAILED', error }` |
 | Device has no fresh portal context (never loaded the portal, or the row is older than 1 hour) | `502 { success: false, authorized: false, code: 'MISSING_PORTAL_CONTEXT', error }` — nothing consumed; load the portal page and tap Claim again |
-| Payment not found / claimed by another number | `404 { success: false, error: 'Payment not found or already claimed.', code: 'PAYMENT_NOT_FOUND' }` |
+| Payment not found / claimed by another number (verification channel disabled) | `404 { success: false, error: 'Payment not found or already claimed.', code: 'PAYMENT_NOT_FOUND' }` |
+| No recorded payment, verification channel enabled | `202 { success: true, pending: true, state: 'pending', claimId, ref_suffix, retryAfterMs, expiresAt }` — the handset is reading the receipt; poll `GET /api/payment/claim/status` |
 | No voucher left for the amount | `404 { success: false, error: 'No voucher is available for this amount…', code: 'NO_VOUCHER_AVAILABLE' }` |
 
 Four deliberate behaviours worth noting:
@@ -765,6 +823,15 @@ Four deliberate behaviours worth noting:
   keeps the payment↔voucher ledger intact and provides the manual fallback, so
   the portal can stop *showing* it without the backend losing the audit trail.
 
+#### `GET /api/payment/claim/status?claimId=…`
+
+Polling endpoint for the pending-verification spinner. Returns
+`{ success: true, claimId, state, ref_suffix, requested_tier, expiresAt }` where
+`state` is `pending`, `verified`, `claimed`, `failed` (with `reason`) or
+`expired`. Once a voucher has been produced for the verified payment it also
+returns `voucherCode` and `minutes`. `Cache-Control: no-store`; an unknown
+`claimId` is `404 CLAIM_NOT_FOUND`.
+
 ### Admin routes
 
 `/api/admin/*` require a bearer token from `POST /api/admin/login` or the
@@ -783,6 +850,8 @@ Four deliberate behaviours worth noting:
 | `GET` | `/api/admin/sessions` | List active/pending sessions. |
 | `POST` | `/api/admin/sessions/:id/expire` | Force-expire a session. |
 | `GET` | `/api/admin/stats` | Dashboard statistics. |
+| `GET` | `/api/admin/payment-methods` | Payment method availability (`gcash`, `maya`, `qrph`). |
+| `PUT` | `/api/admin/payment-methods/:key` | Enable/disable one method. Body `{ "enabled": true|false }`; the response carries the updated full list. |
 
 ### Static pages
 
