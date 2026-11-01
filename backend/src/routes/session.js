@@ -632,12 +632,27 @@ async function handleVoucherStatus(req, res, voucher) {
   // active-but-timed-out session comes back as state 'expired'.
   const session = await getSessionByVoucher(code);
 
+  // ── Live session found: bind this browser to it ─────────────────────
+  // The voucher code is the one credential a returning guest always has, so
+  // this lookup is the portal's way of handing the browser its identity back
+  // after the captive mini-browser dropped its storage. The signed cookie (and
+  // the same token echoed in the body for cookie-blocked browsers) names the
+  // EXACT session, which outranks both the MAC and the request address on
+  // every later status request — so the page keeps working after the guest
+  // switches to mobile data and req.ip stops matching portal_client_context.
+  //
+  // Nothing here re-authorizes the client: the session must already be live
+  // (active / paused / pending payment). An unused voucher has no session to
+  // name, and an expired one is reported inline instead — no cookie is set for
+  // either, so a stale code can never bind the browser to a dead session.
   if (session && session.state === 'active') {
+    const statusToken = setSessionCookie(req, res, session.sessionId);
     return res.json({
       success: true,
       active: true,
       state: 'active',
       sessionId: session.sessionId,
+      statusToken: statusToken || null,
       remainingSeconds: computeRemaining(session, serverTime),
       expiresAt: session.expiresAt,
       voucherType: normalizeVoucherType(session.voucherType || row.type),
@@ -646,11 +661,13 @@ async function handleVoucherStatus(req, res, voucher) {
 
   if (session && session.state === 'paused') {
     // Premium pause freezes the remaining time on the session row.
+    const statusToken = setSessionCookie(req, res, session.sessionId);
     return res.json({
       success: true,
       active: true,
       state: 'paused',
       sessionId: session.sessionId,
+      statusToken: statusToken || null,
       remainingSeconds: computeRemaining(session, serverTime),
       expiresAt: session.expiresAt,
       voucherType: normalizeVoucherType(session.voucherType || row.type),
@@ -659,11 +676,13 @@ async function handleVoucherStatus(req, res, voucher) {
 
   if (session && (session.state === 'pending_payment' || session.state === 'pending_verification')) {
     // Payment recorded, duration not started yet — the full time is still due.
+    const statusToken = setSessionCookie(req, res, session.sessionId);
     return res.json({
       success: true,
       active: true,
       state: session.state,
       sessionId: session.sessionId,
+      statusToken: statusToken || null,
       remainingSeconds: computeRemaining(session, serverTime),
       expiresAt: session.expiresAt,
       voucherType: normalizeVoucherType(session.voucherType || row.type),

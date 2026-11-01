@@ -2545,6 +2545,29 @@
     );
   }
 
+  // A session that exists and has time left behind it. These are exactly the
+  // states the backend binds to this browser (it sets portal_session on the
+  // response), so they are the only ones worth redirecting to status.html.
+  function isLiveSessionState(state) {
+    return state === 'active'
+      || state === 'paused'
+      || state === 'pending_payment'
+      || state === 'pending_verification';
+  }
+
+  // Navigate to the status page, carrying the signed identity when the backend
+  // returned one. Plain string concatenation on purpose: no new URL() on a
+  // relative path (it throws in some captive WebViews) and no URLSearchParams
+  // to get wrong — the same reason success.html builds statusHref() by hand.
+  // The token covers a mini-browser that rejects the HttpOnly cookie (a
+  // cross-site SameSite=Lax cookie is not stored) or partitions its storage;
+  // status.html reads ?token= first and re-saves it for later polls.
+  function openSessionStatusPage(token) {
+    var url = 'status.html';
+    if (token) url += '?token=' + encodeURIComponent(token);
+    window.location.href = url;
+  }
+
   // GET /api/session/status?voucher=<code> — native fetch, same shape as the
   // other portal calls (see attemptAutoReconnect / submitClaim).
   function checkVoucherStatus() {
@@ -2572,7 +2595,13 @@
     fetch((CONFIG.apiBaseUrl || '') + '/api/session/status?voucher=' + encodeURIComponent(check.value), {
       method: 'GET',
       headers: { 'Accept': 'application/json' },
-      credentials: 'same-origin'
+      // 'include', not 'same-origin': the response carries the persistent
+      // portal_session cookie, and a browser only stores it from a
+      // cross-origin read (the controller-hosted HTML case) when credentials
+      // are included. status.html and success.html already do the same, and
+      // the backend's CORS config answers with a reflected origin plus
+      // credentials: true.
+      credentials: 'include'
     }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (data) {
         return { ok: r.ok, status: r.status, data: data };
@@ -2592,6 +2621,19 @@
         setStatusResult('Temporary connection error. Please wait a moment and try again.', 'warning');
         return;
       }
+
+      // Live session: this response just set the identity cookie, so hand the
+      // guest straight to the status page instead of reporting the time inside
+      // the modal. Every other outcome (unused voucher, expired, not found)
+      // has no session to bind and stays here — redirecting on those would
+      // land on status.html with no identity, i.e. the "open the portal once"
+      // warning, which is not what the guest asked for.
+      if (isLiveSessionState(data.state)) {
+        setStatusResult('Session found \u2014 opening your status page\u2026', 'success');
+        openSessionStatusPage(data.statusToken);
+        return;
+      }
+
       renderVoucherStatus(data);
     }).catch(function () {
       setStatusResult('Temporary connection error. Please wait a moment and try again.', 'warning');

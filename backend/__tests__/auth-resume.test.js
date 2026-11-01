@@ -562,3 +562,154 @@ describe('POST /api/auth — re-entry with a claimed or already-started voucher'
     expect(res.body.session.remainingSeconds).toBeLessThanOrEqual(3600);
   });
 });
+
+// ── Voucher lookups bind the browser to the session ──────────────────────────
+// The "Check Voucher Status / Reconnect" form is the guest's only way back in
+// after a captive mini-browser drops its storage. A live lookup therefore has
+// to hand the browser its identity (the portal_session cookie, mirrored as
+// statusToken) so status.html keeps working from a different address — the
+// mobile-data case where req.ip can never match portal_client_context.
+// Nothing is bound for an unused voucher (no session exists), an expired one
+// or an unknown code, so a stale code can never point the browser at a dead
+// session.
+
+describe('GET /api/session/status?voucher= — identity cookie', () => {
+  /** The `portal_session=…` Set-Cookie line, or '' when none was sent. */
+  function readSessionCookieLine(res) {
+    const lines = res.headers['set-cookie'] || [];
+    return lines.find((c) => c.indexOf('portal_session=') === 0) || '';
+  }
+
+  /** Just the token half of that cookie (what the body echoes as statusToken). */
+  function readCookieToken(res) {
+    const line = readSessionCookieLine(res);
+    if (!line) return '';
+    return line.split(';')[0].slice('portal_session='.length);
+  }
+
+  test('an active session sets a persistent HttpOnly cookie and echoes its token', async () => {
+    await seedUsedVoucher('810001', 'standard', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_cookie_active',
+      clientMac: MAC,
+      duration: 60,
+      voucherUsed: '810001',
+      voucherType: 'standard',
+    });
+
+    const res = await request(app).get('/api/session/status?voucher=810001');
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('active');
+
+    const line = readSessionCookieLine(res);
+    expect(line).not.toBe('');
+    // Persistent (not a session cookie), scoped to the whole portal, and
+    // unreadable from page JavaScript.
+    expect(line).toMatch(/Max-Age=604800/);
+    expect(line).toMatch(/Path=\//);
+    expect(line).toMatch(/HttpOnly/i);
+    expect(line).toMatch(/SameSite=Lax/i);
+
+    // The body carries the same signed identity for cookie-blocked browsers.
+    expect(res.body.statusToken).toBe(readCookieToken(res));
+    expect(res.body.statusToken).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+  });
+
+  test('the returned identity resolves the session with no MAC and no matching address', async () => {
+    await seedUsedVoucher('810002', 'standard', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_cookie_roundtrip',
+      clientMac: MAC,
+      clientIp: '10.0.0.5',
+      duration: 60,
+      voucherUsed: '810002',
+      voucherType: 'standard',
+    });
+
+    const lookup = await request(app).get('/api/session/status?voucher=810002');
+    const token = lookup.body.statusToken;
+    expect(token).toBeTruthy();
+
+    // This request is exactly the mobile-data case: no sessionId, no mac, and
+    // an address with no portal context row. Only the identity can answer it.
+    const status = await request(app).get('/api/session/status?token=' + encodeURIComponent(token));
+
+    expect(status.status).toBe(200);
+    expect(status.body.sessionId).toBe('sess_cookie_roundtrip');
+    expect(status.body.state).toBe('active');
+  });
+
+  test('a paused session is bound too', async () => {
+    await seedUsedVoucher('810003', 'premium', MAC);
+    await seedPausedPremiumSession('sess_cookie_paused', '810003', MAC);
+
+    const res = await request(app).get('/api/session/status?voucher=810003');
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('paused');
+    expect(readSessionCookieLine(res)).not.toBe('');
+    expect(res.body.statusToken).toBe(readCookieToken(res));
+  });
+
+  test('a pending_payment session is bound too', async () => {
+    await seedUsedVoucher('810004', 'standard', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_cookie_pending',
+      clientMac: MAC,
+      duration: 60,
+      voucherUsed: '810004',
+      voucherType: 'standard',
+    });
+    await getDb().run(`UPDATE sessions SET state = 'pending_payment' WHERE session_id = ?`, [
+      'sess_cookie_pending',
+    ]);
+
+    const res = await request(app).get('/api/session/status?voucher=810004');
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('pending_payment');
+    expect(readSessionCookieLine(res)).not.toBe('');
+  });
+
+  test('an unused voucher sets no cookie (no session to name)', async () => {
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, state)
+       VALUES ('810005', 'standard', 180, 'active')`
+    );
+
+    const res = await request(app).get('/api/session/status?voucher=810005');
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('unused');
+    expect(readSessionCookieLine(res)).toBe('');
+    expect(res.body.statusToken).toBeUndefined();
+  });
+
+  test('an expired session sets no cookie and reports EXPIRED inline', async () => {
+    await seedUsedVoucher('810006', 'standard', MAC);
+    await sessionService.recordSession({
+      sessionId: 'sess_cookie_dead',
+      clientMac: MAC,
+      duration: 60,
+      voucherUsed: '810006',
+    });
+    await sessionService.expireSession('sess_cookie_dead', 'time_expired');
+
+    const res = await request(app).get('/api/session/status?voucher=810006');
+
+    expect(res.status).toBe(200);
+    expect(res.body.active).toBe(false);
+    expect(res.body.error).toBe('EXPIRED');
+    expect(readSessionCookieLine(res)).toBe('');
+    expect(res.body.statusToken).toBeUndefined();
+  });
+
+  test('an unknown code sets no cookie', async () => {
+    const res = await request(app).get('/api/session/status?voucher=810007');
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('VOUCHER_NOT_FOUND');
+    expect(readSessionCookieLine(res)).toBe('');
+  });
+});
