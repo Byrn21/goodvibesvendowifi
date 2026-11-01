@@ -180,10 +180,12 @@ CREATE TABLE IF NOT EXISTS portal_client_context (
 -- ================================================================
 -- Payment method availability (admin toggle)
 -- ================================================================
--- One row per e-wallet the captive portal can offer. The receiver details
--- and QR images stay in the environment (GCASH_* / MAYA_* / QRPH_* — see
--- routes/payment.js); this table only owns the on/off state so an admin can
--- disable a method without a redeploy.
+-- One row per payment method the captive portal can offer (the GCash, Maya
+-- and QR Ph e-wallets plus cash). The receiver details and QR images stay in
+-- the environment (GCASH_* / MAYA_* / QRPH_* — see routes/payment.js); this
+-- table only owns the on/off state so an admin can disable a method without a
+-- redeploy. Cash has no receiver details: it authorizes via voucher claimed at
+-- the counter, but its tile is toggled and branded like the others.
 --
 -- Read by GET /api/payment/methods (public, captive portal) and by the admin
 -- routes GET/PUT /api/admin/payment-methods. A method with NO row is treated
@@ -194,7 +196,7 @@ CREATE TABLE IF NOT EXISTS portal_client_context (
 -- that already exists is left untouched, so re-running `npm run db:migrate`
 -- after toggling a method off does NOT turn it back on.
 CREATE TABLE IF NOT EXISTS payment_methods (
-    method_key   VARCHAR(32) PRIMARY KEY, -- 'gcash' | 'maya' | 'qrph'
+    method_key   VARCHAR(32) PRIMARY KEY, -- 'gcash' | 'maya' | 'qrph' | 'cash'
     display_name VARCHAR(64) NOT NULL,
     is_active    BOOLEAN NOT NULL DEFAULT TRUE, -- SQLite stores 1/0; PostgreSQL stores true/false
     -- Admin-uploaded logo as a complete data URI (data:image/png;base64,…).
@@ -208,7 +210,8 @@ CREATE TABLE IF NOT EXISTS payment_methods (
 INSERT INTO payment_methods (method_key, display_name, is_active) VALUES
     ('gcash', 'GCash', TRUE),
     ('maya',  'Maya',  TRUE),
-    ('qrph',  'QR Ph', TRUE)
+    ('qrph',  'QR Ph', TRUE),
+    ('cash',  'Cash',  TRUE)
 ON CONFLICT (method_key) DO NOTHING;
 
 -- ================================================================

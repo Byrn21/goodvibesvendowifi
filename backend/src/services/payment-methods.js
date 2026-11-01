@@ -1,10 +1,12 @@
 /**
  * services/payment-methods.js — Payment method availability state
  *
- * The captive portal can offer three e-wallet methods (GCash, Maya, QR Ph).
- * Their receiver details and QR images come from the environment (see
- * routes/payment.js); whether each one is OFFERED at all is stored in the
- * `payment_methods` table so an admin can toggle it without a redeploy.
+ * The captive portal can offer four methods: the GCash, Maya and QR Ph
+ * e-wallets plus cash. Their receiver details and QR images come from the
+ * environment (see routes/payment.js); whether each one is OFFERED at all is
+ * stored in the `payment_methods` table so an admin can toggle it without a
+ * redeploy. Cash has no QR/receiver data — it is claimed with a counter
+ * voucher — but its tile is toggled and branded exactly like the e-wallets.
  *
  * This module is the single source of truth for both sides:
  *   - routes/payment.js  → GET /api/payment/methods   (public, guest portal)
@@ -22,6 +24,7 @@ const PAYMENT_METHODS = [
   { key: 'gcash', name: 'GCash' },
   { key: 'maya', name: 'Maya' },
   { key: 'qrph', name: 'QR Ph' },
+  { key: 'cash', name: 'Cash' },
 ];
 
 const METHOD_KEYS = PAYMENT_METHODS.map((m) => m.key);
@@ -128,7 +131,7 @@ async function listPaymentMethodStates() {
  * `logoBase64` must already have been validated by the caller
  * (routes/admin.js). Pass `null` to clear it and fall back to the bundled asset.
  *
- * @param {string} key method key ('gcash' | 'maya' | 'qrph')
+ * @param {string} key method key ('gcash' | 'maya' | 'qrph' | 'cash')
  * @param {{enabled?: boolean, logoBase64?: string|null}} updates
  * @returns {Promise<{key: string, name: string, enabled: boolean, logoBase64: string|null, updatedAt: string|null}>}
  */

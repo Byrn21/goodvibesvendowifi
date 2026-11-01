@@ -800,7 +800,7 @@ router.put('/payment-methods/:key', async (req, res, next) => {
     if (!isKnownMethod(key)) {
       return res.status(400).json({
         success: false,
-        error: 'Unknown payment method. Supported: gcash, maya, qrph.',
+        error: 'Unknown payment method. Supported: gcash, maya, qrph, cash.',
         code: 'UNKNOWN_PAYMENT_METHOD',
       });
     }

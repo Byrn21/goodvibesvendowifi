@@ -752,6 +752,28 @@ describe('custom payment-method logos', () => {
     expect(tileLogoImg(portal, 'gcash').alt).toBe('GCash logo');
   });
 
+  test('applies the admin-configured logo to the cash tile too', async () => {
+    // Cash is not a QR method, so it is easy to leave out of the availability
+    // loop by mistake. Its tile must still honour enabled/logoBase64.
+    const CASH_LOGO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+    const portal = loadPortal({
+      search: '',
+      fetchResponse: (url) => (url.indexOf('/api/payment/methods') !== -1
+        ? {
+          ok: true,
+          status: 200,
+          payload: Object.assign(methodsPayload(), {
+            cash: { name: 'Cash', enabled: false, logoBase64: CASH_LOGO },
+          }),
+        }
+        : null),
+    });
+    await portal.flush();
+
+    expect(tileLogoImg(portal, 'cash').src).toBe(CASH_LOGO);
+    expect(tileLogoImg(portal, 'cash').alt).toBe('Cash logo');
+  });
+
   test('leaves the bundled asset in place when no custom logo exists', async () => {
     const portal = loadPortal({
       search: '',

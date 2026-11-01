@@ -512,6 +512,15 @@ async function buildPaymentMethods() {
         "After paying, tap 'Claim Voucher' and enter the last 4 digits of your reference number.",
       ],
     },
+    // Cash has no QR code or receiver account: the guest selects it, reads the
+    // counter instructions and claims a voucher. Only the admin-controlled
+    // availability flag and the optional custom logo apply, so the cash tile
+    // can be greyed out and branded like every other method.
+    cash: {
+      name: 'Cash',
+      enabled: stateOf('cash').enabled !== false,
+      logoBase64: stateOf('cash').logoBase64 || null,
+    },
   };
 }
 

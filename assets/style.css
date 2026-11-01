@@ -1372,6 +1372,10 @@ body {
   text-decoration: none;
   color: var(--text);
   position: relative;
+  /* The availability badge is absolutely positioned over the tile; isolating
+     the tile keeps its z-index scoped here instead of competing with the
+     page-level stacking contexts (modals, header, loading overlay). */
+  isolation: isolate;
   overflow: hidden;
   font-family: var(--font);
   min-height: 100px;
@@ -1410,12 +1414,17 @@ body {
 }
 
 .payment-tile__logo {
+  /* Fill the fixed-size icon wrapper instead of rendering at the image's
+     intrinsic size: an admin-uploaded logo (up to 160 px on its long edge)
+     would otherwise spill past the 52/60 px box and unbalance the tile. */
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   max-height: 100%;
-  width: auto;
-  height: auto;
   object-fit: contain;
   display: block;
+  /* Purely decorative: never intercept the tile's click or focus target. */
+  pointer-events: none;
 }
 
 .payment-tile__name {
@@ -1455,20 +1464,34 @@ body {
   background: var(--surface-2, #f1f5f9);
 }
 
+/* Availability ribbon.
+   It is a full-width strip pinned to the top edge, NOT a centred pill: a pill
+   at a fixed offset sat on top of the 52 px logo and made the tile look
+   broken. Because it is absolutely positioned it takes no space in the
+   flex column, so the logo and name stay exactly where they are on an
+   available tile. `z-index` lifts it above the logo, `pointer-events: none`
+   keeps the (already disabled) tile's hit area untouched, and the ellipsis
+   keeps the long label from widening the tile on narrow phones. */
 .payment-tile__badge {
   position: absolute;
-  top: 6px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.78);
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  padding: 3px 6px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  background: rgba(44, 24, 16, 0.82);
   color: #fff;
-  font-size: 0.625rem;
+  font-size: 0.5625rem;
   font-weight: 700;
-  letter-spacing: 0.02em;
-  white-space: nowrap;
+  line-height: 1.4;
+  letter-spacing: 0.04em;
+  text-align: center;
   text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }
 
 .payment-tile__badge[hidden] {

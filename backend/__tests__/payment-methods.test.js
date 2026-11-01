@@ -10,6 +10,8 @@
  *   - every method defaults to enabled (freshly migrated database)
  *   - a disabled method is reported as enabled:false to the guest portal
  *     while every other method keeps working
+ *   - cash is a first-class method: seeded, toggleable, and exposed by the
+ *     public route with an `enabled` flag and `logoBase64` (no QR fields)
  *   - re-enabling restores it
  *   - re-applying schema.sql (npm run db:migrate) does NOT reset an admin's
  *     choice — the seed is INSERT ... ON CONFLICT DO NOTHING
@@ -58,7 +60,7 @@ async function publicAvailability() {
   const res = await request(app).get('/api/payment/methods');
   expect(res.status).toBe(200);
   const availability = {};
-  ['gcash', 'maya', 'qrph'].forEach((key) => {
+  ['gcash', 'maya', 'qrph', 'cash'].forEach((key) => {
     availability[key] = res.body[key].enabled;
   });
   return availability;
@@ -91,7 +93,7 @@ beforeEach(async () => {
 describe('GET /api/payment/methods — availability defaults', () => {
   test('reports every method as enabled on a freshly migrated database', async () => {
     const availability = await publicAvailability();
-    expect(availability).toEqual({ gcash: true, maya: true, qrph: true });
+    expect(availability).toEqual({ gcash: true, maya: true, qrph: true, cash: true });
   });
 
   test('still serves receiver details alongside the enabled flag', async () => {
@@ -122,7 +124,7 @@ describe('PUT /api/admin/payment-methods/:key — toggling', () => {
     expect(maya.enabled).toBe(false);
     expect(gcash.enabled).toBe(true);
 
-    expect(await publicAvailability()).toEqual({ gcash: true, maya: false, qrph: true });
+    expect(await publicAvailability()).toEqual({ gcash: true, maya: false, qrph: true, cash: true });
   });
 
   test('re-enables a disabled method', async () => {
@@ -130,7 +132,7 @@ describe('PUT /api/admin/payment-methods/:key — toggling', () => {
     const res = await setEnabled('maya', { enabled: true });
     expect(res.status).toBe(200);
     expect(res.body.method).toMatchObject({ key: 'maya', enabled: true });
-    expect(await publicAvailability()).toEqual({ gcash: true, maya: true, qrph: true });
+    expect(await publicAvailability()).toEqual({ gcash: true, maya: true, qrph: true, cash: true });
   });
 
   test('persists through a schema re-apply (the seed never overwrites a choice)', async () => {
@@ -139,14 +141,14 @@ describe('PUT /api/admin/payment-methods/:key — toggling', () => {
     // What `npm run db:migrate` does on every deploy: apply schema.sql again.
     await applySchema();
 
-    expect(await publicAvailability()).toEqual({ gcash: true, maya: true, qrph: false });
+    expect(await publicAvailability()).toEqual({ gcash: true, maya: true, qrph: false, cash: true });
   });
 
   test('accepts a mixed-case method key', async () => {
     const res = await setEnabled('GCash', { enabled: false });
     expect(res.status).toBe(200);
     expect(res.body.method.key).toBe('gcash');
-    expect(await publicAvailability()).toEqual({ gcash: false, maya: true, qrph: true });
+    expect(await publicAvailability()).toEqual({ gcash: false, maya: true, qrph: true, cash: true });
   });
 });
 
@@ -188,6 +190,7 @@ describe('PUT /api/admin/payment-methods/:key — custom Base64 logo', () => {
     // Untouched methods still carry an explicit null, never undefined.
     expect(portal.body.maya.logoBase64).toBeNull();
     expect(portal.body.qrph.logoBase64).toBeNull();
+    expect(portal.body.cash.logoBase64).toBeNull();
   });
 
   test('accepts logo_base64 as an alias for the same field', async () => {
@@ -201,7 +204,7 @@ describe('PUT /api/admin/payment-methods/:key — custom Base64 logo', () => {
     const res = await setEnabled('gcash', { logoBase64: PNG });
     expect(res.status).toBe(200);
     expect(res.body.method).toMatchObject({ enabled: false, logoBase64: PNG });
-    expect(await publicAvailability()).toEqual({ gcash: false, maya: true, qrph: true });
+    expect(await publicAvailability()).toEqual({ gcash: false, maya: true, qrph: true, cash: true });
   });
 
   test('a toggle does not wipe an uploaded logo', async () => {
@@ -256,6 +259,37 @@ describe('PUT /api/admin/payment-methods/:key — custom Base64 logo', () => {
   });
 });
 
+// Cash is seeded and toggled exactly like the e-wallets, but the public route
+// must not invent QR/receiver fields for it: the portal renders the static cash
+// tile and opens the cash timer modal instead of the QR modal.
+describe('cash as a first-class payment method', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+  test('the public route reports cash with an enabled flag and no QR data', async () => {
+    const res = await request(app).get('/api/payment/methods');
+    expect(res.status).toBe(200);
+    expect(res.body.cash).toEqual({ name: 'Cash', enabled: true, logoBase64: null });
+  });
+
+  test('cash can be switched off and back on without touching the e-wallets', async () => {
+    const off = await setEnabled('cash', { enabled: false });
+    expect(off.status).toBe(200);
+    expect(off.body.method).toMatchObject({ key: 'cash', name: 'Cash', enabled: false });
+
+    expect(await publicAvailability()).toEqual({ gcash: true, maya: true, qrph: true, cash: false });
+
+    const on = await setEnabled('cash', { enabled: true });
+    expect(on.status).toBe(200);
+    expect(await publicAvailability()).toEqual({ gcash: true, maya: true, qrph: true, cash: true });
+  });
+
+  test('accepts a custom logo for cash', async () => {
+    const res = await setEnabled('cash', { logoBase64: PNG });
+    expect(res.status).toBe(200);
+    expect((await request(app).get('/api/payment/methods')).body.cash.logoBase64).toBe(PNG);
+  });
+});
+
 describe('admin payment-method routes require authentication', () => {
   test('GET is 401 without a token', async () => {
     const res = await request(app).get('/api/admin/payment-methods');
@@ -274,8 +308,8 @@ describe('admin payment-method routes require authentication', () => {
       .get('/api/admin/payment-methods')
       .set('X-API-Key', VALID_KEY);
     expect(res.status).toBe(200);
-    expect(res.body.methods).toHaveLength(3);
-    expect(res.body.methods.map((m) => m.key)).toEqual(['gcash', 'maya', 'qrph']);
+    expect(res.body.methods).toHaveLength(4);
+    expect(res.body.methods.map((m) => m.key)).toEqual(['gcash', 'maya', 'qrph', 'cash']);
     res.body.methods.forEach((m) => expect(typeof m.enabled).toBe('boolean'));
     res.body.methods.forEach((m) => expect('logoBase64' in m).toBe(true));
   });
