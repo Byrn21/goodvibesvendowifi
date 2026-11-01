@@ -1898,8 +1898,25 @@ body {
   color: var(--primary, #5c3d11);
 }
 
-.admin-sidebar__toggle i.bi {
-  font-size: 1.4rem;
+/* Inline SVG hamburger/close glyphs (replaces the Bootstrap Icons font).
+   Both glyphs live in one 24x24 icon; `.is-close` swaps which one is shown. */
+.admin-sidebar__toggle-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.admin-sidebar__toggle-icon .admin-sidebar__toggle-glyph--close {
+  display: none;
+}
+
+.admin-sidebar__toggle-icon.is-close .admin-sidebar__toggle-glyph--menu {
+  display: none;
+}
+
+.admin-sidebar__toggle-icon.is-close .admin-sidebar__toggle-glyph--close {
+  display: block;
 }
 
 .admin-sidebar__toggle .admin-sidebar__toggle-text {
@@ -1923,6 +1940,9 @@ body {
 }
 
 .admin-sidebar__logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-size: 1.5rem;
   font-weight: 700;
   margin-bottom: 30px;
@@ -1938,7 +1958,9 @@ body {
 }
 
 .admin-sidebar__nav-link {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 10px 15px;
   color: var(--sidebar-text, #e2e8f0);
   text-decoration: none;
@@ -1961,12 +1983,36 @@ body {
   color: #fff;
 }
 
+/* Inline SVG icons (Lucide-style strokes). The wrapper is a fixed 20x20 box so
+   every label starts on the same vertical line, in both the expanded and the
+   icon-only collapsed sidebar. `currentColor` makes each icon track the link's
+   text colour, including the white of the active item. */
+.admin-sidebar__logo-icon,
+.admin-sidebar__nav-link-icon,
+.admin-user__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.admin-sidebar__logo-icon svg,
+.admin-sidebar__nav-link-icon svg,
+.admin-user__icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
 /* Collapsed sidebar — icon-only mode (60px) */
 .admin-sidebar.collapsed {
   width: 60px;
 }
 
 .admin-sidebar.collapsed .admin-sidebar__logo {
+  justify-content: center;
   text-align: center;
   margin-bottom: 20px;
 }
@@ -1976,7 +2022,7 @@ body {
 }
 
 .admin-sidebar.collapsed .admin-sidebar__logo-icon {
-  display: block;
+  display: inline-flex;
   margin: 0 auto;
 }
 
@@ -1994,7 +2040,7 @@ body {
 }
 
 .admin-sidebar.collapsed .admin-sidebar__nav-link-icon {
-  display: block;
+  display: inline-flex;
 }
 
 .admin-sidebar.collapsed .admin-sidebar__nav-link-text {
@@ -2112,7 +2158,11 @@ body {
 }
 
 .admin-user__icon {
-  font-size: 1.2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
 }
 
@@ -2513,6 +2563,11 @@ body {
   .admin-method-row__controls {
     align-self: stretch;
     justify-content: space-between;
+  }
+
+  /* Cash has only the toggle, so keep it on the right like every other row. */
+  .admin-method-row__controls--toggle-only {
+    justify-content: flex-end;
   }
 }
 

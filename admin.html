@@ -14,14 +14,23 @@
     }
   </style>
 </head>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <body>
   <div class="admin-layout">
          <!-- Mobile burger toggle &mdash; always fixed at top-left, outside the sidebar -->
-    <button class="admin-sidebar__toggle" id="sidebar-toggle" aria-label="Toggle navigation">
-                  <i class="bi bi-list"></i>
+    <button class="admin-sidebar__toggle" id="sidebar-toggle" aria-label="Toggle navigation" aria-expanded="false">
+      <svg class="admin-sidebar__toggle-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+        <g class="admin-sidebar__toggle-glyph admin-sidebar__toggle-glyph--menu">
+          <line x1="3" y1="6" x2="21" y2="6"/>
+          <line x1="3" y1="12" x2="21" y2="12"/>
+          <line x1="3" y1="18" x2="21" y2="18"/>
+        </g>
+        <g class="admin-sidebar__toggle-glyph admin-sidebar__toggle-glyph--close">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </g>
+      </svg>
     </button>
 
     <!-- Collapsible Sidebar -->
@@ -29,43 +38,88 @@
       <div class="admin-sidebar__header"></div>
       <div class="admin-sidebar__content">
         <div class="admin-sidebar__logo">
-          <span class="admin-sidebar__logo-icon">&#128213;</span>
+          <span class="admin-sidebar__logo-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+              <path d="M12 20h.01"/>
+              <path d="M2 8.82a15 15 0 0 1 20 0"/>
+              <path d="M5 12.86a10 10 0 0 1 14 0"/>
+              <path d="M8.5 16.43a5 5 0 0 1 7 0"/>
+            </svg>
+          </span>
           <span class="admin-sidebar__logo-text">Admin Panel</span>
         </div>
         <ul class="admin-sidebar__nav" id="admin-sidebar-nav">
           <li class="admin-sidebar__nav-item">
-            <button class="admin-sidebar__nav-link admin-sidebar__nav-link--active" data-page="dashboard">
-              <span class="admin-sidebar__nav-link-icon">&#128202;</span>
+            <button class="admin-sidebar__nav-link admin-sidebar__nav-link--active" data-page="dashboard" aria-label="Dashboard">
+              <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <rect width="7" height="9" x="3" y="3" rx="1"/>
+                  <rect width="7" height="5" x="14" y="3" rx="1"/>
+                  <rect width="7" height="9" x="14" y="12" rx="1"/>
+                  <rect width="7" height="5" x="3" y="16" rx="1"/>
+                </svg>
+              </span>
               <span class="admin-sidebar__nav-link-text">Dashboard</span>
             </button>
           </li>
           <li class="admin-sidebar__nav-item">
-            <button class="admin-sidebar__nav-link" data-page="vouchers">
-              <span class="admin-sidebar__nav-link-icon">&#127979;</span>
+            <button class="admin-sidebar__nav-link" data-page="vouchers" aria-label="Vouchers">
+              <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/>
+                  <path d="M13 5v2"/>
+                  <path d="M13 11v2"/>
+                  <path d="M13 17v2"/>
+                </svg>
+              </span>
               <span class="admin-sidebar__nav-link-text">Vouchers</span>
             </button>
           </li>
           <li class="admin-sidebar__nav-item">
-            <button class="admin-sidebar__nav-link" data-page="sessions">
-              <span class="admin-sidebar__nav-link-icon">&#128468;</span>
+            <button class="admin-sidebar__nav-link" data-page="sessions" aria-label="Sessions">
+              <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                  <circle cx="9" cy="7" r="4"/>
+                  <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+                  <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+              </span>
               <span class="admin-sidebar__nav-link-text">Sessions</span>
             </button>
           </li>
           <li class="admin-sidebar__nav-item">
-            <button class="admin-sidebar__nav-link" data-page="import">
-              <span class="admin-sidebar__nav-link-icon">&#8695;</span>
+            <button class="admin-sidebar__nav-link" data-page="import" aria-label="Import">
+              <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="7 10 12 15 17 10"/>
+                  <line x1="12" x2="12" y1="15" y2="3"/>
+                </svg>
+              </span>
               <span class="admin-sidebar__nav-link-text">Import</span>
             </button>
           </li>
           <li class="admin-sidebar__nav-item">
-            <button class="admin-sidebar__nav-link" data-page="payment-methods">
-              <span class="admin-sidebar__nav-link-icon">&#128179;</span>
+            <button class="admin-sidebar__nav-link" data-page="payment-methods" aria-label="Payment Methods">
+              <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <rect width="20" height="14" x="2" y="5" rx="2"/>
+                  <line x1="2" x2="22" y1="10" y2="10"/>
+                </svg>
+              </span>
               <span class="admin-sidebar__nav-link-text">Payment Methods</span>
             </button>
           </li>
           <li class="admin-sidebar__nav-item">
-            <button class="admin-sidebar__nav-link" data-page="logout">
-              <span class="admin-sidebar__nav-link-icon">&#8617;</span>
+            <button class="admin-sidebar__nav-link" data-page="logout" aria-label="Logout">
+              <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                  <polyline points="16 17 21 12 16 7"/>
+                  <line x1="21" x2="9" y1="12" y2="12"/>
+                </svg>
+              </span>
               <span class="admin-sidebar__nav-link-text">Logout</span>
             </button>
           </li>
@@ -73,7 +127,12 @@
         <!-- Admin user footer -->
         <div class="admin-sidebar__footer">
           <div class="admin-user">
-            <span class="admin-user__icon">&#128100;</span>
+            <span class="admin-user__icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
+              </svg>
+            </span>
             <div class="admin-user__info">
               <span class="admin-user__label">Logged in as:</span>
               <span class="admin-user__name" id="admin-username">admin</span>
@@ -88,10 +147,6 @@
 
     <!-- Main Content -->
     <main class="admin-main">
-      <header class="admin-header">
-        <div class="page-title">WiFi Portal &mdash; Admin Panel</div>
-      </header>
-
       <!-- Dashboard Section -->
       <div class="admin-card content-section active" id="section-dashboard">
         <h2>Dashboard</h2>
@@ -161,7 +216,7 @@
       <div class="admin-card content-section" id="section-payment-methods">
         <h2>Payment Methods</h2>
         <p class="muted">
-          Choose which e-wallets the guest portal offers. A disabled method stays visible to
+          Choose which payment options the guest portal offers. A disabled method stays visible to
           guests but is greyed out and cannot be selected.
         </p>
         <div id="payment-methods-msg"></div>
@@ -738,7 +793,6 @@
           function renderImportForm() {
         if (!els.tabImport) return;
         els.tabImport.innerHTML =
-          '<h3>Import Vouchers from CSV/XLSX</h3>' +
           '<p class="muted">Required columns: ID, Code, Type, Duration, Price. Code must be 6-digit numeric (ID should auto-increment starting from 1).</p>' +
           '<p class="muted">Optional columns: Download (Kbps) and Upload (Kbps) cap this voucher\u2019s speed \u2014 enter both (5 Mbps = 5000) or leave both blank to use the plan/default caps.</p>' +
           '<form id="import-form">' +
@@ -813,6 +867,9 @@
           var name = escapeHtml(m.name);
           var hasCustomLogo = !!m.logoBase64;
           var logoSrc = hasCustomLogo ? m.logoBase64 : (PAYMENT_METHOD_DEFAULT_LOGOS[m.key] || '');
+          // Cash has no branded e-wallet mark to replace, so the admin only gets
+          // the availability switch for it: no logo upload and no Reset button.
+          var isCash = m.key === 'cash';
           html +=
             '<div class="admin-method-row' + (m.enabled ? '' : ' is-disabled') + '">' +
               '<div class="admin-method-row__info">' +
@@ -824,15 +881,17 @@
                   '</span>' +
                 '</div>' +
               '</div>' +
-              '<div class="admin-method-row__controls">' +
-                '<label class="admin-method-row__upload" data-upload-label="' + key + '">' +
-                  'Upload logo' +
-                  '<input type="file" class="admin-method-row__file" accept="image/*"' +
-                    ' data-logo-key="' + key + '" aria-label="Upload a custom logo for ' + name + '">' +
-                '</label>' +
-                (hasCustomLogo
-                  ? '<button type="button" class="admin-method-row__reset" data-reset-logo="' + key + '">Reset</button>'
-                  : '') +
+              '<div class="admin-method-row__controls' + (isCash ? ' admin-method-row__controls--toggle-only' : '') + '">' +
+                (isCash ? '' :
+                  '<label class="admin-method-row__upload" data-upload-label="' + key + '">' +
+                    'Upload logo' +
+                    '<input type="file" class="admin-method-row__file" accept="image/*"' +
+                      ' data-logo-key="' + key + '" aria-label="Upload a custom logo for ' + name + '">' +
+                  '</label>' +
+                  (hasCustomLogo
+                    ? '<button type="button" class="admin-method-row__reset" data-reset-logo="' + key + '">Reset</button>'
+                    : '')
+                ) +
                 '<label class="admin-toggle">' +
                   '<input type="checkbox" role="switch" class="admin-toggle__input"' +
                     ' data-method-key="' + key + '"' + (m.enabled ? ' checked' : '') +
@@ -1238,19 +1297,18 @@
         navigateTo(page);
       });
 
-            // Cached toggle icon
-      var sidebarToggleIcon = els.sidebarToggle ? els.sidebarToggle.querySelector('i.bi') : null;
+      // Cached toggle icon. One inline SVG holds both glyphs; `is-close`
+      // swaps which one is shown.
+      var sidebarToggleIcon = els.sidebarToggle ? els.sidebarToggle.querySelector('.admin-sidebar__toggle-icon') : null;
 
             function setToggleIcon(collapsed) {
-        if (!sidebarToggleIcon) return;
-        if (collapsed) {
-          // Sidebar is closed â†’ show hamburger (click to open)
-          sidebarToggleIcon.classList.remove('bi-x-lg');
-          sidebarToggleIcon.classList.add('bi-list');
-        } else {
-          // Sidebar is open â†’ show X (click to close)
-          sidebarToggleIcon.classList.remove('bi-list');
-          sidebarToggleIcon.classList.add('bi-x-lg');
+        if (sidebarToggleIcon) {
+          // Closed: hamburger (click to open). Open: X (click to close).
+          if (collapsed) sidebarToggleIcon.classList.remove('is-close');
+          else sidebarToggleIcon.classList.add('is-close');
+        }
+        if (els.sidebarToggle) {
+          els.sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
         }
       }
 
