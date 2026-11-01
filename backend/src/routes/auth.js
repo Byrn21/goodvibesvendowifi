@@ -28,6 +28,7 @@ const {
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 const { normalizeMac: normalizeDeviceMac, isSameMac } = require('../utils/device-id');
 const { resolveClientMacByIp } = require('../utils/portal-context');
+const { setSessionCookie } = require('../utils/session-token');
 const { getDb } = require('../db/client');
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
@@ -190,6 +191,11 @@ router.post('/', async (req, res, next) => {
         existingVoucher && existingVoucher.used_by_mac,
         redirectUrl, existingSession
       );
+      // A re-login (active re-authorization or Premium resume) is still this
+      // browser's session, so refresh the identity cookie with it.
+      if (outcome.status === 200 && outcome.body && outcome.body.sessionId) {
+        outcome.body.statusToken = setSessionCookie(req, res, outcome.body.sessionId) || null;
+      }
       return res.status(outcome.status).json(outcome.body);
     }
 
@@ -483,10 +489,19 @@ router.post('/', async (req, res, next) => {
       );
     }
 
+    // Bind this browser to the session it just bought. The cookie is what lets
+    // the status page identify the device even when the captive mini-browser
+    // starts with empty localStorage and the request arrives from a carrier or
+    // tunnel address (req.ip can never match portal_client_context there).
+    const statusToken = setSessionCookie(req, res, sessionId);
+
     return res.json({
       success: true,
       message: 'Authentication successful.',
       sessionId,
+      // Same signed identity as the cookie, for callers that keep it in
+      // localStorage and send it as ?token=.
+      statusToken: statusToken || null,
       // Echo the canonical device identity so the success/status pages can keep
       // querying the session by MAC even when the sessionId is lost.
       clientMac: (storedSession && storedSession.clientMac) || normalizedMac,

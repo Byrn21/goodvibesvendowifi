@@ -455,6 +455,13 @@
       // page is visible here even though the tunnel hides the guest's address.
       var SAVED_MAC_KEYS = ['device_mac', 'portalClientMac'];
 
+      // The signed identity the backend issues when a device is authorized.
+      // The SAME value is an HttpOnly cookie, which the browser sends on its
+      // own; this copy is the fallback for a browser that blocks cookies but
+      // keeps storage, and for a cross-origin apiBaseUrl. It names the exact
+      // session, so it outranks the MAC in every request this page builds.
+      var SAVED_TOKEN_KEY = 'portalStatusToken';
+
       /**
        * readSavedMac — the MAC last saved on this origin, canonicalized.
        * Never throws: storage may be blocked in a captive mini browser.
@@ -498,6 +505,24 @@
         var mac = fromUrl || normalizeMac(CLIENT_MAC) || readSavedMac();
         if (mac) CLIENT_MAC = mac;
         return mac;
+      }
+
+      /**
+       * currentToken — the signed session token saved by an earlier visit, as
+       * returned by /api/auth, /api/payment/claim and /api/session/status.
+       *
+       * Read fresh on every request (a login in another tab may have saved a
+       * newer one). Never throws: storage may be blocked in a captive mini
+       * browser, in which case the HttpOnly cookie still carries the identity.
+       *
+       * @returns {string} the token, or '' when none is known
+       */
+      function currentToken() {
+        try {
+          return window.localStorage.getItem(SAVED_TOKEN_KEY)
+            || window.sessionStorage.getItem(SAVED_TOKEN_KEY)
+            || '';
+        } catch (e) { return ''; }
       }
 
       // Plan tiers allowed to pause/resume. Mirrors the backend policy
@@ -783,26 +808,33 @@
       // Query strings this page will try, in order.
       //
       // 1. A sessionId handed over in the URL (fresh from login / success.html)
-      //    is the most specific identity there is.
-      // 2. ?mac=<device MAC> — ALWAYS used before the address lookup whenever a
-      //    MAC is known (URL or storage). This is the cellular case: the request
-      //    address is a carrier NAT address, so the backend cannot resolve the
-      //    device by IP and answers MISSING_PORTAL_CONTEXT. Sending the MAC on
-      //    the first request avoids that round-trip entirely and still works
-      //    behind the cloud tunnel (where every address is the tunnel's).
-      // 3. '' (no identifier) — the MAC-direct path for a device that has never
-      //    been identified on this origin: the status API maps the caller's
-      //    address to the device MAC captured when the guest landed on the
-      //    portal. Only possible on the LAN / same-network flow.
-      // 4. A session id recovered from storage, which may belong to an earlier
+      //    is the most specific identity there is, and outranks a saved cookie:
+      //    right after a purchase the guest must see the NEW session, never
+      //    yesterday's expired one.
+      // 2. ?token= — the signed identity the backend issued for this device. It
+      //    names the exact session, so the backend answers even when the request
+      //    arrives from a public carrier / tunnel address (the cookie carries
+      //    the same value automatically, so this is the storage-side fallback
+      //    for a browser that blocks cookies).
+      // 3. ?mac=<device MAC> whenever a MAC is known (URL or storage). This is
+      //    the cellular case: the address is a carrier NAT address that cannot
+      //    identify the device, which is what produces MISSING_PORTAL_CONTEXT.
+      // 4. '' (no identifier) — the address-based lookup for a device that has
+      //    never been identified on this origin: the status API maps the
+      //    caller's address to the device MAC captured at the portal landing.
+      //    Only possible on the LAN / same-network flow.
+      // 5. A session id recovered from storage, which may belong to an earlier
       //    (already expired) session, so it is only the last resort.
       function statusQueries() {
         var list = [];
         var mac = currentMac();
+        var token = currentToken();
         var bySession = SESSION_ID ? '?sessionId=' + encodeURIComponent(SESSION_ID) : '';
+        var byToken = token ? '?token=' + encodeURIComponent(token) : '';
         var byMac = mac ? '?mac=' + encodeURIComponent(mac) : '';
 
         if (SESSION_ID && SESSION_ID_FROM_URL) list.push(bySession);
+        if (byToken) list.push(byToken);
         if (byMac) list.push(byMac);
         list.push('');                                  // device lookup by request IP
         if (SESSION_ID && !SESSION_ID_FROM_URL) list.push(bySession);
@@ -810,11 +842,15 @@
       }
 
       // The identity saved on this origin for THIS device, as a query string.
-      // The MAC comes first: assets/portal.js saves it as `device_mac` when a
-      // claim succeeds, and that is the value the backend authorized. A session
-      // id is the fallback for links handed over by success.html / the login
-      // flow. '' means this device has never been identified on this origin.
+      // The signed token comes first: it names the exact session the backend
+      // authorized. The MAC (device_mac from a claim, portalClientMac from a
+      // login) is next, and a session id from success.html / the login flow is
+      // the last resort. '' means this device has never been identified here.
       function savedIdentityQuery() {
+        // The token first: it names the exact session (and works from a public
+        // carrier / tunnel address), while the MAC only names the device.
+        var token = currentToken();
+        if (token) return '?token=' + encodeURIComponent(token);
         var mac = currentMac();
         if (mac) return '?mac=' + encodeURIComponent(mac);
         if (SESSION_ID) return '?sessionId=' + encodeURIComponent(SESSION_ID);
@@ -846,7 +882,11 @@
         networkRetryTimer = null;
 
         var url = API_BASE + '/api/session/status' + queries[at];
-        fetch(url, { method: 'GET', cache: 'no-store' })
+        // credentials: 'include' keeps the session cookie on the request when
+        // apiBaseUrl points at another origin (the controller-hosted HTML case).
+        // Same-origin requests already send it, and the backend also accepts
+        // the ?token= form, so either transport identifies the device.
+        fetch(url, { method: 'GET', cache: 'no-store', credentials: 'include' })
           .then(function (r) {
             // Parse JSON even for error statuses so we can read the code
             return r.json().then(function (body) {
@@ -937,6 +977,7 @@
         return fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({ sessionId: SESSION_ID }),
         }).then(function (r) {
           return r.json()
@@ -984,6 +1025,12 @@
           }
           window.localStorage.setItem('portalSessionId', SESSION_ID);
           window.sessionStorage.setItem('portalSessionId', SESSION_ID);
+          // Sliding identity: the backend re-issues it on every successful
+          // resolve, so keep the newest copy for a cookie-blocked browser.
+          if (data.statusToken) {
+            window.localStorage.setItem(SAVED_TOKEN_KEY, data.statusToken);
+            window.sessionStorage.setItem(SAVED_TOKEN_KEY, data.statusToken);
+          }
         } catch (e) { /* storage unavailable */ }
 
         // Single source for the "Plan" value shown in the details table.
@@ -1161,6 +1208,7 @@
       var params = new URLSearchParams(window.location.search);
       var urlSessionId = params.get('sessionId') || '';
       var urlClientMac = params.get('clientMac') || params.get('mac') || '';
+      var urlToken = params.get('token') || '';
       var storedSessionId = '';
       var storedClientMac = '';
       try {
@@ -1175,6 +1223,12 @@
 
       // If the identifiers came from the URL, persist them so later visits
       // without the query parameters still find the session.
+      if (urlToken) {
+        try {
+          window.localStorage.setItem(SAVED_TOKEN_KEY, urlToken);
+          window.sessionStorage.setItem(SAVED_TOKEN_KEY, urlToken);
+        } catch (e) { /* storage unavailable */ }
+      }
       if (urlSessionId || CLIENT_MAC) {
         try {
           if (urlSessionId) {

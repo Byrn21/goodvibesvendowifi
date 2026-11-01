@@ -101,6 +101,9 @@ function createElement(id) {
 function loadStatus(opts) {
   const storage = opts.storage || new Map();
   const fetchCalls = [];
+  // Options of each request, so a test can assert `credentials: 'include'`
+  // (the cookie transport needs it when apiBaseUrl is another origin).
+  const fetchOptions = [];
   const timeouts = [];
   const els = new Map();
   const getEl = (id) => {
@@ -119,9 +122,10 @@ function loadStatus(opts) {
     removeItem() {},
   };
 
-  const fetchStub = (url) => {
+  const fetchStub = (url, fetchOpts) => {
     const callIndex = fetchCalls.length;
     fetchCalls.push(url);
+    fetchOptions.push(fetchOpts || {});
     const rule = opts.respond
       ? opts.respond(url, callIndex)
       : (opts.responses || []).find((r) => r.test.test(url));
@@ -185,6 +189,7 @@ function loadStatus(opts) {
     els,
     getEl,
     fetchCalls,
+    fetchOptions,
     storage,
     timers: timeouts,
     window: windowStub,
@@ -784,5 +789,55 @@ describe('status.html — repeated Pause on a Premium session', () => {
 
     expect(pausePosts).toBe(2);
     expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
+  });
+});
+
+describe('status.html — signed session token', () => {
+  test('a saved token is requested before the MAC, with credentials included', async () => {
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['portalStatusToken', 'tok_saved'], ['device_mac', MAC]]),
+      responses: [
+        { test: /[?&]token=/, status: 200, body: ACTIVE_SESSION.body },
+        ACTIVE_SESSION,
+      ],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    // The token names the exact session, so it outranks the device MAC.
+    expect(status.fetchCalls[0]).toBe('/api/session/status?token=tok_saved');
+    expect(status.fetchOptions[0].credentials).toBe('include');
+    expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
+  });
+
+  test('a token handed over in the URL is persisted and used immediately', async () => {
+    const status = loadStatus({
+      search: '?token=tok_from_url',
+      storage: new Map(),
+      responses: [{ test: /[?&]token=/, status: 200, body: ACTIVE_SESSION.body }],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.fetchCalls[0]).toBe('/api/session/status?token=tok_from_url');
+    expect(status.storage.get('portalStatusToken')).toBe('tok_from_url');
+  });
+
+  test('a token returned by the status API is stored for the next visit', async () => {
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      responses: [
+        { test: /[?&]mac=/, status: 200, body: { ...ACTIVE_SESSION.body, statusToken: 'tok_new' } },
+      ],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    expect(status.storage.get('portalStatusToken')).toBe('tok_new');
   });
 });

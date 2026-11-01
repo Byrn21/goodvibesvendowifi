@@ -30,6 +30,7 @@ const {
 const omadaService = require('../services/omada');
 const { recordSession } = require('../services/session');
 const { loadPortalContext, resolveClientMacByIp } = require('../utils/portal-context');
+const { setSessionCookie } = require('../utils/session-token');
 const { macroDroidVerifyUrl, PENDING_CLAIM_TTL_MS } = require('../config');
 const { listPaymentMethodStates } = require('../services/payment-methods');
 const { v4: uuidv4 } = require('uuid');
@@ -1074,6 +1075,14 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       ' (session ' + (claim.sessionId || '(none)') + ')'
     );
 
+    // Identify this browser for the session the claim just granted. The status
+    // page then works from the cookie alone, even when the captive mini-browser
+    // starts with empty storage and the request arrives from a public carrier
+    // or tunnel address that matches no portal_client_context row.
+    const statusToken = claim.sessionId
+      ? setSessionCookie(req, res, claim.sessionId)
+      : null;
+
     res.json({
       success: true,
       authorized,
@@ -1081,6 +1090,8 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       voucherCode: claim.voucherCode,
       ref_no: claim.refNo,
       minutes,
+      sessionId: claim.sessionId || null,
+      statusToken: statusToken || null,
       ...(authError ? { authError } : {}),
     });
 

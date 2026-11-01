@@ -362,7 +362,7 @@
         </div>
 
         <div class="action-links" id="action-links">
-          <a href="status.html?v=9" class="btn btn--secondary btn--full" id="status-link">
+          <a href="status.html?v=10" class="btn btn--secondary btn--full" id="status-link">
             View Session Status
           </a>
         </div>
@@ -702,7 +702,9 @@
         var vt = params.get('voucherType') || '';
         if (vt) q.set('voucherType', vt);
         var qs = q.toString();
-        return 'status.html' + (qs ? '?' + qs : '');
+        // ?v=10 busts the captive mini-browser's cached status page, so the
+        // fetch that now sends credentials / uses the session token is used.
+        return 'status.html?v=10' + (qs ? '&' + qs : '');
       }
 
       // Point the link at the forwarded identifiers from the first paint: the
@@ -756,7 +758,7 @@
             ? '?sessionId=' + encodeURIComponent(sessionId)
             : '?mac=' + encodeURIComponent(clientMac);
 
-          fetch(API_BASE + '/api/session/status' + qs, { cache: 'no-store' })
+          fetch(API_BASE + '/api/session/status' + qs, { cache: 'no-store', credentials: 'include' })
             .then(function (r) {
               return r.json().catch(function () { return {}; }).then(function (body) {
                 return { ok: r.ok, status: r.status, body: body };
@@ -772,6 +774,12 @@
                 window.localStorage.setItem('portalSessionId', sessionId);
                 window.sessionStorage.setItem('portalSessionId', sessionId);
                 if (clientMac) window.localStorage.setItem('portalClientMac', clientMac);
+                // The signed identity for this exact session, so status.html can
+                // poll by ?token= when the browser drops cookies.
+                if (data.statusToken) {
+                  window.localStorage.setItem('portalStatusToken', data.statusToken);
+                  window.sessionStorage.setItem('portalStatusToken', data.statusToken);
+                }
               } catch (e) { /* storage unavailable */ }
 
               if (sidEl) sidEl.textContent = sessionId;

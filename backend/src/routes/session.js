@@ -29,6 +29,11 @@ const { normalizeMac } = require('../utils/device-id');
 const { resolveClientMacByIp } = require('../utils/portal-context');
 const { normalizeVoucherType } = require('../utils/qos');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
+const {
+  tokenFromRequest,
+  verifySessionToken,
+  setSessionCookie,
+} = require('../utils/session-token');
 
 // ── GET /api/session/status ──────────────────────────────────
 router.get('/status', async (req, res, next) => {
@@ -44,6 +49,43 @@ router.get('/status', async (req, res, next) => {
       return await handleVoucherStatus(req, res, voucher);
     }
 
+    // ── Which identifier wins ──────────────────────────────────────────
+    // Freshest intent first:
+    //   1. ?sessionId= in the URL — what success.html / portal.js hand over the
+    //      moment a pass is bought, so it must beat anything cached.
+    //   2. the signed cookie (or ?token=, its localStorage-carried twin) this
+    //      backend issued when the device was authorized.
+    //   3. ?mac=
+    //   4. the request address (the historical, LAN-only behaviour).
+    //
+    // The cookie outranks the MAC because it names the exact session, and sits
+    // ahead of the address lookup because that lookup is the one that fails
+    // whenever the guest reaches us from a tunnel or a carrier NAT address
+    // (Wi-Fi Assist, proxy browsers) instead of 192.168.0.x.
+    let identity = typeof sessionId === 'string' && sessionId ? 'session_query' : '';
+
+    if (!identity) {
+      const token = tokenFromRequest(req);
+      if (token) {
+        const verified = verifySessionToken(token);
+        // A valid signature only means WE issued the token; the row behind it
+        // may have been deleted. Probe it here so an unknown session is not
+        // reported as SESSION_NOT_FOUND — it must fall through to the other
+        // identifiers exactly like an invalid token does.
+        const known = verified
+          ? await getDb().getOne('SELECT session_id FROM sessions WHERE session_id = ?', [verified.sessionId])
+          : null;
+        if (verified && known && known.session_id) {
+          sessionId = verified.sessionId;
+          identity = 'token';
+        } else {
+          // Never an error of its own: a stale/forged token just means this
+          // request is identified some other way.
+          console.warn('[session/status] ignoring an invalid or expired session token');
+        }
+      }
+    }
+
     // ── MAC-direct identification (no identifier at all) ────────────────
     // Access is granted directly to the device's MAC, so the guest has no
     // voucher code (and often no session id) to hand to this page. With no
@@ -57,7 +99,7 @@ router.get('/status', async (req, res, next) => {
     // ran out is told the session expired instead of being told it does not
     // exist. getSession() below lazily expires it and the response reports the
     // terminal state (and remaining 0).
-    if (!sessionId && !(mac && typeof mac === 'string')) {
+    if (!identity && !(mac && typeof mac === 'string')) {
       let resolved;
       try {
         resolved = await resolveClientMacByIp(req.ip);
@@ -71,10 +113,18 @@ router.get('/status', async (req, res, next) => {
             success: false,
             code: 'MISSING_PORTAL_CONTEXT',
             error: 'Open the Wi-Fi portal page once so this device can be identified, then tap Refresh.',
+            // Operator-facing detail: this is missing CONTEXT, not a missing
+            // session. A carrier/tunnel address (Wi-Fi Assist, proxy browser)
+            // can never match the LAN address the landing beacon captured.
+            hint: 'No portal context matches this request address (' +
+              String(req.ip || 'unknown') + '). A public carrier or tunnel address cannot ' +
+              'identify a device; the guest needs a saved cookie/MAC or must reopen the portal.',
           });
         }
         throw err;
       }
+
+      identity = 'ip';
 
       if (resolved.stale) {
         console.warn(
@@ -110,7 +160,7 @@ router.get('/status', async (req, res, next) => {
     // the claim succeeded. The value is validated (any accepted representation
     // is canonicalized, anything else is a 400) exactly like ?clientMac= on
     // the other routes, and only sessions belonging to that MAC are returned.
-    if (!sessionId && mac && typeof mac === 'string') {
+    if (!identity && mac && typeof mac === 'string') {
       const normalized = normalizeMac(mac);
       if (!normalized) {
         return res.status(400).json({
@@ -128,6 +178,7 @@ router.get('/status', async (req, res, next) => {
       );
       if (row && row.session_id) {
         sessionId = row.session_id;
+        identity = 'mac';
       } else {
         // Nothing live under this MAC — fall back to the device's most recent
         // EXPIRED session instead of 404ing. A guest whose pass ran out (or hit
@@ -143,6 +194,7 @@ router.get('/status', async (req, res, next) => {
         );
         if (expired && expired.session_id) {
           sessionId = expired.session_id;
+          identity = 'mac';
         } else {
           return res.status(404).json({
             success: false,
@@ -166,6 +218,13 @@ router.get('/status', async (req, res, next) => {
         code: 'SESSION_NOT_FOUND',
       });
     }
+
+    // Re-issue this session's identity on every successful resolve. The cookie
+    // is a sliding 7-day window, and it is kept even for an EXPIRED session on
+    // purpose: the guest should still be told "expired" (with the reason and
+    // the deadline) instead of "no session found". The same token is echoed in
+    // the body for callers whose browser blocks cookies but keeps localStorage.
+    const statusToken = setSessionCookie(req, res, sessionId);
 
     const serverTime = Math.floor(Date.now() / 1000);
 
@@ -195,6 +254,7 @@ router.get('/status', async (req, res, next) => {
           // pass (computed above on the row we just read).
           expireReason: endedByHardExpiry ? 'hard_expired' : 'server_expired',
           expire_reason: endedByHardExpiry ? 'hard_expired' : 'server_expired',
+          statusToken: statusToken || null,
           canPause: false,
           canResume: false,
         });
@@ -227,6 +287,10 @@ router.get('/status', async (req, res, next) => {
       expireReason: session.expireReason || null,
       expire_reason: session.expireReason || null,
       totalSeconds: (session.totalDurationSeconds || (session.duration || 60) * 60),
+      // Signed identity for this session (also set as an HttpOnly cookie). The
+      // status page stores it in localStorage and sends it as ?token= when the
+      // cookie cannot be relied on.
+      statusToken: statusToken || null,
       // Pause is a Premium CAPABILITY, not a once-per-session allowance: an
       // active Premium session may pause again after every resume, right up to
       // its absolute deadline. No pause counter or consumed flag is stored or
@@ -423,12 +487,15 @@ router.post('/resume', async (req, res, next) => {
     }
 
         const resumed = await resumeSession(sessionId);
+    // Same session, refreshed identity: keep the browser bound to it.
+    const statusToken = setSessionCookie(req, res, sessionId);
     return res.json({
       success: true,
       state: 'active',
       voucherType: resumed.voucherType || 'standard',
       remainingSeconds: computeRemaining(resumed, Math.floor(Date.now() / 1000)),
       expiresAt: resumed.expiresAt,
+      statusToken: statusToken || null,
     });
   } catch (err) {
     next(err);
