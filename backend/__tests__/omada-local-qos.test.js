@@ -341,6 +341,70 @@ describe('local web-API rate limit', () => {
     }
   });
 
+  test('sends a 1 Mbps VOUCHER_DEFAULT_DOWN_MBPS as 1 Mbps, never as 1 Kbps', async () => {
+    const savedDown = process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+    const savedUp = process.env.VOUCHER_DEFAULT_UP_KBPS;
+    process.env.VOUCHER_DEFAULT_DOWN_MBPS = '1';
+    process.env.VOUCHER_DEFAULT_UP_KBPS = '1024';
+    try {
+      queueSession();
+      queueResponse(200, { errorCode: 0, msg: 'Success' });
+
+      const result = await omada.setClientRateLimit({ clientMac: MAC });
+
+      // The production outage in one assertion: a 1 Mbps default must not be
+      // applied as unit 1 / limit 1 (= 1 Kbps).
+      expect(result.applied.customRateLimit).toEqual({
+        upEnable: true, upUnit: 2, upLimit: 1,
+        downEnable: true, downUnit: 2, downLimit: 1,
+      });
+      expect(JSON.parse(patchCalls()[0].body).customRateLimit.downUnit).toBe(2);
+    } finally {
+      if (savedDown === undefined) delete process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+      else process.env.VOUCHER_DEFAULT_DOWN_MBPS = savedDown;
+      if (savedUp === undefined) delete process.env.VOUCHER_DEFAULT_UP_KBPS;
+      else process.env.VOUCHER_DEFAULT_UP_KBPS = savedUp;
+    }
+  });
+
+  describe('buildRateLimitPayload — unit selection', () => {
+    const { buildRateLimitPayload } = omada._internal;
+
+    test('keeps a value below 1024 Kbps on unit 1 unchanged', () => {
+      expect(buildRateLimitPayload({
+        customRateLimit: {
+          upEnable: true, upUnit: 1, upLimit: 512,
+          downEnable: true, downUnit: 1, downLimit: 1023,
+        },
+      })).toEqual({
+        mode: 0,
+        customRateLimit: {
+          upEnable: true, upUnit: 1, upLimit: 512,
+          downEnable: true, downUnit: 1, downLimit: 1023,
+        },
+      });
+    });
+
+    test('moves a large Kbps value to Mbps instead of exceeding the 1024 limit', () => {
+      const body = buildRateLimitPayload({
+        customRateLimit: {
+          upEnable: true, upUnit: 2, upLimit: 5,
+          downEnable: true, downUnit: 1, downLimit: 5000,
+        },
+      });
+      expect(body.customRateLimit.downUnit).toBe(2);
+      expect(body.customRateLimit.downLimit).toBe(5);
+      expect(body.customRateLimit.upUnit).toBe(2);
+      expect(body.customRateLimit.upLimit).toBe(5);
+    });
+
+    test('rejects an unlabelled limit instead of assuming Kbps', () => {
+      expect(() => buildRateLimitPayload({
+        customRateLimit: { upEnable: true, upLimit: 512, downEnable: true, downUnit: 2, downLimit: 10 },
+      })).toThrow(/upUnit/);
+    });
+  });
+
   test('rejects an unusable VOUCHER_DEFAULT_* fallback before any HTTP call', async () => {
     const savedDown = process.env.VOUCHER_DEFAULT_DOWN_MBPS;
     delete process.env.VOUCHER_DEFAULT_DOWN_MBPS;

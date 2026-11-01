@@ -482,8 +482,19 @@
     (function () {
       'use strict';
       var params = new URLSearchParams(window.location.search);
-      var destination = decodeURIComponent(params.get('redirectUrl') || params.get('targetUrl') || '');
-      var originUrl = decodeURIComponent(params.get('originUrl') || params.get('originalUrl') || '');
+
+      // decodeURIComponent() THROWS a URIError on a malformed escape — a bare
+      // '%', a truncated '%E0%A4%A', or a value the controller re-encoded. That
+      // throw happened at the top of this script, before any redirect was
+      // scheduled, so the page died, the OS gave up and showed google.com with
+      // the captive sheet still open. Decoding must never be able to do that.
+      function safeDecode(value) {
+        if (!value) return '';
+        try { return decodeURIComponent(value); } catch (e) { return String(value); }
+      }
+
+      var destination = safeDecode(params.get('redirectUrl') || params.get('targetUrl') || '');
+      var originUrl = safeDecode(params.get('originUrl') || params.get('originalUrl') || '');
       var sessionId = params.get('sessionId') || '';
 
       // Omada puts the device identity in the portal URL as ?clientMac=...; the
@@ -563,8 +574,15 @@
       // forced to the high-availability fallback above.
       var candidates = [originUrl, destination];
       var exitUrl = EXTERNAL_FALLBACK;
-      for (var i = 0; i < candidates.length; i++) {
-        if (isUsableExternalUrl(candidates[i])) { exitUrl = candidates[i]; break; }
+      // Guarded so a surprise in URL parsing can only cost the guest their
+      // preferred destination — never the redirect itself.
+      try {
+        for (var i = 0; i < candidates.length; i++) {
+          if (isUsableExternalUrl(candidates[i])) { exitUrl = candidates[i]; break; }
+        }
+      } catch (e) {
+        console.error('[success] could not resolve an exit destination:', e);
+        exitUrl = EXTERNAL_FALLBACK;
       }
 
       // The "Continue to website" button drives the same non-whitelisted exit
@@ -582,6 +600,15 @@
       // 6-8s: give Omada's hardware time to finish opening the network before
       // the phone (or the captive mini-browser) attempts a real connection.
       var PROBE_DELAY_MS = 7000;
+
+      // Last-resort hand-off: if anything below throws before the probe timer
+      // is armed, the guest must still leave this page. Without it a later JS
+      // error strands them on a dead page and the OS falls back on its own.
+      var probeScheduled = false;
+      window.setTimeout(function () {
+        if (probeScheduled) return;
+        try { window.location.replace(exitUrl); } catch (e) { /* nothing left to try */ }
+      }, PROBE_DELAY_MS + 3000);
 
       // ---- Closing the captive sheet --------------------------------------
       // An iOS/Android captive sheet is dismissed by the OS, never by this
@@ -629,6 +656,7 @@
         closeCaptiveBrowser(0);
       }, 250);
 
+      probeScheduled = true;
       var probeTimer = window.setTimeout(function () {
         window.location.href = exitUrl;
       }, PROBE_DELAY_MS);
@@ -719,16 +747,23 @@
       var forwardedMacKey = params.has('mac') ? 'mac' : 'clientMac';
 
       function statusHref() {
-        var q = new URLSearchParams();
-        if (sessionId) q.set('sessionId', sessionId);
-        if (clientMac) q.set(forwardedMacKey, clientMac);
-        if (statusToken) q.set('token', statusToken);
-        var vt = params.get('voucherType') || '';
-        if (vt) q.set('voucherType', vt);
-        var qs = q.toString();
+        // Plain string concatenation on purpose: no new URL() on a relative
+        // path (which throws in some captive WebViews) and no URLSearchParams
+        // construction to get wrong. Every appended value is encoded once.
         // ?v=10 busts the captive mini-browser's cached status page, so the
         // fetch that now sends credentials / uses the session token is used.
-        return 'status.html?v=10' + (qs ? '&' + qs : '');
+        var url = 'status.html?v=10';
+        var pairs = [];
+        if (sessionId) pairs.push('sessionId=' + encodeURIComponent(sessionId));
+        if (clientMac) pairs.push(encodeURIComponent(forwardedMacKey) + '=' + encodeURIComponent(clientMac));
+        if (statusToken) pairs.push('token=' + encodeURIComponent(statusToken));
+        var vt = params.get('voucherType') || '';
+        if (vt) pairs.push('voucherType=' + encodeURIComponent(vt));
+
+        for (var p = 0; p < pairs.length; p++) {
+          url += (url.indexOf('?') === -1 ? '?' : '&') + pairs[p];
+        }
+        return url;
       }
 
       // Point the link at the forwarded identifiers from the first paint: the

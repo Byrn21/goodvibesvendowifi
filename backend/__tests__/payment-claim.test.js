@@ -520,7 +520,9 @@ describe('POST /api/payment/claim', () => {
     );
     // Stored lowercased, so pause/resume and the QoS rules agree on the tier.
     expect(session.voucher_type).toBe('premium');
-    expect(session.down_kbps).toBe(5000);
+    // 5000 Kbps is applied as 5 Mbps (unit 2), and the snapshot stores the
+    // binary equivalent of what was applied: 5 * 1024.
+    expect(session.down_kbps).toBe(5120);
     expect(session.up_kbps).toBe(1024);
     expect(session.duration_minutes).toBe(45);
   });
@@ -566,7 +568,7 @@ describe('POST /api/payment/claim', () => {
       expect(omadaService.setClientRateLimit).toHaveBeenCalledWith({
         clientMac: MAC,
         customRateLimit: {
-          upEnable: true, upUnit: 1, upLimit: 1024,
+          upEnable: true, upUnit: 2, upLimit: 1,
           downEnable: true, downUnit: 2, downLimit: 50,
         },
       });

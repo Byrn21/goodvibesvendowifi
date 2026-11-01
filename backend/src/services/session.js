@@ -15,7 +15,7 @@ const omadaService = require('./omada');
 const {
   resolveVoucherRateLimit,
   normalizeVoucherType,
-  normalizeBandwidthKbps,
+  repairLegacyBandwidthKbps,
   isPremiumVoucherType,
 } = require('../utils/qos');
 const { getDb } = require('../db/client');
@@ -582,9 +582,12 @@ async function applySessionRateLimit(session) {
   if (!session || !session.clientMac) return { applied: false, error: 'no session/clientMac' };
 
   const premiumTier = isPremiumVoucherType(session.voucherType);
+  // repairLegacyBandwidthKbps (not the plain normaliser): a session row written
+  // before the unit standardisation holds Mbps integers, and a resume must heal
+  // it ("1" → 1 Mbps) instead of re-applying it as 1 Kbps.
   const sessionCaps = {
-    downKbps: normalizeBandwidthKbps(session.downKbps),
-    upKbps: normalizeBandwidthKbps(session.upKbps),
+    downKbps: repairLegacyBandwidthKbps(session.downKbps),
+    upKbps: repairLegacyBandwidthKbps(session.upKbps),
   };
   const customRateLimit = resolveVoucherRateLimit({
     downKbps: sessionCaps.downKbps,

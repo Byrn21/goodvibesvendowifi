@@ -109,6 +109,11 @@ const https = require('https');
 const http = require('http');
 const { OMADA_TIME_UNIT } = require('../config');
 const { normalizeMac: normalizeDeviceMac } = require('../utils/device-id');
+const {
+  KBPS_PER_MBPS,
+  MAX_BANDWIDTH_KBPS,
+  toRateLimitUnit,
+} = require('../utils/qos');
 
 const BASE_URL   = process.env.OMADA_BASE_URL || '';
 const OMADAC_ID  = process.env.OMADA_OMADAC_ID || '';
@@ -1446,8 +1451,10 @@ function rateLimitRejected(route, response) {
  *
  * Both values go through parseInt(..., 10) so a quoted or suffixed value can
  * never reach the controller as a string, and both are range-checked against
- * the 1–1024 ceiling Omada accepts per unit. Down is Mbps (unit 2) and up is
- * Kbps (unit 1) — the units the portal advertises to customers.
+ * the 1–1024 ceiling Omada accepts per unit. Down is configured in Mbps and up
+ * in Kbps; each is converted to Kbps and then handed to toRateLimitUnit(), so
+ * the payload's unit always matches the value instead of assuming one. Sending
+ * a Mbps integer with unit 1 is what applied a 1 Mbps default as 1 Kbps.
  *
  * Throws instead of sending mode 0 with no limits: a guest left uncapped while
  * the logs claim a cap was applied is exactly the silent failure this fallback
@@ -1466,14 +1473,63 @@ function defaultRateLimitPayload() {
     throw configError('VOUCHER_DEFAULT_UP_KBPS must be an integer between 1 and 1024 (Kbps)');
   }
 
+  const down = toRateLimitUnit(downMbps * KBPS_PER_MBPS);
+  const up = toRateLimitUnit(upKbps);
+
   return {
     upEnable: true,
-    upUnit: 1,      // 1 = Kbps
-    upLimit: upKbps,
+    upUnit: up.unit,
+    upLimit: up.limit,
     downEnable: true,
-    downUnit: 2,    // 2 = Mbps
-    downLimit: downMbps,
+    downUnit: down.unit,
+    downLimit: down.limit,
   };
+}
+
+/**
+ * normalizeRateLimitDimension — one {unit, limit} pair → the unit Omada takes.
+ *
+ * The caller's unit tag is NOT trusted on its own: the pair is converted to
+ * Kbps with KBPS_PER_MBPS and re-expressed through toRateLimitUnit(). That is
+ * what stops a 1 Mbps cap from travelling as "1 Kbps" when it arrives tagged
+ * unit 1 (or with no unit at all), which cut paying guests off in production.
+ *
+ * @param {Object} customRateLimit
+ * @param {string} unitField  'upUnit' | 'downUnit'
+ * @param {string} limitField 'upLimit' | 'downLimit'
+ * @returns {{unit:1|2, limit:number}}
+ */
+function normalizeRateLimitDimension(customRateLimit, unitField, limitField) {
+  const unit = Number(customRateLimit[unitField]);
+  const limit = Number(customRateLimit[limitField]);
+
+  if (unit !== 1 && unit !== 2) {
+    // No silent `|| 1` fallback: an unlabelled limit is what made a Mbps value
+    // look like Kbps. Reject it so the caller fixes the payload.
+    throw configError('customRateLimit.' + unitField + ' must be 1 (Kbps) or 2 (Mbps)');
+  }
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw configError('customRateLimit.' + limitField + ' must be a positive integer');
+  }
+
+  const kbps = unit === 2 ? limit * KBPS_PER_MBPS : limit;
+  if (kbps > MAX_BANDWIDTH_KBPS) {
+    throw configError(
+      'customRateLimit.' + limitField + ' is above the ' + MAX_BANDWIDTH_KBPS + ' Kbps ceiling'
+    );
+  }
+
+  // A unit-1 value below the legacy floor is almost always an unlabelled Mbps
+  // number. It is still sent as the caller supplied it (only a persisted row is
+  // auto-repaired), but the operator gets a log line instead of a silent cap.
+  if (unit === 1 && limit < 64) {
+    console.warn(
+      '[omada/qos] customRateLimit.' + limitField + '=' + limit + ' with unit 1 (Kbps) is' +
+      ' below 64 Kbps — this usually means a Mbps value reached the payload without unit 2'
+    );
+  }
+
+  return toRateLimitUnit(kbps);
 }
 
 /**
@@ -1502,20 +1558,16 @@ function buildRateLimitPayload(ctx) {
   }
 
   const c = (ctx && ctx.customRateLimit) || defaultRateLimitPayload();
-  for (const field of ['upLimit', 'downLimit']) {
-    const n = Number(c[field]);
-    if (!Number.isInteger(n) || n < 1 || n > 1024) {
-      throw configError('customRateLimit.' + field + ' must be an integer between 1 and 1024');
-    }
-  }
+  const up = normalizeRateLimitDimension(c, 'upUnit', 'upLimit');
+  const down = normalizeRateLimitDimension(c, 'downUnit', 'downLimit');
 
   body.customRateLimit = {
     upEnable: Boolean(c.upEnable),
-    upUnit: Number(c.upUnit) === 2 ? 2 : 1,
-    upLimit: Number(c.upLimit),
+    upUnit: up.unit,
+    upLimit: up.limit,
     downEnable: Boolean(c.downEnable),
-    downUnit: Number(c.downUnit) === 2 ? 2 : 1,
-    downLimit: Number(c.downLimit),
+    downUnit: down.unit,
+    downLimit: down.limit,
   };
 
   return body;
@@ -1694,6 +1746,7 @@ module.exports = {
     preferredDeauthRoute: () => preferredDeauthRoute,
     siteEntries,
     rateLimitRejected,
+    buildRateLimitPayload,
     resetRateLimitState: () => {
       preferredRateLimitRoute = null;
       rateLimitSiteKeyCache = { name: null, key: null };

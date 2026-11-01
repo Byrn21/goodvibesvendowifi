@@ -17,8 +17,8 @@
  *                                                         defaults
  *
  * Units match the customRateLimit the controller's web API accepts (see
- * services/omada.js → setClientRateLimit): down is Mbps (downUnit 2) and up is
- * Kbps (upUnit 1).
+ * services/omada.js → setClientRateLimit): unit 1 = Kbps, unit 2 = Mbps, and
+ * the unit is chosen per value by toRateLimitUnit() — see KBPS_PER_MBPS below.
  *
  * The plan tier itself comes from vouchers.type ('standard' | 'premium'). It is
  * never trusted verbatim: normalizeVoucherType() trims/lowercases it first, so a
@@ -56,16 +56,31 @@ function warnPremiumDefault(name, used) {
   );
 }
 
+// One Mbps is 1024 Kbps as far as the controller is concerned, and this is the
+// ONLY conversion factor in the QoS code. Using 1000 in one direction and 1024
+// in the other made a snapshot round-trip drift (50 Mbps → 50000 Kbps →
+// 49 Mbps), which a re-auth/resume then replayed onto the guest.
+const KBPS_PER_MBPS = 1024;
+
 // Upper bound for a per-voucher cap: 1 Gbps expressed in Kbps. Omada's
-// customRateLimit is 1–1024 PER UNIT, so 1 024 000 Kbps (= 1024 Mbps) is the
+// customRateLimit is 1–1024 PER UNIT, so 1 048 576 Kbps (= 1024 Mbps) is the
 // real ceiling once the value is converted (see toRateLimitUnit).
-const MAX_BANDWIDTH_KBPS = 1024000;
+const MAX_BANDWIDTH_KBPS = KBPS_PER_MBPS * 1024;
+
+// A persisted cap below this is not a usable guest speed (it is slower than a
+// dial-up line) and is the fingerprint of a Mbps value that was stored as if it
+// were Kbps. Such rows are healed on read — see repairLegacyBandwidthKbps.
+const LEGACY_KBPS_FLOOR = 64;
+
+// One warning per value, not one per guest.
+const warnedLegacyRepairs = new Set();
+const warnedRoundedCaps = new Set();
 
 /**
  * normalizeBandwidthKbps — validate a per-voucher bandwidth value.
  *
  * Stored values are always Kbps (the unit the Omada payload ultimately wants),
- * so "5 Mbps" is 5000. Rejects non-integers, zero, negatives and anything above
+ * so "5 Mbps" is 5120 (5 × 1024). Rejects non-integers, zero, negatives and anything above
  * MAX_BANDWIDTH_KBPS, which keeps a bad admin/import value from reaching the
  * controller.
  *
@@ -82,17 +97,42 @@ function normalizeBandwidthKbps(value) {
 /**
  * toRateLimitUnit — express a Kbps cap as an Omada customRateLimit {unit, limit}.
  *
- * Omada accepts unit 1 = Kbps and unit 2 = Mbps, each with a 1–1024 limit, so a
- * cap that fits in Kbps travels as-is and a larger one (e.g. 5000 Kbps = 5 Mbps)
- * is converted to Mbps instead of being rejected. Rounding is used because the
- * controller only takes whole Mbps above 1 Mbps.
+ * Omada accepts unit 1 = Kbps and unit 2 = Mbps, each with a 1–1024 limit, so
+ * 1–1023 Kbps travels as-is and anything from 1024 Kbps up (e.g. 5000 Kbps =
+ * 5 Mbps) is converted to Mbps instead of being rejected. Rounding up is used
+ * because the controller only takes whole Mbps above 1 Mbps.
  *
  * @param {number} kbps validated integer Kbps
  * @returns {{unit: 1|2, limit: number}}
  */
 function toRateLimitUnit(kbps) {
-  if (kbps <= 1024) return { unit: 1, limit: kbps }; // Kbps
-  return { unit: 2, limit: Math.round(kbps / 1000) };  // Mbps
+  if (!Number.isInteger(kbps) || kbps < 1) {
+    throw new RangeError('toRateLimitUnit expects a positive integer Kbps value');
+  }
+
+  // Fits in the 1–1023 Kbps range Omada accepts on unit 1: send it verbatim.
+  // 1024 itself is a clean multiple of the factor below and travels as Mbps.
+  if (kbps < KBPS_PER_MBPS) return { unit: 1, limit: kbps };
+
+  const mbps = kbps / KBPS_PER_MBPS;
+  if (Number.isInteger(mbps)) return { unit: 2, limit: mbps };
+
+  // Above 1024 Kbps unit 1 cannot express the value, so the controller only
+  // ever sees whole Mbps: rounding is unavoidable. Round UP, never down, so a
+  // cap is never applied below what the operator configured (30000 Kbps, i.e.
+  // a 30 Mbps plan written in Kbps, becomes 30 Mbps rather than 29). Say so
+  // once, because the applied cap then differs from the stored one (5000 Kbps
+  // → 5 Mbps = 5120 Kbps).
+  const rounded = Math.max(1, Math.ceil(mbps));
+  const key = kbps + '->' + rounded;
+  if (!warnedRoundedCaps.has(key)) {
+    warnedRoundedCaps.add(key);
+    console.warn(
+      '[qos] ' + kbps + ' Kbps is above 1024 and not a whole number of Mbps — ' +
+      'the controller will apply ' + rounded + ' Mbps (' + (rounded * KBPS_PER_MBPS) + ' Kbps).'
+    );
+  }
+  return { unit: 2, limit: rounded };
 }
 
 /**
@@ -107,6 +147,29 @@ function toRateLimitUnit(kbps) {
  * @param {*} value
  * @returns {string} the lowercased tier, or 'standard'
  */
+function repairLegacyBandwidthKbps(value) {
+  const kbps = normalizeBandwidthKbps(value);
+  if (kbps === null) return null;
+  if (kbps >= LEGACY_KBPS_FLOOR) return kbps;
+
+  // Below the floor this was a Mbps value stored in a Kbps column (the
+  // pre-standardisation bug). Heal it on read: active guests whose session row
+  // says "1" must be re-authorized at 1 Mbps, not cut off at 1 Kbps.
+  const repaired = kbps * KBPS_PER_MBPS;
+  if (repaired > MAX_BANDWIDTH_KBPS) return kbps;
+
+  const key = String(kbps);
+  if (!warnedLegacyRepairs.has(key)) {
+    warnedLegacyRepairs.add(key);
+    console.warn(
+      '[qos] persisted bandwidth cap ' + kbps + ' is below ' + LEGACY_KBPS_FLOOR +
+      ' Kbps — reading it as ' + kbps + ' Mbps (' + repaired + ' Kbps).' +
+      ' Re-save the voucher/session to store the Kbps value explicitly.'
+    );
+  }
+  return repaired;
+}
+
 function normalizeVoucherType(value) {
   if (value === undefined || value === null) return 'standard';
   const tier = String(value).trim().toLowerCase();
@@ -176,10 +239,14 @@ function resolvePremiumRateLimit() {
     upKbps = DEFAULT_PREMIUM_UP_KBPS;
   }
 
+  // Upload goes through the same unit rule as everything else: 512 Kbps stays
+  // unit 1, while the 1024 Kbps default becomes unit 2 / limit 1 (1 Mbps).
+  const up = toRateLimitUnit(upKbps);
+
   return {
     upEnable: true,
-    upUnit: 1,      // 1 = Kbps
-    upLimit: upKbps,
+    upUnit: up.unit,
+    upLimit: up.limit,
     downEnable: true,
     downUnit: down.unit,
     downLimit: down.limit,
@@ -209,8 +276,12 @@ function resolvePremiumRateLimit() {
  * @returns {Object|undefined} customRateLimit payload, or undefined for defaults
  */
 function resolveVoucherRateLimit(voucher) {
-  const downKbps = normalizeBandwidthKbps(voucher && voucher.downKbps);
-  const upKbps = normalizeBandwidthKbps(voucher && voucher.upKbps);
+  // These values come from vouchers.down_kbps / sessions.down_kbps, so a row
+  // written before the unit fix still holds Mbps integers. Reading it through
+  // repairLegacyBandwidthKbps() restores the intended speed without an
+  // operator having to edit the database.
+  const downKbps = repairLegacyBandwidthKbps(voucher && voucher.downKbps);
+  const upKbps = repairLegacyBandwidthKbps(voucher && voucher.upKbps);
 
   if (downKbps && upKbps) {
     const down = toRateLimitUnit(downKbps);
@@ -303,7 +374,7 @@ function rateLimitToKbps(rateLimit) {
   const toKbps = (unit, limit) => {
     const value = Number(limit);
     if (!Number.isInteger(value) || value < 1) return null;
-    return Number(unit) === 2 ? value * 1000 : value;
+    return Number(unit) === 2 ? value * KBPS_PER_MBPS : value;
   };
 
   return {
@@ -316,7 +387,10 @@ module.exports = {
   DEFAULT_PREMIUM_AMOUNTS_PESOS,
   DEFAULT_PREMIUM_DOWN_MBPS,
   DEFAULT_PREMIUM_UP_KBPS,
+  KBPS_PER_MBPS,
+  LEGACY_KBPS_FLOOR,
   rateLimitToKbps,
+  repairLegacyBandwidthKbps,
   MAX_BANDWIDTH_KBPS,
   normalizeVoucherType,
   isPremiumVoucherType,

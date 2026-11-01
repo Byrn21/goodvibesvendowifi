@@ -325,8 +325,8 @@ describe('POST /api/webhooks/instapay — tiered QoS', () => {
 
   const PREMIUM_CAPS = {
     upEnable: true,
-    upUnit: 1,        // Kbps
-    upLimit: 1024,    // PREMIUM_UP_KBPS
+    upUnit: 2,        // Mbps (1024 Kbps)
+    upLimit: 1,       // PREMIUM_UP_KBPS
     downEnable: true,
     downUnit: 2,      // Mbps
     downLimit: 50,    // PREMIUM_DOWN_MBPS

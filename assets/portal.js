@@ -112,6 +112,18 @@
       .replace(/'/g, '&#39;');
   }
 
+  /**
+   * safeDecode — decodeURIComponent that never throws.
+   *
+   * decodeURIComponent() raises URIError on a malformed escape (a bare '%', a
+   * truncated '%E0%A4%A'). The controller builds these URLs, so one bad value
+   * would otherwise kill the whole page script before it can navigate.
+   */
+  function safeDecode(value) {
+    if (!value) return '';
+    try { return decodeURIComponent(value); } catch (e) { return String(value); }
+  }
+
   function show(el) { if (el) el.classList.remove('hidden'); }
   function hide(el) { if (el) el.classList.add('hidden'); }
 
@@ -342,7 +354,7 @@
       || queryParams.originalUrl
       || queryParams.targetUrl
       || '';
-    candidate = decodeURIComponent(candidate);
+    candidate = safeDecode(candidate);
     if (isAllowedRedirect(candidate)) return candidate;
     return CONFIG.defaultRedirectUrl;
   }
@@ -844,7 +856,11 @@
     } else {
       // Build success URL with redirect and session info
       var params = new URLSearchParams();
-      if (result.redirectUrl) params.set('redirectUrl', encodeURIComponent(result.redirectUrl));
+      // NOT encodeURIComponent here: URLSearchParams already encodes. Encoding
+      // twice made success.html decode once and receive a still-encoded URL,
+      // which isUsableExternalUrl() then rejected — the guest landed on the
+      // google.com fallback even though Omada sent a perfectly good target.
+      if (result.redirectUrl) params.set('redirectUrl', result.redirectUrl);
       if (result.sessionId)   params.set('sessionId', result.sessionId);
       var mac = queryParams.clientMac
         ? (normalizeMac(queryParams.clientMac) || queryParams.clientMac)
@@ -869,7 +885,7 @@
       // Carry Omada's originUrl (the URL the guest first tried to open) through
       // to success.html so it can nudge the OS with a real internet request.
       var originUrl = queryParams.raw && (queryParams.raw.originUrl || queryParams.raw.originalUrl);
-      if (originUrl) params.set('originUrl', encodeURIComponent(originUrl));
+      if (originUrl) params.set('originUrl', originUrl);
 
       target = CONFIG.successPage + '?' + params.toString();
     }

@@ -43,6 +43,7 @@ const omada = require('../src/services/omada');
 const {
   resolveVoucherRateLimit,
   normalizeBandwidthKbps,
+  repairLegacyBandwidthKbps,
   toRateLimitUnit,
   rateLimitToKbps,
 } = require('../src/utils/qos');
@@ -115,14 +116,49 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
     });
   });
 
-  test('a 5 Mbps cap is sent as 5000 Kbps-equivalent (unit 2, limit 5)', () => {
+  test('a 5 Mbps cap is sent as unit 2 / limit 5, and small caps stay Kbps', () => {
     expect(toRateLimitUnit(5000)).toEqual({ unit: 2, limit: 5 });
     expect(toRateLimitUnit(1000)).toEqual({ unit: 1, limit: 1000 });
   });
 
+  test('rounds UP above 1024 Kbps so a cap is never applied below its value', () => {
+    // 30000 Kbps is how a 30 Mbps plan is written in Kbps; it must not become 29.
+    expect(toRateLimitUnit(30000)).toEqual({ unit: 2, limit: 30 });
+    expect(toRateLimitUnit(20000)).toEqual({ unit: 2, limit: 20 });
+  });
+
+  describe('repairLegacyBandwidthKbps — persisted rows from before the unit fix', () => {
+    test('reads a sub-64 value as Mbps', () => {
+      expect(repairLegacyBandwidthKbps(1)).toBe(1024);
+      expect(repairLegacyBandwidthKbps('2')).toBe(2048);
+      expect(repairLegacyBandwidthKbps(63)).toBe(64512);
+    });
+
+    test('leaves a plausible Kbps value alone and still rejects junk', () => {
+      expect(repairLegacyBandwidthKbps(64)).toBe(64);
+      expect(repairLegacyBandwidthKbps(5000)).toBe(5000);
+      expect(repairLegacyBandwidthKbps(null)).toBeNull();
+      expect(repairLegacyBandwidthKbps('fast')).toBeNull();
+    });
+
+    test('a stored "1" no longer yields a 1 Kbps cap (the production outage)', () => {
+      // 1 → 1024 Kbps → a clean 1 Mbps, NOT unit 1 / limit 1.
+      expect(resolveVoucherRateLimit({ downKbps: 1, upKbps: 1024, voucherType: 'standard' }))
+        .toEqual({
+          upEnable: true, upUnit: 2, upLimit: 1,
+          downEnable: true, downUnit: 2, downLimit: 1,
+        });
+      expect(resolveVoucherRateLimit({ downKbps: 2, upKbps: 1024 }))
+        .toEqual({
+          upEnable: true, upUnit: 2, upLimit: 1,
+          downEnable: true, downUnit: 2, downLimit: 2,
+        });
+    });
+  });
+
   test('falls back to PREMIUM_* for a premium voucher with no explicit caps', () => {
     expect(resolveVoucherRateLimit({ voucherType: 'premium' })).toEqual({
-      upEnable: true, upUnit: 1, upLimit: 1024,
+      upEnable: true, upUnit: 2, upLimit: 1,
       downEnable: true, downUnit: 2, downLimit: 50,
     });
   });
@@ -146,7 +182,14 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
       expect(rateLimitToKbps({
         upEnable: true, upUnit: 1, upLimit: 1024,
         downEnable: true, downUnit: 2, downLimit: 50,
-      })).toEqual({ downKbps: 50000, upKbps: 1024 });
+      })).toEqual({ downKbps: 51200, upKbps: 1024 });
+    });
+
+    test('uses the binary factor (1 Mbps = 1024 Kbps) in both directions', () => {
+      expect(rateLimitToKbps({ downUnit: 2, downLimit: 1 }))
+        .toEqual({ downKbps: 1024, upKbps: null });
+      expect(toRateLimitUnit(1024)).toEqual({ unit: 2, limit: 1 });
+      expect(toRateLimitUnit(1023)).toEqual({ unit: 1, limit: 1023 });
     });
 
     test('returns nulls when there is no resolved cap', () => {
@@ -156,7 +199,7 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
 
   test('recognises the premium tier whatever the stored casing/whitespace', () => {
     const premium = {
-      upEnable: true, upUnit: 1, upLimit: 1024,
+      upEnable: true, upUnit: 2, upLimit: 1,
       downEnable: true, downUnit: 2, downLimit: 50,
     };
     expect(resolveVoucherRateLimit({ voucherType: 'Premium' })).toEqual(premium);
@@ -170,7 +213,7 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
       delete process.env.PREMIUM_DOWN_MBPS;
       process.env.PREMIUM_DOWN_KBPS = '20000';
       expect(resolveVoucherRateLimit({ voucherType: 'premium' })).toEqual({
-        upEnable: true, upUnit: 1, upLimit: 1024,
+        upEnable: true, upUnit: 2, upLimit: 1,
         downEnable: true, downUnit: 2, downLimit: 20,
       });
     } finally {
@@ -189,7 +232,7 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
     expect(normalizeBandwidthKbps(0)).toBeNull();
     expect(normalizeBandwidthKbps(-5)).toBeNull();
     expect(normalizeBandwidthKbps(1.5)).toBeNull();
-    expect(normalizeBandwidthKbps(1024001)).toBeNull();
+    expect(normalizeBandwidthKbps(1048577)).toBeNull();
     expect(normalizeBandwidthKbps('fast')).toBeNull();
     expect(normalizeBandwidthKbps(5000)).toBe(5000);
     expect(resolveVoucherRateLimit({ downKbps: 'fast', upKbps: 5000 })).toBeUndefined();
@@ -220,8 +263,10 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
       'SELECT down_kbps, up_kbps FROM sessions WHERE session_id = ?',
       [res.body.sessionId]
     );
-    expect(session.down_kbps).toBe(20000);
-    expect(session.up_kbps).toBe(5000);
+    // Snapshot = the integers actually sent to the controller: 20000 Kbps is
+    // 20 Mbps (unit 2), and 20 Mbps read back at the binary factor is 20480.
+    expect(session.down_kbps).toBe(20480);
+    expect(session.up_kbps).toBe(5120);
   });
 
   test('a standard voucher without caps asks for the service default caps', async () => {
@@ -241,7 +286,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
-        upEnable: true, upUnit: 1, upLimit: 1024,
+        upEnable: true, upUnit: 2, upLimit: 1,
         downEnable: true, downUnit: 2, downLimit: 50,
       },
     });
@@ -256,7 +301,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
-        upEnable: true, upUnit: 1, upLimit: 1024,
+        upEnable: true, upUnit: 2, upLimit: 1,
         downEnable: true, downUnit: 2, downLimit: 50,
       },
     });
@@ -280,7 +325,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
       expect(omada.setClientRateLimit).toHaveBeenCalledWith({
         clientMac: MAC,
         customRateLimit: {
-          upEnable: true, upUnit: 1, upLimit: 1024,
+          upEnable: true, upUnit: 2, upLimit: 1,
           downEnable: true, downUnit: 2, downLimit: 50,
         },
       });
@@ -305,7 +350,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
       'SELECT down_kbps, up_kbps FROM sessions WHERE session_id = ?',
       [first.body.sessionId]
     );
-    expect(stored.down_kbps).toBe(50000);
+    expect(stored.down_kbps).toBe(51200);
     expect(stored.up_kbps).toBe(1024);
 
     const savedDown = process.env.PREMIUM_DOWN_MBPS;
@@ -321,7 +366,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
       expect(omada.setClientRateLimit).toHaveBeenCalledWith({
         clientMac: MAC,
         customRateLimit: {
-          upEnable: true, upUnit: 1, upLimit: 1024,
+          upEnable: true, upUnit: 2, upLimit: 1,
           downEnable: true, downUnit: 2, downLimit: 50,
         },
       });
