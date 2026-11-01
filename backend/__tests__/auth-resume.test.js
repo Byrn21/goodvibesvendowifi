@@ -442,3 +442,123 @@ describe('GET /api/session/status?voucher= — offline status checker', () => {
     expect(res.body.state).toBe('active');
   });
 });
+
+describe('POST /api/auth — re-entry with a claimed or already-started voucher', () => {
+  /**
+   * Seed a voucher left in state 'claimed' by POST /api/payment/claim, plus the
+   * session that claim recorded when it authorized the paying device. A null
+   * sessionId models a claim that could not authorize (no MAC / no portal
+   * context), so the full entitlement is still unspent.
+   */
+  async function seedClaimedVoucher(code, minutes, sessionId, mac) {
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, state, assigned_ref_no)
+       VALUES (?, 'standard', ?, 'claimed', ?)`,
+      [code, minutes, 'PAY-' + code]
+    );
+    if (!sessionId) return;
+    await sessionService.recordSession({
+      sessionId,
+      clientMac: mac,
+      clientIp: '10.0.0.5',
+      apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GuestWiFi',
+      duration: minutes,
+      voucherUsed: code,
+      voucherType: 'standard',
+    });
+  }
+
+  test('a claimed code re-entered on the same device resumes the claim session (no reset)', async () => {
+    await seedClaimedVoucher('123456', 60, 'sess_claim_live', MAC);
+    const before = await sessionService.getSession('sess_claim_live');
+
+    const res = await authRequest({ voucher: '123456' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    // The SAME session, with its ORIGINAL window — not a fresh 60 minutes.
+    expect(res.body.sessionId).toBe('sess_claim_live');
+    expect(res.body.expiresAt).toBe(before.expiresAt);
+    expect(res.body.session.remainingSeconds).toBeGreaterThan(3500);
+    expect(res.body.session.remainingSeconds).toBeLessThanOrEqual(3600);
+
+    // No second session was created for the code.
+    const rows = await getDb().query(
+      `SELECT session_id FROM sessions WHERE voucher_used = '123456'`
+    );
+    expect(rows.length).toBe(1);
+
+    // Still the payment claim's voucher — re-entry consumed nothing.
+    const voucher = await getDb().getOne(`SELECT state FROM vouchers WHERE code = '123456'`);
+    expect(voucher.state).toBe('claimed');
+  });
+
+  test('a claimed code entered from another device is refused (permanent binding)', async () => {
+    await seedClaimedVoucher('123457', 60, 'sess_claim_bound', MAC);
+
+    const res = await authRequest({ voucher: '123457', clientMac: OTHER_MAC });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('VOUCHER_DEVICE_MISMATCH');
+
+    const rows = await getDb().query(
+      `SELECT session_id FROM sessions WHERE voucher_used = '123457'`
+    );
+    expect(rows.length).toBe(1);
+    const after = await sessionService.getSession('sess_claim_bound');
+    expect(after.state).toBe('active');
+  });
+
+  test('a claimed code that never authorized a device still redeems for its full duration', async () => {
+    await seedClaimedVoucher('123458', 30, null, null);
+
+    const res = await authRequest({ voucher: '123458' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.sessionId).toMatch(/^sess_/);
+    expect(res.body.session.remainingSeconds).toBeGreaterThan(1750);
+
+    const voucher = await getDb().getOne(`SELECT state, used_by_mac FROM vouchers WHERE code = '123458'`);
+    expect(voucher.state).toBe('used');
+    expect(voucher.used_by_mac).toBe(MAC);
+  });
+
+  test('a claimed code whose claim session elapsed is rejected and the voucher is expired', async () => {
+    await seedClaimedVoucher('123459', 60, 'sess_claim_dead', MAC);
+    await sessionService.expireSession('sess_claim_dead', 'time_expired');
+
+    const res = await authRequest({ voucher: '123459' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('EXPIRED_VOUCHER');
+
+    const voucher = await getDb().getOne(`SELECT state FROM vouchers WHERE code = '123459'`);
+    expect(voucher.state).toBe('expired');
+
+    // Nothing was re-authorised or re-created.
+    const rows = await getDb().query(
+      `SELECT session_id FROM sessions WHERE voucher_used = '123459'`
+    );
+    expect(rows.length).toBe(1);
+  });
+
+  test('the OLDEST live session owns the code, so a duplicate cannot inflate the time', async () => {
+    await seedClaimedVoucher('123460', 60, 'sess_first', MAC);
+    // A stale duplicate from the old reset behaviour: live, and an hour longer.
+    await sessionService.recordSession({
+      sessionId: 'sess_duplicate',
+      clientMac: MAC,
+      duration: 120,
+      voucherUsed: '123460',
+      voucherType: 'standard',
+    });
+
+    const res = await authRequest({ voucher: '123460' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('sess_first');
+    expect(res.body.session.remainingSeconds).toBeLessThanOrEqual(3600);
+  });
+});

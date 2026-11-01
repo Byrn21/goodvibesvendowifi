@@ -21,6 +21,7 @@ const {
   reauthorizeSession,
   expireSession,
   getSessionByVoucher,
+  resolveVoucherSession,
   isPausableVoucherType,
   applySessionRateLimit,
 } = require('../services/session');
@@ -159,18 +160,35 @@ router.post('/', async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Terms acceptance required.', code: 'TERMS_REQUIRED' });
     }
 
-    // ── Re-login with an already-'used' voucher (Premium pause/resume) ──
-    // Pause is tracked on the SESSION row, not the voucher, so a code whose
-    // session is still 'paused' is a resume — not a fresh redemption. This
-    // runs BEFORE validateVoucher, which would otherwise reject the 'used'
-    // voucher as "already used" and never let the guest back online.
+    // ── Re-entry with a code that already started its clock ──────────────
+    // The clock lives on the SESSION row, not on the voucher, so the re-entry
+    // decision is "does a session own this code" — never vouchers.state alone.
+    //
+    // Keying it on state 'used' was the voucher-reset bug: POST
+    // /api/payment/claim leaves the code in state 'claimed' and has ALREADY
+    // recorded a session and authorized the paying device, so a 'used'-only
+    // check let a claimed code fall through to the fresh-redemption path below
+    // (full duration, new started_at/expires_at, a second live session).
+    //
+    // This runs BEFORE validateVoucher, which would otherwise reject a 'used'
+    // code as "already used" and never let the guest back online.
     const existingVoucher = await getDb().getOne(
       'SELECT state, used_by_mac FROM vouchers WHERE code = ? LIMIT 1',
       [normalizedVoucher]
     );
-    if (existingVoucher && existingVoucher.state === 'used') {
-      const outcome = await resumeUsedVoucher(
-        normalizedVoucher, normalizedMac, existingVoucher.used_by_mac, redirectUrl
+    if (existingVoucher && existingVoucher.state === 'expired') {
+      return res.status(401).json({
+        success: false,
+        error: 'This voucher has expired.',
+        code: 'EXPIRED_VOUCHER',
+      });
+    }
+    const existingSession = await resolveVoucherSession(normalizedVoucher);
+    if (existingSession) {
+      const outcome = await reuseVoucher(
+        normalizedVoucher, normalizedMac,
+        existingVoucher && existingVoucher.used_by_mac,
+        redirectUrl, existingSession
       );
       return res.status(outcome.status).json(outcome.body);
     }
@@ -522,11 +540,43 @@ function maskVoucher(code) {
 }
 
 /**
- * resumeUsedVoucher — Handle POST /api/auth for a voucher that is already
- * 'used' (i.e. it was redeemed once and still has a session row).
+ * markVoucherExpired — mirror a dead session onto its voucher row.
+ *
+ * The entitlement lives on the session, so a fully-elapsed code keeps whatever
+ * state label it had ('used', or 'claimed' for a payment-claim voucher) unless
+ * this is written. Admin stats render from vouchers.state, so leaving 'claimed'
+ * behind would advertise a live voucher that can never be redeemed again.
+ *
+ * Best-effort: the guest is being refused either way, so a failed write must
+ * not turn a clean EXPIRED_VOUCHER answer into a 500.
+ *
+ * @param {string} voucher Normalized voucher code
+ */
+async function markVoucherExpired(voucher) {
+  try {
+    await getDb().run(
+      `UPDATE vouchers SET state = 'expired'
+        WHERE code = ? AND state IN ('active', 'claimed', 'used')`,
+      [voucher]
+    );
+  } catch (err) {
+    console.error(
+      '[auth] could not mark voucher ' + maskVoucher(voucher) + ' expired: ' +
+      ((err && err.message) || String(err))
+    );
+  }
+}
+
+/**
+ * reuseVoucher — Handle POST /api/auth for a code that already owns a session.
+ *
+ * Covers BOTH a 'used' code (redeemed through the portal once) and a 'claimed'
+ * one (matched to a payment by POST /api/payment/claim, which has already
+ * recorded a session and authorized the paying device). What decides the path
+ * is the existence of that session, not the voucher's state label.
  *
  * Pause/resume state lives on the SESSION row, not the voucher, so re-entering
- * a 'used' code is a re-login with two distinct cases:
+ * such a code is a re-login with two distinct cases:
  *
  *   1. ACTIVE (still counting down) on the SAME device — the device merely
  *      lost its firewall authorization (captive mini-browser reopened, Wi-Fi
@@ -542,6 +592,15 @@ function maskVoucher(code) {
  * voucher was first bound to (vouchers.used_by_mac, falling back to the
  * session's client_mac) — this is the anti-sharing guard for BOTH paths.
  *
+ * The code is bound PERMANENTLY to the first device that redeemed or claimed
+ * it (vouchers.used_by_mac, or the session's client_mac for a claimed code,
+ * which the claim route never writes to the voucher): any other MAC is refused
+ * with 403, so a shared code cannot split its remaining time across devices.
+ *
+ * Timestamps are READ, never rewritten: the session's started_at/expires_at
+ * were fixed when it was created, and the controller is asked only for
+ * expires_at - now (or the frozen remaining time of a paused pass).
+ *
  * Always resolves to { status, body }: the caller sends it as the response.
  *
  * @param {string} voucher      Normalized voucher code
@@ -549,12 +608,15 @@ function maskVoucher(code) {
  * @param {string} [boundMac]   MAC the voucher was originally bound to
  *                              (vouchers.used_by_mac); falls back to the
  *                              session's client_mac when absent on legacy rows
+ *                              and on every 'claimed' voucher
  * @param {string} [redirectUrl] Validated post-login redirect URL from the form
+ * @param {Object} [loaded]     Session already resolved by the caller, so the
+ *                              row that was checked is the row that is used
  */
-async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
+async function reuseVoucher(voucher, clientMac, boundMac, redirectUrl, loaded) {
   const fail = (status, code, error) => ({ status, body: { success: false, code, error } });
 
-  const session = await getSessionByVoucher(voucher);
+  const session = loaded || await resolveVoucherSession(voucher);
   if (!session) {
     return fail(401, 'USED_VOUCHER', 'This voucher has already been used.');
   }
@@ -568,8 +630,10 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
   }
 
   // getSession() already flips an active-but-timed-out session to 'expired',
-  // so this covers "the time has fully elapsed".
+  // so this covers "the time has fully elapsed". The voucher row follows it so
+  // the admin list and the offline status modal agree that the code is dead.
   if (session.state === 'expired') {
+    await markVoucherExpired(voucher);
     return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
   }
 
@@ -586,6 +650,7 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
     } catch (err) {
       if (err && err.code === 'SESSION_EXPIRED') {
         await expireSession(session.sessionId, 'time_expired');
+        await markVoucherExpired(voucher);
         return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
       }
       console.error(
@@ -650,6 +715,7 @@ async function resumeUsedVoucher(voucher, clientMac, boundMac, redirectUrl) {
   const remaining = Math.max(0, Math.floor(session.remainingSeconds || 0));
   if (remaining <= 0) {
     await expireSession(session.sessionId, 'time_expired');
+    await markVoucherExpired(voucher);
     return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
   }
 

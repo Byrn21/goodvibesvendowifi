@@ -928,7 +928,8 @@ async function markEventProcessed(eventId, sessionId) {
 }
 
 /**
- * getSessionByVoucher — the newest session that consumed a given voucher code.
+ * getSessionByVoucher — thin alias for resolveVoucherSession(): the session that
+ * owns a given voucher code (kept so existing callers keep working).
  *
  * Pause/resume state lives on the SESSION row (sessions.state = 'paused'), not
  * on the voucher, so this is how a re-login with an already-'used' voucher
@@ -942,13 +943,43 @@ async function markEventProcessed(eventId, sessionId) {
  * @returns {Promise<Object|null>}
  */
 async function getSessionByVoucher(voucher) {
+  return await resolveVoucherSession(voucher);
+}
+
+/**
+ * resolveVoucherSession — the ONE session that owns a voucher's entitlement.
+ *
+ * A code can accumulate more than one session row (POST /api/payment/claim
+ * records a session when it authorizes the paying device, and a re-entry must
+ * never add a second one). The row that STARTED the clock is therefore the
+ * oldest, and taking the newest — as this lookup used to — let a later, longer
+ * row shadow the real expiry and hand the guest a fresh full-length session.
+ *
+ * Preference order:
+ *   1. a still-live row (active / paused / awaiting payment) — that is the row
+ *      a re-entry re-authorizes or resumes;
+ *   2. otherwise the OLDEST row, so a caller reporting EXPIRED answers from the
+ *      entitlement that actually started rather than from a stale duplicate.
+ *
+ * @param {string} voucher Normalized voucher code
+ * @returns {Promise<Object|null>} session object, or null when the code owns none
+ */
+async function resolveVoucherSession(voucher) {
   if (!voucher) return null;
-  const row = await getDb().getOne(
-    `SELECT session_id FROM sessions WHERE voucher_used = ? ORDER BY id DESC LIMIT 1`,
+
+  const rows = await getDb().query(
+    `SELECT session_id, state FROM sessions WHERE voucher_used = ? ORDER BY id ASC`,
     [voucher]
   );
-  if (!row) return null;
-  return await getSession(row.session_id);
+  if (!rows || rows.length === 0) return null;
+
+  const isLive = (row) => row.state === 'active' || row.state === 'paused' ||
+    row.state === 'pending_payment' || row.state === 'pending_verification';
+  const chosen = rows.find(isLive) || rows[0];
+
+  // getSession() applies server-side expiry (lazy + Premium hard expiry), so an
+  // active-but-timed-out row comes back with state 'expired'.
+  return await getSession(chosen.session_id);
 }
 
 module.exports = {
@@ -973,5 +1004,6 @@ module.exports = {
   isHardExpired,
   hardExpiryFor,
   getSessionByVoucher,
+  resolveVoucherSession,
   applySessionRateLimit,
 };
