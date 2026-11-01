@@ -580,6 +580,17 @@
         : '';
 
       var pollTimer = null;
+
+      // Set only once the backend has CONFIRMED it cannot identify this device
+      // (502 MISSING_PORTAL_CONTEXT, after every identifier has been tried).
+      // From then on the page makes no background requests at all: no poll
+      // timer, no network retry, no fetch when the tab becomes visible again —
+      // only the Refresh button clears it. That guest is usually on mobile data,
+      // where every background request is another 502 in the operator's log.
+      //
+      // A generic 5xx or an unreachable network deliberately does NOT set this:
+      // a tunnel restart is transient, so those paths keep retrying on their own.
+      var pollingHalted = false;
       var countdownTimer = null;
       var localSeconds = null;
       var totalSeconds = null;   // used to calculate ring fill ratio
@@ -593,6 +604,25 @@
       var NETWORK_RETRY_DELAY = 2000;
       var networkRetryCount = 0;
       var networkRetryTimer = null;
+
+      /**
+       * stopPolling — halt every scheduled request on this page.
+       *
+       * Clears the poll timer AND the network-retry timer (either may already be
+       * armed) and resets the retry budget, so nothing can fire after the page has
+       * settled on a terminal screen. fetchStatus() refuses to run while halted,
+       * and scheduleRetry() will not arm a new timer, which is what keeps the
+       * 502 MISSING_PORTAL_CONTEXT screen idle instead of polling forever.
+       */
+      function stopPolling() {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+        clearTimeout(networkRetryTimer);
+        networkRetryTimer = null;
+        networkRetryCount = 0;
+        pollingHalted = true;
+        if (els.pollingStatus) els.pollingStatus.textContent = '';
+      }
 
       // The query string that last produced a session. Behind the cloud tunnel
       // the identifier-less (address-based) query can NEVER succeed, so once a
@@ -858,6 +888,11 @@
       }
 
       function fetchStatus(index) {
+        // Halted: a confirmed MISSING_PORTAL_CONTEXT left the page resting on
+        // the mobile-data warning. Only an explicit Refresh may ask the API
+        // again (it clears pollingHalted before calling this).
+        if (pollingHalted) return;
+
         var queries = statusQueries();
         var at;
         if (typeof index === 'number') {
@@ -927,6 +962,10 @@
                 } else {
                   // Nothing saved either — say what fixes it instead of
                   // claiming the session is gone.
+                  // Stop everything BEFORE painting the warning: an armed poll
+                  // or retry timer here is what turned this screen into an
+                  // endless 502 loop in the operator's log.
+                  stopPolling();
                   showUnknown(MISSING_CONTEXT_MESSAGE, false);
                 }
               } else {
@@ -1182,6 +1221,10 @@
         if (!btn) return;
         btn.addEventListener('click', function () {
           btn.disabled = true;
+          // The one explicit way out of a halted page: clear the halt and make
+          // exactly one manual request. A success re-arms normal polling
+          // through renderStatus(), a 502 halts the page again.
+          pollingHalted = false;
           networkRetryCount = 0;
           clearTimeout(networkRetryTimer);
           networkRetryTimer = null;
@@ -1252,6 +1295,9 @@
       // recovers without user action (the error screen also has a Refresh
       // button as an explicit option).
       function scheduleRetry() {
+        // A halted page stays idle: no auto-retry after a confirmed
+        // MISSING_PORTAL_CONTEXT, only a manual Refresh.
+        if (pollingHalted) return;
         clearTimeout(pollTimer);
         pollTimer = setTimeout(function () {
           if (!document.hidden) fetchStatus();
@@ -1264,7 +1310,9 @@
           clearTimeout(networkRetryTimer);
           networkRetryTimer = null;
           stopCountdown();
-        } else {
+        } else if (!pollingHalted) {
+          // Coming back to the tab must not restart a halted page; only the
+          // Refresh button may issue another request.
           fetchStatus();
         }
       });
