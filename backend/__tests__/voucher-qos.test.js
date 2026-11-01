@@ -44,6 +44,7 @@ const {
   resolveVoucherRateLimit,
   normalizeBandwidthKbps,
   toRateLimitUnit,
+  rateLimitToKbps,
 } = require('../src/utils/qos');
 
 const MAC = 'AA:BB:CC:DD:EE:FF';
@@ -128,6 +129,29 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
 
   test('returns undefined for a standard voucher with no explicit caps (service defaults)', () => {
     expect(resolveVoucherRateLimit({ voucherType: 'standard' })).toBeUndefined();
+  });
+
+  test('every resolved limit is an integer, never a "default" sentinel', () => {
+    const limits = resolveVoucherRateLimit({ voucherType: 'premium' });
+    for (const field of ['upLimit', 'downLimit']) {
+      expect(Number.isInteger(limits[field])).toBe(true);
+      expect(limits[field]).not.toBe('default');
+    }
+    expect([1, 2]).toContain(limits.upUnit);
+    expect([1, 2]).toContain(limits.downUnit);
+  });
+
+  describe('rateLimitToKbps — the session snapshot', () => {
+    test('converts Mbps limits to Kbps and leaves Kbps limits alone', () => {
+      expect(rateLimitToKbps({
+        upEnable: true, upUnit: 1, upLimit: 1024,
+        downEnable: true, downUnit: 2, downLimit: 50,
+      })).toEqual({ downKbps: 50000, upKbps: 1024 });
+    });
+
+    test('returns nulls when there is no resolved cap', () => {
+      expect(rateLimitToKbps(undefined)).toEqual({ downKbps: null, upKbps: null });
+    });
   });
 
   test('recognises the premium tier whatever the stored casing/whitespace', () => {
@@ -238,7 +262,10 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     });
   });
 
-  test('a premium voucher with no premium caps logs the fallback instead of failing silently', async () => {
+  test('a premium voucher still gets PREMIUM speeds when PREMIUM_* is unset', async () => {
+    // A .env that predates premium QoS must not silently cap premium guests at
+    // the standard VOUCHER_DEFAULT_* speed: the built-in premium defaults
+    // (the values .env.example documents) apply instead.
     const savedDown = process.env.PREMIUM_DOWN_MBPS;
     const savedUp = process.env.PREMIUM_UP_KBPS;
     delete process.env.PREMIUM_DOWN_MBPS;
@@ -250,16 +277,57 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
       await authRequest({ voucher: '666777' });
 
-      expect(omada.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+      expect(omada.setClientRateLimit).toHaveBeenCalledWith({
+        clientMac: MAC,
+        customRateLimit: {
+          upEnable: true, upUnit: 1, upLimit: 1024,
+          downEnable: true, downUnit: 2, downLimit: 50,
+        },
+      });
       const warned = warn.mock.calls.map((c) => c.join(' ')).join('\n');
-      expect(warned).toContain('PREMIUM session');
-      expect(warned).toContain('PREMIUM_DOWN_MBPS');
+      expect(warned).toContain('built-in premium default');
     } finally {
       warn.mockRestore();
       if (savedDown === undefined) delete process.env.PREMIUM_DOWN_MBPS;
       else process.env.PREMIUM_DOWN_MBPS = savedDown;
       if (savedUp === undefined) delete process.env.PREMIUM_UP_KBPS;
       else process.env.PREMIUM_UP_KBPS = savedUp;
+    }
+  });
+
+  test('a re-login replays the SNAPSHOTTED premium caps, not the current env', async () => {
+    await seedVoucher('888999', 'premium');
+    const first = await authRequest({ voucher: '888999' });
+    expect(first.status).toBe(200);
+
+    // The session snapshotted 50 Mbps / 1024 Kbps at authorization time.
+    const stored = await getDb().getOne(
+      'SELECT down_kbps, up_kbps FROM sessions WHERE session_id = ?',
+      [first.body.sessionId]
+    );
+    expect(stored.down_kbps).toBe(50000);
+    expect(stored.up_kbps).toBe(1024);
+
+    const savedDown = process.env.PREMIUM_DOWN_MBPS;
+    process.env.PREMIUM_DOWN_MBPS = '20';
+    omada.setClientRateLimit.mockClear();
+    try {
+      const second = await authRequest({ voucher: '888999' });
+      expect(second.status).toBe(200);
+      expect(second.body.sessionId).toBe(first.body.sessionId);
+
+      // Still 50 — the cap was granted with the session and is replayed, so a
+      // later env change cannot slow a live premium guest mid-pass.
+      expect(omada.setClientRateLimit).toHaveBeenCalledWith({
+        clientMac: MAC,
+        customRateLimit: {
+          upEnable: true, upUnit: 1, upLimit: 1024,
+          downEnable: true, downUnit: 2, downLimit: 50,
+        },
+      });
+    } finally {
+      if (savedDown === undefined) delete process.env.PREMIUM_DOWN_MBPS;
+      else process.env.PREMIUM_DOWN_MBPS = savedDown;
     }
   });
 

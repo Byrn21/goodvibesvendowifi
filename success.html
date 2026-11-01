@@ -656,6 +656,29 @@
       var statusLink = document.getElementById('status-link');
       var countdownTimer = null;
 
+      // Signed identity for THIS session: handed over in the URL by portal.js /
+      // the auth redirect, or saved on an earlier visit. It names the exact
+      // session, so the status link carries it — that link then still resolves
+      // the guest when it is opened on a different origin (mobile data, the
+      // tunnel host, a pasted link) where this origin's cookie and
+      // localStorage do not exist.
+      var statusToken = '';
+      try {
+        statusToken = params.get('token')
+          || window.localStorage.getItem('portalStatusToken')
+          || window.sessionStorage.getItem('portalStatusToken')
+          || '';
+      } catch (e) { statusToken = params.get('token') || ''; }
+
+      function rememberStatusToken(token) {
+        if (!token) return;
+        try {
+          window.localStorage.setItem('portalStatusToken', token);
+          window.sessionStorage.setItem('portalStatusToken', token);
+        } catch (e) { /* storage unavailable — the URL still carries it */ }
+      }
+      rememberStatusToken(statusToken);
+
       function pad2(n) { return String(n).padStart(2, '0'); }
 
       function formatRemaining(totalSecs) {
@@ -699,6 +722,7 @@
         var q = new URLSearchParams();
         if (sessionId) q.set('sessionId', sessionId);
         if (clientMac) q.set(forwardedMacKey, clientMac);
+        if (statusToken) q.set('token', statusToken);
         var vt = params.get('voucherType') || '';
         if (vt) q.set('voucherType', vt);
         var qs = q.toString();
@@ -781,6 +805,11 @@
                   window.sessionStorage.setItem('portalStatusToken', data.statusToken);
                 }
               } catch (e) { /* storage unavailable */ }
+
+              if (data.statusToken) {
+                statusToken = data.statusToken;
+                rememberStatusToken(statusToken);
+              }
 
               if (sidEl) sidEl.textContent = sessionId;
               if (statusLink) statusLink.href = statusHref();

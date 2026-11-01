@@ -27,6 +27,7 @@ const {
 } = require('../services/session');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 const { normalizeMac: normalizeDeviceMac, isSameMac } = require('../utils/device-id');
+const { resolveVoucherRateLimit, rateLimitToKbps } = require('../utils/qos');
 const { resolveClientMacByIp } = require('../utils/portal-context');
 const { setSessionCookie } = require('../utils/session-token');
 const { getDb } = require('../db/client');
@@ -184,7 +185,20 @@ router.post('/', async (req, res, next) => {
         code: 'EXPIRED_VOUCHER',
       });
     }
-    const existingSession = await resolveVoucherSession(normalizedVoucher);
+    // Best-effort probe: a read failure here (missing table, database down)
+    // must not surface as an unhandled 500. Falling through lets the normal
+    // path report the failure it actually hits, as SESSION_WRITE_FAILED.
+    let existingSession = null;
+    try {
+      existingSession = await resolveVoucherSession(normalizedVoucher);
+    } catch (probeErr) {
+      console.error(
+        '[auth] could not probe existing sessions for voucher ' +
+        maskVoucher(normalizedVoucher) + ': ' +
+        ((probeErr && probeErr.message) || String(probeErr)) +
+        ' — continuing with a fresh redemption'
+      );
+    }
     if (existingSession) {
       const outcome = await reuseVoucher(
         normalizedVoucher, normalizedMac,
@@ -194,7 +208,17 @@ router.post('/', async (req, res, next) => {
       // A re-login (active re-authorization or Premium resume) is still this
       // browser's session, so refresh the identity cookie with it.
       if (outcome.status === 200 && outcome.body && outcome.body.sessionId) {
-        outcome.body.statusToken = setSessionCookie(req, res, outcome.body.sessionId) || null;
+        const token = setSessionCookie(req, res, outcome.body.sessionId);
+        outcome.body.statusToken = token || null;
+
+        // A status deep link must name the session on its own: the guest can
+        // open it later on mobile data or the tunnel host, where this origin's
+        // cookie does not exist. redirectUrl is `status.html?sessionId=…`, so
+        // the token appends with '&'.
+        if (token && typeof outcome.body.redirectUrl === 'string' &&
+            outcome.body.redirectUrl.indexOf('status.html') === 0) {
+          outcome.body.redirectUrl += '&token=' + encodeURIComponent(token);
+        }
       }
       return res.status(outcome.status).json(outcome.body);
     }
@@ -355,6 +379,18 @@ router.post('/', async (req, res, next) => {
     // consumeVoucher's `state IN ('active','claimed')` guard keeps this
     // race-safe: it returns false, changing nothing, when another request
     // already took the code.
+    // Resolve this voucher's bandwidth cap ONCE, here, before the session row
+    // exists. The RESOLVED integers (Kbps) are snapshotted onto the session, so
+    // a later re-auth or Premium resume replays exactly the cap this guest was
+    // granted instead of re-resolving the tier from environment variables that
+    // may have changed since (and never from a 'default' sentinel).
+    const resolvedRateLimit = resolveVoucherRateLimit({
+      downKbps: voucherResult.downKbps,
+      upKbps: voucherResult.upKbps,
+      voucherType: voucherTypeResolved,
+    });
+    const sessionCaps = rateLimitToKbps(resolvedRateLimit);
+
     let voucherConsumed = false;
     try {
       voucherConsumed = await getDb().transaction(async (tx) => {
@@ -369,10 +405,10 @@ router.post('/', async (req, res, next) => {
           duration,        // minutes
           voucherUsed: normalizedVoucher,
           voucherType: voucherTypeResolved,
-          // Bandwidth snapshot, so every later re-auth/resume re-applies the
-          // exact cap this code carries (NULL = tier/default caps).
-          downKbps: voucherResult.downKbps,
-          upKbps: voucherResult.upKbps,
+          // Bandwidth snapshot (resolved integers, Kbps), so every later
+          // re-auth/resume re-applies the exact cap this code carries.
+          downKbps: sessionCaps.downKbps,
+          upKbps: sessionCaps.upKbps,
         }, tx);
         return true;
       });
@@ -422,8 +458,10 @@ router.post('/', async (req, res, next) => {
     // an error. The response reports the outcome for the operator.
     const qos = await applySessionRateLimit({
       clientMac: normalizedMac,
-      downKbps: voucherResult.downKbps,
-      upKbps: voucherResult.upKbps,
+      // The snapshot written with the session above — identical to resolving
+      // the voucher/tier again, but guaranteed to match the stored row.
+      downKbps: sessionCaps.downKbps,
+      upKbps: sessionCaps.upKbps,
       voucherType: voucherTypeResolved,
     });
 

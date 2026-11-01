@@ -15,8 +15,9 @@
  *     the service falls back to VOUCHER_DEFAULT_*
  *   - tiered QoS: each premium amount (PREMIUM_AMOUNTS_PESOS, default
  *     25/45/80) passes PREMIUM_DOWN_MBPS / PREMIUM_UP_KBPS as integers; every
- *     other amount (and a premium amount with unset/out-of-range premium caps)
- *     uses the default VOUCHER_DEFAULT_* path
+ *     other amount uses the default VOUCHER_DEFAULT_* path, while a premium
+ *     amount keeps premium speed even when the PREMIUM_* variables are
+ *     unset/out-of-range (the built-in premium defaults apply)
  *   - a failed rate limit is tolerated (200 + qosApplied:false), because the
  *     guest is already online
  *
@@ -382,20 +383,26 @@ describe('POST /api/webhooks/instapay — tiered QoS', () => {
     );
   });
 
-  test('falls back to VOUCHER_DEFAULT_* when the premium caps are unset', async () => {
+  test('keeps premium speed (built-in defaults) when the premium caps are unset', async () => {
+    // A .env written before premium QoS existed must not silently cap a premium
+    // purchase at the standard VOUCHER_DEFAULT_* speed.
     delete process.env.PREMIUM_DOWN_MBPS;
     delete process.env.PREMIUM_UP_KBPS;
     const res = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 80 }));
 
     expect(res.status).toBe(200);
-    expect(omadaService.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+    expect(omadaService.setClientRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ clientMac: MAC, customRateLimit: PREMIUM_CAPS })
+    );
   });
 
-  test('falls back to VOUCHER_DEFAULT_* when a premium cap is out of range', async () => {
+  test('keeps premium speed (built-in defaults) when a premium cap is out of range', async () => {
     process.env.PREMIUM_DOWN_MBPS = 'not-a-number';
     const res = await request(app).post('/api/webhooks/instapay').send(payload({ amount: 80 }));
 
     expect(res.status).toBe(200);
-    expect(omadaService.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
+    expect(omadaService.setClientRateLimit).toHaveBeenCalledWith(
+      expect.objectContaining({ clientMac: MAC, customRateLimit: PREMIUM_CAPS })
+    );
   });
 });

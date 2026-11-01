@@ -210,6 +210,53 @@ describe('POST /api/auth — session cookie', () => {
   });
 });
 
+describe('token propagation into status URLs', () => {
+  test('the resume redirect to status.html carries a valid token', async () => {
+    // A paused Premium pass resumes straight onto status.html — the one
+    // backend-built deep link that points at that page.
+    await sessionService.recordSession({
+      sessionId: 'sess_redirect',
+      clientMac: MAC,
+      clientIp: LAN_IP,
+      apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GoodVibesVendoWifi',
+      duration: 60,
+      voucherUsed: '111111',
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+    await sessionService.pauseSession('sess_redirect');
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, state, used_by_mac)
+       VALUES ('111111', 'premium', 60, 'used', ?)`,
+      [MAC]
+    );
+
+    const res = await request(app)
+      .post('/api/auth')
+      .send({
+        voucher: '111111',
+        clientMac: MAC,
+        clientIp: LAN_IP,
+        apMac: 'AA:AA:AA:AA:AA:AA',
+        ssidName: 'GoodVibesVendoWifi',
+        termsAccepted: true,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.resumed).toBe(true);
+    expect(res.body.redirectUrl).toMatch(/^status\.html\?sessionId=sess_redirect/);
+
+    // The deep link must identify the session on its own: it can be opened
+    // later from mobile data / the tunnel host, where this origin's cookie and
+    // localStorage do not exist.
+    const url = new URL(res.body.redirectUrl, 'http://portal.local');
+    const token = url.searchParams.get('token');
+    expect(token).toBeTruthy();
+    expect(verifySessionToken(token).sessionId).toBe('sess_redirect');
+  });
+});
+
 describe('GET /api/session/status — cookie identity beats the address lookup', () => {
   test('resolves the session from the cookie alone with no portal context', async () => {
     await seedSession('sess_cookie_hit');

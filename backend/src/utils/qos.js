@@ -30,6 +30,32 @@
 // Mirrors the portal's premium tier (5h = P25, 12h = P45, 24h = P80).
 const DEFAULT_PREMIUM_AMOUNTS_PESOS = [25, 45, 80];
 
+// Premium caps used when the PREMIUM_* variables are unset or out of range.
+// These are the values documented in backend/.env.example, so a deployment
+// whose .env predates premium QoS no longer silently caps premium guests at
+// VOUCHER_DEFAULT_* (standard) speed: a premium plan always resolves to
+// integers, and the fallback is logged once per process.
+const DEFAULT_PREMIUM_DOWN_MBPS = 50;
+const DEFAULT_PREMIUM_UP_KBPS = 1024;
+
+// One warning per missing variable, not one per guest.
+const warnedPremiumDefaults = new Set();
+
+/**
+ * Warn once that a built-in premium default was used for `name`.
+ *
+ * @param {string} name environment variable that was missing/invalid
+ * @param {*} used the value that was substituted
+ */
+function warnPremiumDefault(name, used) {
+  if (warnedPremiumDefaults.has(name)) return;
+  warnedPremiumDefaults.add(name);
+  console.warn(
+    '[qos] ' + name + ' is unset or out of range — using the built-in premium default ' +
+    String(used) + '. Set it in backend/.env to control the premium tier.'
+  );
+}
+
 // Upper bound for a per-voucher cap: 1 Gbps expressed in Kbps. Omada's
 // customRateLimit is 1–1024 PER UNIT, so 1 024 000 Kbps (= 1024 Mbps) is the
 // real ceiling once the value is converted (see toRateLimitUnit).
@@ -120,26 +146,35 @@ function resolvePremiumDown() {
   const downKbps = normalizeBandwidthKbps(process.env.PREMIUM_DOWN_KBPS);
   if (downKbps) return toRateLimitUnit(downKbps);
 
-  return undefined;
+  // Neither variable is usable: keep the premium tier premium instead of
+  // letting the guest fall through to the standard VOUCHER_DEFAULT_* cap.
+  warnPremiumDefault('PREMIUM_DOWN_MBPS', DEFAULT_PREMIUM_DOWN_MBPS);
+  return { unit: 2, limit: DEFAULT_PREMIUM_DOWN_MBPS }; // Mbps
 }
 
 /**
  * resolvePremiumRateLimit — the PREMIUM_* operator caps as a customRateLimit.
  *
  * Download comes from PREMIUM_DOWN_MBPS (or its PREMIUM_DOWN_KBPS alias), upload
- * from PREMIUM_UP_KBPS. Returns undefined when either surviving value is unset
- * or out of range, which makes setClientRateLimit() fall back to the
- * VOUCHER_DEFAULT_* caps so a premium guest is still capped rather than left
- * unlimited — callers log that fallback (see applySessionRateLimit) so a
- * misnamed variable does not masquerade as a standard voucher.
+ * from PREMIUM_UP_KBPS. Each dimension that is unset or out of range falls back
+ * to the built-in DEFAULT_PREMIUM_* value (the same numbers .env.example
+ * documents) with a one-time warning, so this NEVER returns undefined: a
+ * premium plan always resolves to integers and cannot silently drop to the
+ * standard VOUCHER_DEFAULT_* speed.
+ *
+ * Every limit returned here is a plain integer in the 1–1024 range Omada
+ * accepts per unit — never a string such as 'default'.
  *
  * @returns {Object|undefined}
  */
 function resolvePremiumRateLimit() {
   const down = resolvePremiumDown();
-  const upKbps = parseInt(process.env.PREMIUM_UP_KBPS, 10);
-  if (!down) return undefined;
-  if (!Number.isInteger(upKbps) || upKbps < 1 || upKbps > 1024) return undefined;
+
+  let upKbps = parseInt(process.env.PREMIUM_UP_KBPS, 10);
+  if (!Number.isInteger(upKbps) || upKbps < 1 || upKbps > 1024) {
+    warnPremiumDefault('PREMIUM_UP_KBPS', DEFAULT_PREMIUM_UP_KBPS);
+    upKbps = DEFAULT_PREMIUM_UP_KBPS;
+  }
 
   return {
     upEnable: true,
@@ -250,8 +285,38 @@ function resolveCustomRateLimit(amount) {
   return resolvePremiumRateLimit();
 }
 
+/**
+ * rateLimitToKbps — express a customRateLimit payload as integer Kbps.
+ *
+ * Sessions store their bandwidth snapshot in Kbps (the unit vouchers.down_kbps
+ * / up_kbps use), while a resolved payload may carry either Kbps (unit 1) or
+ * Mbps (unit 2). Snapshotting the RESOLVED integers is what makes a re-auth or
+ * a resume replay exactly the cap the guest was granted, instead of resolving
+ * the tier again from environment variables that may have changed since.
+ *
+ * @param {{upUnit?:number, upLimit?:number, downUnit?:number, downLimit?:number}|undefined} rateLimit
+ * @returns {{downKbps:number|null, upKbps:number|null}}
+ */
+function rateLimitToKbps(rateLimit) {
+  if (!rateLimit) return { downKbps: null, upKbps: null };
+
+  const toKbps = (unit, limit) => {
+    const value = Number(limit);
+    if (!Number.isInteger(value) || value < 1) return null;
+    return Number(unit) === 2 ? value * 1000 : value;
+  };
+
+  return {
+    downKbps: toKbps(rateLimit.downUnit, rateLimit.downLimit),
+    upKbps: toKbps(rateLimit.upUnit, rateLimit.upLimit),
+  };
+}
+
 module.exports = {
   DEFAULT_PREMIUM_AMOUNTS_PESOS,
+  DEFAULT_PREMIUM_DOWN_MBPS,
+  DEFAULT_PREMIUM_UP_KBPS,
+  rateLimitToKbps,
   MAX_BANDWIDTH_KBPS,
   normalizeVoucherType,
   isPremiumVoucherType,

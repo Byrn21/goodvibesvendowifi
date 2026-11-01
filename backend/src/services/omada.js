@@ -1576,6 +1576,12 @@ async function setClientRateLimit(ctx) {
   const pathMac = canonical.replace(/:/g, '-');
   const body = JSON.stringify(payload);
 
+  // Log the exact body before any PATCH: a cap that "applied" but did not
+  // change the guest's speed can then be checked against the integers the
+  // controller was actually sent (never a 'default' sentinel —
+  // buildRateLimitPayload() rejects anything that is not an integer 1–1024).
+  console.log('[omada/qos] PATCH ' + canonical + ' body=' + body);
+
   const routes = preferredRateLimitRoute
     ? [
         ...RATE_LIMIT_ROUTES.filter((r) => r.name === preferredRateLimitRoute),

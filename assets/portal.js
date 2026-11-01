@@ -214,6 +214,43 @@
   // the last-resort MAC for the voucher form below (see getStoredContext).
   var DEVICE_MAC_STORAGE_KEY = 'device_mac';
 
+  // The signed identity the backend issues for the session this device was
+  // granted (POST /api/auth and POST /api/payment/claim return it as
+  // `statusToken`, and it is also an HttpOnly cookie). It names the exact
+  // session, so appending it to a status URL makes that link work even when it
+  // is opened on ANOTHER origin — mobile data, the tunnel host, a copied link —
+  // where neither the cookie nor this origin's localStorage exists.
+  var STATUS_TOKEN_STORAGE_KEY = 'portalStatusToken';
+
+  /**
+   * rememberStatusToken — persist the signed session identity.
+   * Never throws: with storage blocked the URL parameter still carries it.
+   *
+   * @param {string} token
+   * @returns {string} the token, or '' when none was supplied
+   */
+  function rememberStatusToken(token) {
+    if (!token) return '';
+    try {
+      window.localStorage.setItem(STATUS_TOKEN_STORAGE_KEY, token);
+      window.sessionStorage.setItem(STATUS_TOKEN_STORAGE_KEY, token);
+    } catch (e) { /* storage unavailable — URL param still works */ }
+    return token;
+  }
+
+  /**
+   * storedStatusToken — the signed identity saved on this origin, if any.
+   *
+   * @returns {string}
+   */
+  function storedStatusToken() {
+    try {
+      return window.localStorage.getItem(STATUS_TOKEN_STORAGE_KEY)
+        || window.sessionStorage.getItem(STATUS_TOKEN_STORAGE_KEY)
+        || '';
+    } catch (e) { return ''; }
+  }
+
   /**
    * getStoredContext — read the persisted Omada context.
    * Never throws: private mode / disabled storage degrades to URL-only.
@@ -716,6 +753,10 @@
             totalSeconds:    data.totalSeconds || 0,
             remainingSeconds: (data.session && data.session.remainingSeconds) || 0,
             voucherType:     (data.session && data.session.voucherType) || '',
+            // Signed identity for this session: carried to success.html (and
+            // from there to the status page) so the link identifies the device
+            // even when it is opened on a different origin later.
+            statusToken:     data.statusToken || '',
             // Set when the backend resumed a paused Premium session instead of
             // redeeming a fresh voucher (login-with-existing-voucher flow).
             resumed: data.resumed === true,
@@ -785,6 +826,8 @@
       }
     } catch (e) { /* storage unavailable — URL param still works */ }
 
+    var statusToken = rememberStatusToken(result.statusToken);
+
     // Build the post-login destination.
     var target;
     if (result.resumed && result.sessionId) {
@@ -795,7 +838,9 @@
       target = statusPage + '?sessionId=' + encodeURIComponent(result.sessionId) +
         (queryParams.clientMac
           ? '&clientMac=' + encodeURIComponent(normalizeMac(queryParams.clientMac) || queryParams.clientMac)
-          : '');
+          : '') +
+        // The token is what survives a wait in a different browser/origin.
+        (statusToken ? '&token=' + encodeURIComponent(statusToken) : '');
     } else {
       // Build success URL with redirect and session info
       var params = new URLSearchParams();
@@ -816,6 +861,9 @@
       if (result.totalSeconds) params.set('totalSeconds', String(result.totalSeconds));
       if (result.remainingSeconds) params.set('remaining', String(result.remainingSeconds));
       if (result.voucherType) params.set('voucherType', result.voucherType);
+      // Forwarded so success.html's "View Session Status" link can carry it
+      // across an origin boundary (tunnel host vs LAN address) and to the SMS.
+      if (statusToken) params.set('token', statusToken);
       params.set('countdown', '3');
 
       // Carry Omada's originUrl (the URL the guest first tried to open) through
@@ -2048,13 +2096,17 @@
         'Your payment may still be fine \u2014 please tap Try Again in a moment.'
       );
     } else if (res.ok && data.success && data.authorized) {
-      // Remember the device before the hand-off to the status page.
+      // Remember the device before the hand-off to the status page, and the
+      // signed token that lets the status link resolve this session from a
+      // different origin (mobile data, tunnel host).
       rememberDeviceIdentity();
+      rememberStatusToken(data.statusToken);
       showClaimAuthorized();
     } else if (data.voucherCode) {
       // Claimed but not auto-authorized (the guest still connects manually).
       // The device is still known here, so the status page gets the same help.
       rememberDeviceIdentity();
+      rememberStatusToken(data.statusToken);
       showClaimSuccess(data.voucherCode);
     } else if (res.ok && data.pending && data.claimId) {
       // The payment was not recorded by the notification webhook, so the
@@ -2173,8 +2225,15 @@
       claimState.redirectTimer = null;
     }
     var macToSave = normalizeMac(getDeviceContext().clientMac) || '';
+    var tokenToSave = storedStatusToken();
+    // The token first (it names the session), the MAC as the fallback: the URL
+    // is the only identity guaranteed to survive this navigation, and the
+    // device may reach status.html from a different origin entirely.
+    var query = [];
+    if (tokenToSave) query.push('token=' + encodeURIComponent(tokenToSave));
+    if (macToSave) query.push('mac=' + encodeURIComponent(macToSave));
     window.location.href = (CONFIG.statusPage || 'status.html') +
-      (macToSave ? '?mac=' + encodeURIComponent(macToSave) : '');
+      (query.length ? '?' + query.join('&') : '');
   }
 
   // Auto-authorized: the backend authorized this device's MAC, so there is no
@@ -2707,6 +2766,8 @@
         );
       } catch (e) { /* storage unavailable — URL param still works */ }
 
+      rememberStatusToken(data.statusToken);
+
       setBanner('Active session detected, reconnecting\u2026', 'info');
 
       var params = new URLSearchParams();
@@ -2719,6 +2780,7 @@
         params.set('remaining', String(data.remainingSeconds));
       }
       if (data.voucherType) params.set('voucherType', data.voucherType);
+      if (data.statusToken) params.set('token', data.statusToken);
       params.set('countdown', '3');
       var target = (CONFIG.successPage || 'success.html') + '?' + params.toString();
 

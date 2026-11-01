@@ -44,6 +44,7 @@ jest.mock('../src/services/omada', () => Object.assign(
   { authenticateClient: jest.fn(), setClientRateLimit: jest.fn() }
 ));
 const omadaService = require('../src/services/omada');
+const { verifySessionToken } = require('../src/utils/session-token');
 
 // The authorized path waits a real 2000 ms for the cloud indexer.
 jest.setTimeout(20000);
@@ -754,7 +755,12 @@ describe('POST /api/payment/claim', () => {
 
       const parsed = new URL(url);
       expect(parsed.origin + parsed.pathname).toBe(SMS_URL);
-      expect(Object.fromEntries(parsed.searchParams)).toEqual({
+
+      const params = Object.fromEntries(parsed.searchParams);
+      const statusLink = params.status_link;
+      delete params.status_link;
+
+      expect(params).toEqual({
         target_number: MOBILE,
         voucher_code: '898989',
         ref_suffix: '0001',
@@ -763,8 +769,15 @@ describe('POST /api/payment/claim', () => {
         // The seeded voucher is a 1-HOUR (60-minute) plan; the amount alone
         // would have implied 5, so this proves the voucher duration is used.
         minutes: '60',
-        status_link: 'https://goodvibes.example.com/status.html',
       });
+
+      // The texted link must identify the session on its own: it is opened on
+      // mobile data, on another origin, where no cookie/localStorage exists.
+      const link = new URL(statusLink);
+      expect(link.origin + link.pathname).toBe('https://goodvibes.example.com/status.html');
+      const token = link.searchParams.get('token');
+      expect(token).toBeTruthy();
+      expect(verifySessionToken(token).sessionId).toBe(res.body.sessionId);
     });
 
     test('appends the parameters when MACRODROID_SMS_WEBHOOK_URL already has a query string', async () => {

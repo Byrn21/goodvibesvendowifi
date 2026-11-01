@@ -26,6 +26,8 @@ const {
   normalizeBandwidthKbps,
   normalizeVoucherType,
   resolveCustomRateLimit,
+  resolveVoucherRateLimit,
+  rateLimitToKbps,
 } = require('../utils/qos');
 const omadaService = require('../services/omada');
 const { recordSession } = require('../services/session');
@@ -304,10 +306,14 @@ async function beginPendingVerification(ctx) {
  * Deliberately NOT awaited and never throws: the response is already sent and
  * the guest is already authorized, so a failed or rejected cap is logged only.
  *
- * @param {{clientMac: string, amount: number, refNo: string}} ctx
+ * The cap itself is resolved by the caller (`resolveVoucherRateLimit` for the
+ * claimed voucher's tier, then the amount rule) and passed in already built,
+ * so this function never re-derives a tier from a value it does not own.
+ *
+ * @param {{clientMac: string, customRateLimit: Object|undefined, refNo: string}} ctx
  */
 function applyRateLimitAfterResponse(ctx) {
-  const { clientMac, amount, refNo } = ctx;
+  const { clientMac, customRateLimit, refNo } = ctx;
 
   const logFailure = (err) => {
     console.error(
@@ -318,13 +324,17 @@ function applyRateLimitAfterResponse(ctx) {
 
   const timer = setTimeout(() => {
     try {
-      const customRateLimit = resolveCustomRateLimit(amount);
       omadaService
         .setClientRateLimit(customRateLimit ? { clientMac, customRateLimit } : { clientMac })
         .then(() => {
           console.log(
             '[payment/claim] rate limit applied to ' + clientMac +
-            (customRateLimit ? ' (premium tier)' : ' (default tier)') +
+            (customRateLimit
+              ? ' (resolved caps up=' + customRateLimit.upLimit +
+                '/unit' + customRateLimit.upUnit +
+                ' down=' + customRateLimit.downLimit +
+                '/unit' + customRateLimit.downUnit + ')'
+              : ' (operator defaults)') +
             ' (ref ' + refNo + ')'
           );
         })
@@ -888,6 +898,24 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       ? voucherMinutes
       : computeMinutesFromAmount(Number(event.amount));
 
+    // ── Bandwidth cap for this claim ────────────────────────────────────
+    // The VOUCHER's tier decides first: a premium voucher must get premium
+    // speed even when the amount the customer paid is not one of
+    // PREMIUM_AMOUNTS_PESOS. Only a voucher with no tier-specific cap falls
+    // back to the amount rule, and only a standard/unclassified one to the
+    // operator defaults.
+    //
+    // Resolved ONCE, and the integers are snapshotted onto the session below,
+    // so a later re-auth/resume replays exactly this cap instead of resolving
+    // the tier again from environment variables that may have changed.
+    const voucherTier = normalizeVoucherType(voucher.type);
+    const resolvedRateLimit = resolveVoucherRateLimit({
+      downKbps: normalizeBandwidthKbps(voucher.down_kbps),
+      upKbps: normalizeBandwidthKbps(voucher.up_kbps),
+      voucherType: voucherTier,
+    }) || resolveCustomRateLimit(Number(event.amount));
+    const sessionCaps = rateLimitToKbps(resolvedRateLimit);
+
     // ── 2. Authorize the device BEFORE anything is written ───────────────
     // The claim used to be committed first, so an Omada refusal burned the
     // customer's reference: the retry answered 'Payment not found or already
@@ -1018,11 +1046,11 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
             ssidName: portalContext ? portalContext.ssidName : '',
             duration: minutes,                 // minutes, never seconds
             voucherUsed: voucher.code,
-            voucherType: normalizeVoucherType(voucher.type),
-            // NULL (tier/default caps) unless the voucher carries its own pair,
-            // matching what a voucher login records.
-            downKbps: normalizeBandwidthKbps(voucher.down_kbps),
-            upKbps: normalizeBandwidthKbps(voucher.up_kbps),
+            voucherType: voucherTier,
+            // Bandwidth snapshot (resolved integers, Kbps), matching what a
+            // voucher login records — see resolvedRateLimit above.
+            downKbps: sessionCaps.downKbps,
+            upKbps: sessionCaps.upKbps,
             totalDurationSeconds: minutes * 60,
           }, tx);
         }
@@ -1058,6 +1086,25 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // (the thing the customer needs), not the 4-digit ref_suffix — `ref_suffix`
     // is included separately for correlation. Both are present, so a MacroDroid
     // macro expecting either key works.
+    // Identify this browser for the session the claim just granted: the cookie
+    // is what lets the status page resolve the device from a public carrier /
+    // tunnel address, where req.ip can never match portal_client_context.
+    //
+    // Computed BEFORE the SMS below because the texted link carries the same
+    // token: a guest who taps it on mobile data (different origin, no cookie,
+    // no localStorage) is then identified by the URL itself.
+    const statusToken = claim.sessionId
+      ? setSessionCookie(req, res, claim.sessionId)
+      : null;
+
+    // The status link must identify the session on its own. A bare
+    // `/status.html` works only from a browser that already holds the cookie
+    // AND from an address the backend can map to the device — neither is true
+    // when the SMS is opened over cellular data.
+    const statusIdentityQuery = statusToken
+      ? '?token=' + encodeURIComponent(statusToken)
+      : (claim.sessionId ? '?sessionId=' + encodeURIComponent(claim.sessionId) : '');
+
     fireSmsWebhook({
       target_number: mobileNumber,
       voucher_code: claim.voucherCode,
@@ -1066,7 +1113,10 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       authorized,
       minutes,
       ...(process.env.BASE_URL
-        ? { status_link: String(process.env.BASE_URL).replace(/\/+$/, '') + '/status.html' }
+        ? {
+            status_link: String(process.env.BASE_URL).replace(/\/+$/, '') +
+              '/status.html' + statusIdentityQuery,
+          }
         : {}),
     });
 
@@ -1074,14 +1124,6 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       '[payment/claim] claimed voucher ' + claim.voucherCode + ' for ref ' + claim.refNo +
       ' (session ' + (claim.sessionId || '(none)') + ')'
     );
-
-    // Identify this browser for the session the claim just granted. The status
-    // page then works from the cookie alone, even when the captive mini-browser
-    // starts with empty storage and the request arrives from a public carrier
-    // or tunnel address that matches no portal_client_context row.
-    const statusToken = claim.sessionId
-      ? setSessionCookie(req, res, claim.sessionId)
-      : null;
 
     res.json({
       success: true,
@@ -1104,7 +1146,13 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // been sent, the guest is already online, and a failed cap is NOT a failed
     // claim.
     if (authorized) {
-      applyRateLimitAfterResponse({ clientMac, amount: Number(event.amount), refNo: claim.refNo });
+      // The voucher-tier cap resolved above (already the exact integers the
+      // session snapshotted), never a re-derived amount lookup.
+      applyRateLimitAfterResponse({
+        clientMac,
+        customRateLimit: resolvedRateLimit,
+        refNo: claim.refNo,
+      });
     }
   } catch (err) {
     next(err);

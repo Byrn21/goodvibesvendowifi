@@ -15,6 +15,7 @@ const omadaService = require('./omada');
 const {
   resolveVoucherRateLimit,
   normalizeVoucherType,
+  normalizeBandwidthKbps,
   isPremiumVoucherType,
 } = require('../utils/qos');
 const { getDb } = require('../db/client');
@@ -581,24 +582,24 @@ async function applySessionRateLimit(session) {
   if (!session || !session.clientMac) return { applied: false, error: 'no session/clientMac' };
 
   const premiumTier = isPremiumVoucherType(session.voucherType);
+  const sessionCaps = {
+    downKbps: normalizeBandwidthKbps(session.downKbps),
+    upKbps: normalizeBandwidthKbps(session.upKbps),
+  };
   const customRateLimit = resolveVoucherRateLimit({
-    downKbps: session.downKbps,
-    upKbps: session.upKbps,
+    downKbps: sessionCaps.downKbps,
+    upKbps: sessionCaps.upKbps,
     voucherType: session.voucherType,
   });
 
-  // A premium session that resolves no caps used to look identical, in the
-  // logs, to a standard one — the guest just ran at VOUCHER_DEFAULT_* speed.
-  // Say so explicitly: either the PREMIUM_* variables are unset/misnamed or
-  // omitted the download cap, and that is the only reason a premium plan gets
-  // the standard cap.
-  if (premiumTier && !customRateLimit) {
-    console.warn(
-      '[session/qos] PREMIUM session for ' + session.clientMac + ' has NO premium caps —' +
-      ' set PREMIUM_DOWN_MBPS (or PREMIUM_DOWN_KBPS) and PREMIUM_UP_KBPS;' +
-      ' falling back to VOUCHER_DEFAULT_* (standard speed) for this guest'
-    );
-  }
+  // WHERE the cap came from, so an operator can tell a real cap from a
+  // fallback without guessing. The session snapshot is the normal case: the
+  // integers written when the guest was authorized (voucher caps, or the
+  // premium tier resolved at that moment) and replayed unchanged on every
+  // re-auth/resume. 'operator defaults' is the only standard-speed case.
+  const capSource = (sessionCaps.downKbps && sessionCaps.upKbps)
+    ? 'session snapshot'
+    : (premiumTier ? 'premium tier' : 'operator defaults');
 
   try {
     const result = await omadaService.setClientRateLimit(
@@ -618,11 +619,9 @@ async function applySessionRateLimit(session) {
       console.log(
         '[session/qos] rate limit applied to ' + session.clientMac +
         ' via ' + ((result && result.method) || (result && result.route) || 'unknown') +
-        ' (' + (customRateLimit
-          ? (premiumTier ? 'premium caps' : 'voucher caps')
-          : (premiumTier ? 'default caps — premium cap unavailable' : 'default caps')) + ')' +
-        ' up=' + JSON.stringify(customRateLimit ? [customRateLimit.upUnit, customRateLimit.upLimit] : 'default') +
-        ' down=' + JSON.stringify(customRateLimit ? [customRateLimit.downUnit, customRateLimit.downLimit] : 'default')
+        ' (' + capSource + (premiumTier ? ', premium' : '') + ')' +
+        ' up=' + (customRateLimit ? customRateLimit.upLimit + '/unit' + customRateLimit.upUnit : 'default') +
+        ' down=' + (customRateLimit ? customRateLimit.downLimit + '/unit' + customRateLimit.downUnit : 'default')
       );
     }
 
