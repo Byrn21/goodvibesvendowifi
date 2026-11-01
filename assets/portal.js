@@ -1462,10 +1462,11 @@
   // Methods that open the in-page QR modal (cash uses its own timer modal).
   var QR_METHOD_IDS = ['gcash', 'maya', 'qrph'];
 
-  // Methods the admin can switch off. Kept separate from QR_METHOD_IDS because
-  // cash is toggled and branded like the e-wallets but opens the timer modal
-  // instead of the QR one.
-  var ALL_METHOD_IDS = QR_METHOD_IDS.concat(['cash']);
+  // Methods the admin can switch off. Spelled out literally rather than derived
+  // from QR_METHOD_IDS so a future change to the QR-modal list can never
+  // silently drop a method from availability. Cash is toggled and branded like
+  // the e-wallets but opens the timer modal instead of the QR one.
+  var ALL_METHOD_IDS = ['gcash', 'maya', 'qrph', 'cash'];
 
   function loadPaymentMethods() {
     if (qrMethodsCache) return Promise.resolve(qrMethodsCache);

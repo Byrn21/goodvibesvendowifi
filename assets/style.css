@@ -1439,6 +1439,11 @@ body {
    "Temporarily Unavailable" badge, so a guest sees that the option exists but
    is not currently accepted instead of wondering where it went. */
 .payment-tile--unavailable {
+  /* The ribbon is ~23px tall (4px + 4px padding + 0.65rem line box). The base
+     tile only reserved 16px, so the ribbon clipped the top of the logo. Extra
+     top padding is scoped to this state: available tiles keep their height and
+     centring, and the badge only ever exists on an unavailable tile. */
+  padding-top: 28px;
   filter: grayscale(100%);
   opacity: 0.5;
   pointer-events: none;
@@ -1465,24 +1470,27 @@ body {
 }
 
 /* Availability ribbon.
-   It is a full-width strip pinned to the top edge, NOT a centred pill: a pill
-   at a fixed offset sat on top of the 52 px logo and made the tile look
-   broken. Because it is absolutely positioned it takes no space in the
-   flex column, so the logo and name stay exactly where they are on an
-   available tile. `z-index` lifts it above the logo, `pointer-events: none`
-   keeps the (already disabled) tile's hit area untouched, and the ellipsis
-   keeps the long label from widening the tile on narrow phones. */
+   A full-width strip pinned to the top edge, NOT a centred pill: a pill at a
+   fixed offset sat on top of the 52 px logo and made the tile look broken.
+   Absolutely positioned, so it takes no space in the flex column and the logo
+   and name stay put. `z-index: 10` keeps it above the logo/icon wrapper;
+   `pointer-events: none` keeps the disabled tile's hit area untouched.
+   `padding: 4px 6px` gives the ellipsis room on ~145px-wide phone tiles —
+   with 0 horizontal padding "TEMPORARILY UNAVAILABLE" clips mid-letter at
+   0.65rem in the two-column grid. */
 .payment-tile__badge {
   position: absolute;
   top: 0;
   left: 0;
-  right: 0;
-  z-index: 2;
-  padding: 3px 6px;
+  width: 100%;
+  z-index: 10;
+  margin: 0;
+  transform: none;
+  padding: 4px 6px;
   border-radius: var(--radius-md) var(--radius-md) 0 0;
-  background: rgba(44, 24, 16, 0.82);
+  background: rgba(44, 24, 16, 0.9);
   color: #fff;
-  font-size: 0.5625rem;
+  font-size: 0.65rem;
   font-weight: 700;
   line-height: 1.4;
   letter-spacing: 0.04em;
@@ -1540,6 +1548,10 @@ body {
 
   .payment-tiles { gap: 14px; }
   .payment-tile  { padding: 20px 12px 16px; min-height: 112px; }
+  /* This padding shorthand overrides the 28px reserved by
+     .payment-tile--unavailable (same specificity, later in the file), which
+     would let the 23px ribbon clip the top of the larger 60px logo. */
+  .payment-tile--unavailable { padding-top: 30px; }
   .payment-tile__icon-wrap { width: 60px; height: 60px; }
   .payment-tile__name { font-size: 0.875rem; }
 }
