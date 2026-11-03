@@ -981,6 +981,21 @@
     }
     releaseInitialFocus();
 
+    // The field ships readonly (see index.html) so a captive-portal WebView
+    // cannot raise the keyboard on load. Drop it on the first deliberate
+    // interaction:
+    //   touchstart — fires before focus on mobile, so the keyboard opens on
+    //                the tap that unlocked the field
+    //   click      — mouse/pen users, and mobile screen-reader activation
+    //   keydown    — keyboard users can Tab to a readonly field but could
+    //                otherwise never type into it
+    function unlockVoucherInput() {
+      this.removeAttribute('readonly');
+    }
+    input.addEventListener('touchstart', unlockVoucherInput, { passive: true });
+    input.addEventListener('click', unlockVoucherInput);
+    input.addEventListener('keydown', unlockVoucherInput);
+
     // Clear error as user types, and strip non-digits live so pasting
     // "123 456" or "123-456" becomes "123456" immediately.
     input.addEventListener('input', function () {
