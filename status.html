@@ -605,6 +605,12 @@
       // repaint the running card (with its older remaining time) afterwards.
       var statusRequestSeq = 0;
 
+      // The last payload renderStatus() painted. A pause/resume response only
+      // carries the state and the remaining time, so the optimistic transition
+      // merges the answer onto this to keep the plan, voucher, details table
+      // and the ring's total intact without another round trip.
+      var lastStatusData = null;
+
       // Network-failure retry policy (see fetchStatus). A redirect straight
       // from the portal can land here BEFORE the controller has finished
       // authorizing this device, and that first request then fails at the
@@ -1094,6 +1100,7 @@
 
         var state = data.state || 'unknown';
         SESSION_ID = data.sessionId;
+        lastStatusData = data;
 
         // Remember the device MAC the backend resolved, so the next poll (and
         // a later visit without query params) can keep querying by MAC.
@@ -1268,13 +1275,38 @@
 
       if (els.btnResume) {
         els.btnResume.addEventListener('click', function () {
+          // Optimistic UI: this tap owns the screen until it settles. Disable
+          // the button so a double-tap cannot send a second resume, halt the
+          // poll loop so no scheduled request fires mid-transition, and drop
+          // anything already in flight — a paused-state answer landing after
+          // the resume would snap the card back to "Paused".
           els.btnResume.disabled = true;
+          clearTimeout(pollTimer);
+          pollTimer = null;
+          statusRequestSeq += 1;
           if (els.pollingStatus) els.pollingStatus.textContent = 'Resuming session…';
           doResume()
-            .then(function () {
+            .then(function (body) {
               if (els.pollingStatus) els.pollingStatus.textContent = '';
-              // Re-read authoritative state (the /resume response has no sessionId).
-              fetchStatus();
+              // Resume is committed before it answers, so paint the running
+              // card now from the server's own remaining time rather than
+              // waiting for the next poll. The response carries no sessionId
+              // or plan details, so it is merged onto the last status payload
+              // and rendered through the one renderStatus() path.
+              var resumed = lastStatusData
+                ? Object.assign({}, lastStatusData)
+                : { sessionId: SESSION_ID };
+              resumed.state = 'active';
+              if (body && typeof body.remainingSeconds === 'number') {
+                resumed.remainingSeconds = body.remainingSeconds;
+              }
+              if (body && body.expiresAt) resumed.expiresAt = body.expiresAt;
+              if (body && body.voucherType) resumed.voucherType = body.voucherType;
+              if (body && body.statusToken) resumed.statusToken = body.statusToken;
+              els.btnResume.disabled = false;
+              // Also restarts the countdown from that fresh server time and
+              // re-arms polling.
+              renderStatus(resumed);
             })
             .catch(function (err) {
               var msg = (err && err.body && err.body.error)
@@ -1282,6 +1314,10 @@
                 : 'Failed to resume. Please try again.';
               if (els.pollingStatus) els.pollingStatus.textContent = msg;
               els.btnResume.disabled = false;
+              // The resume did not happen: go back to the authoritative paused
+              // state (and re-arm polling) instead of trusting the optimistic
+              // transition.
+              fetchStatus();
             });
         });
       }
