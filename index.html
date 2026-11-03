@@ -1259,7 +1259,9 @@
         email:        '__SUPPORT_EMAIL__'
       };
 
-      var supportTriggers = document.querySelectorAll('.support-trigger');
+      // .guide-trigger buttons open their own dialog; skip them here so the
+      // "How to connect?" link does not also open the support modal underneath.
+      var supportTriggers = document.querySelectorAll('.support-trigger:not(.guide-trigger)');
       var supportCloseX = document.getElementById('support-modal-close');
       var supportCloseBtn = document.getElementById('support-modal-close-btn');
       var supportLastFocused = null;
