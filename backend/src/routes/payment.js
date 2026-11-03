@@ -777,7 +777,7 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // Both lookups are READ-ONLY: nothing is consumed until step 3, after the
     // authorization has been decided.
     const event = await db.getOne(
-      `SELECT ref_no, amount FROM webhook_events
+      `SELECT event_id, ref_no, amount FROM webhook_events
         WHERE status = 'unclaimed' AND ref_no LIKE ?
         ORDER BY id DESC LIMIT 1`,
       ['%' + refSuffix]
@@ -1053,6 +1053,22 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
             upKbps: sessionCaps.upKbps,
             totalDurationSeconds: minutes * 60,
           }, tx);
+
+          // Record the money that paid for this session. The dashboard's
+          // Total Revenue sums sessions.payment_amount, and recordSession()
+          // only writes time/bandwidth fields — without this the claim would
+          // add a session the revenue metric cannot see. Written INSIDE the
+          // same transaction so a claim that rolls back leaves no revenue
+          // behind, and in CENTAVOS (the unit admin.html formats), converted
+          // once here from webhook_events.amount, which is stored in pesos.
+          if (event.amount !== null && event.amount !== undefined && event.event_id) {
+            await tx.run(
+              `UPDATE sessions
+                  SET payment_amount = ?, payment_event_id = ?
+                WHERE session_id = ?`,
+              [Math.round(Number(event.amount) * 100), event.event_id, sessionId]
+            );
+          }
         }
 
         return { voucherCode: voucher.code, refNo: event.ref_no, sessionId };
