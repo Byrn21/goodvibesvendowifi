@@ -3302,3 +3302,153 @@ body.qr-modal-open { overflow: hidden; }
     transition: none;
   }
 }
+
+/* ================================================================
+   HOW TO CONNECT GUIDE MODAL
+   Instructional pop-up holding two portrait JPEGs (1792 x 2400).
+   Desktop: two columns side by side. Phones (<= 639px): stacked in a
+   single column, because the page disables pinch-zoom (user-scalable=no)
+   and side-by-side images would be too small to read.
+   Images never stretch or overflow: the grid uses minmax(0, 1fr) and the
+   images are max-width: 100% with height: auto.
+   ================================================================ */
+.guide-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.6);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 200ms ease, visibility 0s linear 200ms;
+}
+.guide-modal-overlay.is-open {
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 200ms ease;
+}
+
+.guide-modal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 760px;
+  max-height: 88vh;
+  background: var(--surface);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  transform: scale(0.95) translateY(-10px);
+  transition: transform 200ms ease;
+}
+.guide-modal-overlay.is-open .guide-modal {
+  transform: scale(1) translateY(0);
+}
+
+.guide-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 16px 18px 14px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border-light);
+}
+
+.guide-modal__title {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.guide-modal__close {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 1.75rem;
+  line-height: 1;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: var(--transition);
+  -webkit-tap-highlight-color: transparent;
+}
+.guide-modal__close:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+
+.guide-modal__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px 18px 18px;
+}
+
+.guide-modal__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.guide-modal__figure {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.guide-modal__img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+}
+
+@media (max-width: 639px) {
+  .guide-modal-overlay { padding: 12px; }
+  .guide-modal { max-height: 92vh; }
+  .guide-modal__body { padding: 12px; }
+  .guide-modal__grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+@media (pointer: coarse) {
+  .guide-modal__close {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .guide-modal-overlay,
+  .guide-modal {
+    transition: none;
+  }
+  .guide-modal {
+    transform: none;
+  }
+  .guide-modal-overlay.is-open .guide-modal {
+    transform: none;
+  }
+}

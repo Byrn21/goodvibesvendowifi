@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#2d6a4f">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>GoodVibesVendoWifi</title>
-  <link rel="stylesheet" href="assets/style.css?v=9">
+  <link rel="stylesheet" href="assets/style.css?v=10">
   <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <!-- Contact Support modal — identical markup, styling and behavior to status.html -->
   <style>
@@ -650,6 +650,9 @@
       </section>
 
       <footer class="portal-footer" role="contentinfo">
+        <p class="support-info">
+          <button type="button" class="support-trigger guide-trigger" aria-haspopup="dialog" aria-controls="guide-modal">How to connect?</button>
+        </p>
         <p class="support-info" id="support-info">
           Need help?
           <button type="button" class="support-trigger" aria-haspopup="dialog">Contact support</button>
@@ -1122,6 +1125,61 @@
        BACK TO TOP — floats bottom-right once the page scrolls past 100px.
        Styled by .back-to-top in assets/style.css.
        ================================================================ -->
+  <!-- ================================================================
+       HOW TO CONNECT GUIDE MODAL — instructional images
+       Button-triggered from the "How to connect?" link in the footer.
+       Holds two portrait JPEGs (1792 x 2400): side by side on desktop,
+       stacked on phones. Styled by .guide-modal* in assets/style.css and
+       wired up by the inline IIFE near the end of this file.
+       ================================================================ -->
+  <div
+    id="guide-modal"
+    class="guide-modal-overlay"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="guide-modal-title"
+    aria-hidden="true"
+  >
+    <div class="guide-modal">
+      <div class="guide-modal__header">
+        <h3 class="guide-modal__title" id="guide-modal-title">How to Connect</h3>
+        <button
+          type="button"
+          class="guide-modal__close"
+          id="guide-modal-close"
+          aria-label="Close how to connect guide"
+        >&times;</button>
+      </div>
+
+      <div class="guide-modal__body">
+        <div class="guide-modal__grid">
+          <figure class="guide-modal__figure">
+            <img
+              class="guide-modal__img"
+              src="assets/images/guide-step-1.jpg"
+              alt="Step 1: connect your device to the GoodVibesVendoWifi network and open your browser"
+              width="1792"
+              height="2400"
+              loading="lazy"
+              decoding="async"
+            >
+          </figure>
+          <figure class="guide-modal__figure">
+            <img
+              class="guide-modal__img"
+              src="assets/images/guide-step-2.jpg"
+              alt="Step 2: enter your voucher code, accept the terms, then tap Connect Now"
+              width="1792"
+              height="2400"
+              loading="lazy"
+              decoding="async"
+            >
+          </figure>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <button type="button" id="back-to-top" class="back-to-top" aria-label="Back to top">
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M12 19V5"/>
@@ -1400,6 +1458,92 @@
       });
     })();
   </script>
+  <script>
+    /* ================================================================
+       HOW TO CONNECT GUIDE MODAL — button-triggered instructional pop-up.
+
+       Self-contained IIFE, same shape as the Contact Support / legal modal
+       scripts above: it never touches the login form or portal.js.
+       Closes via the X, a click on the dark overlay, or Escape; Tab is
+       kept inside the dialog while it is open.
+       ================================================================ */
+    (function () {
+      'use strict';
+
+      var overlay = document.getElementById('guide-modal');
+      var closeBtn = document.getElementById('guide-modal-close');
+      var triggers = document.querySelectorAll('.guide-trigger');
+      if (!overlay || !closeBtn) return;
+
+      var lastFocused = null;
+
+      function isOpen() {
+        return overlay.classList.contains('is-open');
+      }
+
+      function focusables() {
+        return overlay.querySelectorAll(
+          'button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+        );
+      }
+
+      function openGuide() {
+        lastFocused = document.activeElement;
+        overlay.classList.add('is-open');
+        overlay.setAttribute('aria-hidden', 'false');
+        document.body.classList.add('modal-open');
+        closeBtn.focus();
+      }
+
+      function closeGuide() {
+        overlay.classList.remove('is-open');
+        document.body.classList.remove('modal-open');
+        // Move focus back out before hiding the dialog from assistive tech,
+        // otherwise focus would stay on a node marked aria-hidden.
+        if (lastFocused && typeof lastFocused.focus === 'function') {
+          lastFocused.focus();
+        }
+        overlay.setAttribute('aria-hidden', 'true');
+      }
+
+      Array.prototype.forEach.call(triggers, function (trigger) {
+        trigger.addEventListener('click', openGuide);
+      });
+      closeBtn.addEventListener('click', closeGuide);
+
+      // Click on the dark overlay (outside the dialog) closes the modal
+      overlay.addEventListener('click', function (e) {
+        if (e.target === overlay) closeGuide();
+      });
+
+      // Escape closes; Tab stays inside the dialog
+      document.addEventListener('keydown', function (e) {
+        if (!isOpen()) return;
+
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          closeGuide();
+          return;
+        }
+
+        if (e.key === 'Tab') {
+          var items = focusables();
+          if (!items.length) return;
+          var first = items[0];
+          var last = items[items.length - 1];
+
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      });
+    })();
+  </script>
+
 </body>
 </html>
 
