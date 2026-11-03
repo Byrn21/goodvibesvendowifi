@@ -848,11 +848,19 @@ body {
 }
 
 .countdown-time {
-  font-size: 2rem;
+  /* The text sits inside the ring, so it has to fit the circle rather than the
+     card. A full 8-character value ("11:58:54") at the old fixed 2rem/2.25rem
+     spanned the ring's whole inner width — the r=70 circle of the 160 viewBox
+     leaves only ~132 units inside the 8-unit stroke — so it ran into the
+     stroke. Size now scales with the viewport and caps below that inner width
+     at every breakpoint (the wrap is 136px on small phones, 160px by default
+     and 180px at >= 640px). */
+  font-size: clamp(1.25rem, 6.5vw, 1.75rem);
   font-weight: 700;
   color: var(--text);
   font-variant-numeric: tabular-nums;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .countdown-time-label {
@@ -1544,7 +1552,9 @@ body {
 
   .countdown-number { font-size: 3rem; }
   .countdown-sep     { font-size: 3rem; }
-  .countdown-time    { font-size: 2.25rem; }
+  /* .countdown-time is deliberately NOT overridden here: its clamp() above
+     already caps below the ring's inner width and scaling it back up to 2.25rem
+     is what made 8-character times overlap the circle. */
 
   .payment-tiles { gap: 14px; }
   .payment-tile  { padding: 20px 12px 16px; min-height: 112px; }

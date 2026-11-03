@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#2d6a4f">
   <title>GoodVibesVendoWifi</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
-  <link rel="stylesheet" href="assets/style.css?v=9">
+  <link rel="stylesheet" href="assets/style.css?v=11">
   <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <style>
     /* ============================================================
@@ -595,6 +595,16 @@
       var localSeconds = null;
       var totalSeconds = null;   // used to calculate ring fill ratio
 
+      // True from the moment the guest taps Pause until the request settles.
+      // While it is set the active card must not be re-ticked or re-enabled by
+      // a poll that lands mid-confirmation.
+      var pausePending = false;
+
+      // Ticket handed to every status request. A response is only painted when
+      // it is still the newest one, so a slow poll sent before a pause cannot
+      // repaint the running card (with its older remaining time) afterwards.
+      var statusRequestSeq = 0;
+
       // Network-failure retry policy (see fetchStatus). A redirect straight
       // from the portal can land here BEFORE the controller has finished
       // authorizing this device, and that first request then fails at the
@@ -740,6 +750,31 @@
         var timeStr = formatDuration(localSeconds);
         if (els.cdTime) els.cdTime.textContent = timeStr;
         updateRing(els.cdRing, localSeconds, totalSeconds);
+      }
+
+      // Paint the frozen card from a server-reported remaining time. Shared by
+      // renderStatus ('paused') and the pause handler, which paints the
+      // /api/session/pause response DIRECTLY: an immediate re-poll could still
+      // be answered from a read taken before the pause committed, and that
+      // stale 'active' answer is what snapped the frozen time back.
+      function applyPausedState(totalSecs) {
+        stopCountdown();
+        localSeconds = null;
+        totalSeconds = null;
+        var frozen = Math.max(0, Math.floor(Number(totalSecs) || 0));
+        if (els.pausedTime) els.pausedTime.textContent = formatDuration(frozen);
+        updateRing(els.pausedRing, frozen, frozen || 1);
+        // Re-arm Resume: it is disabled while a resume request is in flight,
+        // and pause/resume may repeat any number of times on Premium.
+        if (els.btnResume) els.btnResume.disabled = false;
+        showSection('paused');
+      }
+
+      // Arm the next periodic status poll. Used after a locally painted state
+      // so polling continues without an immediate extra read.
+      function schedulePoll() {
+        clearTimeout(pollTimer);
+        pollTimer = setTimeout(fetchStatus, POLL_INTERVAL);
       }
 
       // Format the absolute deadline into a friendly local string, e.g.
@@ -916,6 +951,11 @@
         clearTimeout(networkRetryTimer);
         networkRetryTimer = null;
 
+        // This request's ticket. Only the newest request may paint the page; a
+        // poll that was in flight when the guest paused resolves afterwards and
+        // would otherwise restore the running card and restart the ticker.
+        var requestSeq = ++statusRequestSeq;
+
         var url = API_BASE + '/api/session/status' + queries[at];
         // credentials: 'include' keeps the session cookie on the request when
         // apiBaseUrl points at another origin (the controller-hosted HTML case).
@@ -929,6 +969,10 @@
             });
           })
           .then(function (res) {
+            // Superseded (by a newer fetch, or by a pause that already painted
+            // the frozen state): this answer describes an older moment.
+            if (requestSeq !== statusRequestSeq) return;
+
             // Any HTTP answer — even an error status — proves the network is
             // reachable, so the retry budget starts over.
             if (networkRetryCount > 0 && els.pollingStatus) {
@@ -983,6 +1027,7 @@
             renderStatus(res.body);
           })
           .catch(function (err) {
+            if (requestSeq !== statusRequestSeq) return;
             console.warn('Session status fetch failed:', err && err.message);
 
             // Network unreachable — do not claim "not found". Right after the
@@ -1094,7 +1139,9 @@
           localSeconds = Math.floor(data.remainingSeconds || 0);
           totalSeconds = data.totalSeconds || localSeconds; // use server-provided total for ring
           updateCountdownDisplay(localSeconds);
-          startCountdownTick();
+          // A poll that lands while the pause confirmation is on screen must
+          // not restart the ticker the Pause tap already stopped.
+          if (!pausePending) startCountdownTick();
 
           // Pause is a Premium-tier feature. The button AND its
           // "Tap Pause to freeze your time" hint are shown only when the
@@ -1109,7 +1156,7 @@
             if (showPause) els.controls.classList.remove('hidden');
             else els.controls.classList.add('hidden');
           }
-          if (els.btnPause) els.btnPause.disabled = false;
+          if (els.btnPause) els.btnPause.disabled = pausePending;
           if (els.subtitle) {
             if (showPause) {
               els.subtitle.textContent = 'Tap Pause to freeze your time';
@@ -1119,18 +1166,10 @@
             }
           }
         } else if (state === 'paused') {
-          // Frozen: stop AND drop the local ticker before painting the static
-          // time, so no queued tick can decrement either display afterwards.
-          stopCountdown();
-          localSeconds = null;
-          totalSeconds = null;
-          var pausedSecs = Math.floor(data.remainingSeconds || 0);
-          if (els.pausedTime) els.pausedTime.textContent = formatDuration(pausedSecs);
-          updateRing(els.pausedRing, pausedSecs, pausedSecs || 1);
-          // Re-arm Resume: it is disabled while a resume request is in flight,
-          // and pause/resume may repeat any number of times on Premium.
-          if (els.btnResume) els.btnResume.disabled = false;
-          showSection('paused');
+          // Frozen: the local ticker is dropped and the card shows exactly what
+          // the backend froze.
+          pausePending = false;
+          applyPausedState(data.remainingSeconds);
         } else if (state === 'expired') {
           stopCountdown();
           localSeconds = 0;
@@ -1141,13 +1180,19 @@
           showUnknown();
         }
 
-        clearTimeout(pollTimer);
-        pollTimer = setTimeout(fetchStatus, POLL_INTERVAL);
+        schedulePoll();
       }
 
       // ---- Event handlers ----
       if (els.btnPause) {
         els.btnPause.addEventListener('click', function () {
+          // Nothing pauses until the guest confirms, but the VISIBLE timer must
+          // stop on this first tap: leaving it ticking under the dialog is what
+          // made the button look dead. Cancel or a failed request resyncs it.
+          pausePending = true;
+          stopCountdown();
+          // One confirmation at a time — a second tap must not stack dialogs.
+          els.btnPause.disabled = true;
           // Re-arm the confirmation dialog every time it is opened. Both buttons
           // are disabled while a pause request is in flight; without this reset
           // the SECOND pause of a Premium session would open a dead dialog.
@@ -1160,21 +1205,35 @@
 
       if (els.btnPauseConfirm) {
         els.btnPauseConfirm.addEventListener('click', function () {
+          // Disable both dialog buttons first, so a double-tap cannot send the
+          // pause twice, and make sure no ticker survived a poll repaint.
           els.btnPauseConfirm.disabled = true;
           els.btnPauseCancel.disabled = true;
+          stopCountdown();
           if (els.pollingStatus) els.pollingStatus.textContent = 'Pausing session…';
           doPause()
-            .then(function () {
+            .then(function (body) {
               if (els.pollingStatus) els.pollingStatus.textContent = '';
               if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
               // Leave the dialog usable for the next pause (Premium guests may
               // pause/resume repeatedly).
               if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
               if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
-              // Stop the local ticker at once, then re-read the authoritative
-              // state (the /pause response carries no sessionId to render).
-              stopCountdown();
-              fetchStatus();
+              pausePending = false;
+              // Anything still in flight describes the pre-pause moment: drop
+              // it, or it repaints the running card when it lands.
+              statusRequestSeq += 1;
+              // The pause response carries the authoritative frozen time, so
+              // paint it directly instead of re-reading the status endpoint
+              // (that extra read is the race that snapped the time back).
+              if (body && typeof body.remainingSeconds === 'number') {
+                applyPausedState(body.remainingSeconds);
+                schedulePoll();
+              } else {
+                // No frozen time in the response — fall back to the status read.
+                fetchStatus();
+              }
+              if (els.btnPause) els.btnPause.disabled = false;
             })
             .catch(function (err) {
               var msg = (err && err.body && err.body.error)
@@ -1185,6 +1244,12 @@
               if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
               if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
               if (els.controls) els.controls.classList.remove('hidden');
+              pausePending = false;
+              if (els.btnPause) els.btnPause.disabled = false;
+              // The pause did not happen: resync from the server and restart
+              // the ticker, rather than leaving the frozen local guess on
+              // screen.
+              fetchStatus();
             });
         });
       }
@@ -1193,6 +1258,11 @@
         els.btnPauseCancel.addEventListener('click', function () {
           if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
           if (els.controls) els.controls.classList.remove('hidden');
+          pausePending = false;
+          if (els.btnPause) els.btnPause.disabled = false;
+          // The ticker was stopped by the Pause tap: re-read the session so it
+          // restarts from the backend's clock, not from the frozen value.
+          fetchStatus();
         });
       }
 
