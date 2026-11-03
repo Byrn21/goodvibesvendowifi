@@ -363,6 +363,27 @@ if (PORTAL_HTML_DIR) {
     res.status(200).send(body);
   });
 
+  // ── Static assets (/assets/…) ─────────────────────────────────────
+  // The pages request absolute paths (/assets/images/…), so the mount must
+  // resolve no matter where index.html ended up. Serving only
+  // PORTAL_HTML_DIR 404'd every /assets/… request whenever the HTML lived in
+  // backend/public/ while the assets stayed at the repo root.
+  const ASSETS_DIR =
+    [
+      path.join(PORTAL_HTML_DIR, 'assets'),        // assets next to the HTML
+      path.join(__dirname, '..', '..', 'assets'),  // repo layout
+      path.join(__dirname, '..', 'public', 'assets'),
+      path.join(__dirname, '..', 'assets'),
+    ].find((dir) => fs.existsSync(path.join(dir, 'style.css'))) ||
+    path.join(PORTAL_HTML_DIR, 'assets');
+
+  // Registered before the general static mount so /assets/… is always served
+  // from the directory that really holds the assets.
+  app.use('/assets', express.static(ASSETS_DIR));
+
+  console.log('[static] portal html dir:', PORTAL_HTML_DIR);
+  console.log('[static] assets dir:     ', ASSETS_DIR);
+
   app.use(express.static(PORTAL_HTML_DIR, {
     setHeaders: (res, filePath) => {
       // config/config.js carries the public backend URL. Serving it no-store
