@@ -650,9 +650,6 @@
       </section>
 
       <footer class="portal-footer" role="contentinfo">
-        <p class="support-info">
-          <button type="button" class="support-trigger guide-trigger" aria-haspopup="dialog" aria-controls="guide-modal">How to connect?</button>
-        </p>
         <p class="support-info" id="support-info">
           Need help?
           <button type="button" class="support-trigger" aria-haspopup="dialog">Contact support</button>
@@ -1127,8 +1124,9 @@
        ================================================================ -->
   <!-- ================================================================
        HOW TO CONNECT GUIDE MODAL — instructional images
-       Button-triggered from the "How to connect?" link in the footer.
-       Holds two portrait JPEGs (1792 x 2400): side by side on desktop,
+       Auto-opens on the first visit of a browser session (see the IIFE
+       near the end of this file). Holds two portrait JPEGs (1792 x 2400):
+       side by side on desktop,
        stacked on phones. Styled by .guide-modal* in assets/style.css and
        wired up by the inline IIFE near the end of this file.
        ================================================================ -->
@@ -1160,7 +1158,7 @@
               alt="Step 1: connect your device to the GoodVibesVendoWifi network and open your browser"
               width="1792"
               height="2400"
-              loading="lazy"
+              loading="eager"
               decoding="async"
             >
           </figure>
@@ -1171,7 +1169,7 @@
               alt="Step 2: enter your voucher code, accept the terms, then tap Connect Now"
               width="1792"
               height="2400"
-              loading="lazy"
+              loading="eager"
               decoding="async"
             >
           </figure>
@@ -1462,7 +1460,7 @@
   </script>
   <script>
     /* ================================================================
-       HOW TO CONNECT GUIDE MODAL — button-triggered instructional pop-up.
+       HOW TO CONNECT GUIDE MODAL — auto-opens once per browser session.
 
        Self-contained IIFE, same shape as the Contact Support / legal modal
        scripts above: it never touches the login form or portal.js.
@@ -1474,7 +1472,6 @@
 
       var overlay = document.getElementById('guide-modal');
       var closeBtn = document.getElementById('guide-modal-close');
-      var triggers = document.querySelectorAll('.guide-trigger');
       if (!overlay || !closeBtn) return;
 
       var lastFocused = null;
@@ -1508,10 +1505,42 @@
         overlay.setAttribute('aria-hidden', 'true');
       }
 
-      Array.prototype.forEach.call(triggers, function (trigger) {
-        trigger.addEventListener('click', openGuide);
-      });
       closeBtn.addEventListener('click', closeGuide);
+
+      // Auto-open on the first visit of a browser session. sessionStorage can
+      // throw in captive-portal WebViews (private mode / storage disabled), so
+      // every access is guarded: on failure the guide simply opens again.
+      var GUIDE_SEEN_KEY = 'gv_guide_seen';
+
+      function hasSeenGuide() {
+        try {
+          return window.sessionStorage.getItem(GUIDE_SEEN_KEY) === '1';
+        } catch (err) {
+          return false;
+        }
+      }
+
+      function markGuideSeen() {
+        try {
+          window.sessionStorage.setItem(GUIDE_SEEN_KEY, '1');
+        } catch (err) {
+          /* storage unavailable — the guide will show again next load */
+        }
+      }
+
+      function autoOpenGuide() {
+        if (hasSeenGuide()) return;
+        markGuideSeen();
+        openGuide();
+      }
+
+      // This script sits at the end of <body>, but keep the guard for safety:
+      // readyState is 'loading' until the parser has finished the document.
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', autoOpenGuide);
+      } else {
+        autoOpenGuide();
+      }
 
       // Click on the dark overlay (outside the dialog) closes the modal
       overlay.addEventListener('click', function (e) {
