@@ -960,6 +960,27 @@
     var input = $('voucher-input');
     if (!input) return;
 
+    // Mobile captive-portal WebViews (and some browsers restoring form state)
+    // can focus the first text field while the page is still loading, throwing
+    // the on-screen keyboard over the form before the guest has done anything.
+    // The markup has no autofocus attribute, so clear that initial focus here.
+    // `userActivation` tells a real tap from a programmatic focus, so the field
+    // is only released before the guest has interacted — tapping or tabbing
+    // into it afterwards is unaffected. The listener is removed after a short
+    // grace period so it never outlives the page's initial focus window.
+    function releaseInitialFocus() {
+      var userHasInteracted = navigator.userActivation &&
+        navigator.userActivation.hasBeenActive;
+      if (!userHasInteracted && document.activeElement === input) input.blur();
+    }
+    if (navigator.userActivation) {
+      input.addEventListener('focus', releaseInitialFocus);
+      window.setTimeout(function () {
+        input.removeEventListener('focus', releaseInitialFocus);
+      }, 1500);
+    }
+    releaseInitialFocus();
+
     // Clear error as user types, and strip non-digits live so pasting
     // "123 456" or "123-456" becomes "123456" immediately.
     input.addEventListener('input', function () {
