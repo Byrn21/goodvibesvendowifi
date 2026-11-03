@@ -874,7 +874,16 @@ async function activatePaidSession(sessionId, eventId, amount, webhookVoucherTyp
         absolute_expires_at = ?,
         updated_at = ?
     WHERE session_id = ?
-  `, [eventId || null, amount || null, voucherType, now, expiresAt, absoluteExpiresAt, now, sessionId]);
+  `, [
+    eventId || null,
+    // sessions.payment_amount holds INTEGER CENTAVOS (the unit admin.html
+    // formats with /100); the caller passes the webhook amount in pesos.
+    // `!= null` keeps a real 0 payment while still mapping null/undefined to
+    // NULL, which `amount || null` also did — but it must not swallow 0 into
+    // "no payment recorded".
+    amount != null ? Math.round(amount * 100) : null,
+    voucherType, now, expiresAt, absoluteExpiresAt, now, sessionId,
+  ]);
 
   return await getSession(sessionId);
 }
