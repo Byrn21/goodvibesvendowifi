@@ -162,27 +162,13 @@
     <main class="admin-main">
       <!-- Dashboard Section -->
       <div class="admin-card content-section active" id="section-dashboard">
-        <h2>Dashboard</h2>
-        <div class="admin-grid" id="stats-grid"></div>
-
-        <!-- Recent Transactions (webhook payment log) -->
-        <div class="admin-transactions" id="transactions-section">
-          <div class="admin-card--header">
-            <h3>Recent Transactions</h3>
-            <button type="button" class="btn btn--danger" id="transactions-clear-all">Clear All</button>
-          </div>
-          <div class="admin-table-container" id="transactions-table" aria-busy="true">
-            <div class="loading-container" role="status" aria-live="polite">
-              <div class="spinner" aria-hidden="true"></div>
-              <p class="muted">Loading&hellip;</p>
-            </div>
-          </div>
-          <div class="admin-pagination" id="transactions-pagination">
-            <button type="button" class="btn btn--secondary" id="transactions-prev" disabled>Previous</button>
-            <span class="admin-pagination__info" id="transactions-page-info">Page 1 of 1</span>
-            <button type="button" class="btn btn--secondary" id="transactions-next" disabled>Next</button>
-          </div>
+        <!-- Clear All sits with the cards it resets: it clears terminal
+             transaction/session rows and moves the stats baseline. -->
+        <div class="admin-card--header">
+          <h2 class="admin-card--title">Dashboard</h2>
+          <button type="button" class="btn btn--danger" id="transactions-clear-all">Clear All</button>
         </div>
+        <div class="admin-grid" id="stats-grid"></div>
 
         <div id="dashboard-chart" aria-busy="true">
           <h3>Voucher Status Breakdown</h3>
@@ -288,16 +274,11 @@
 
       var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
       var ADMIN_TOKEN = localStorage.getItem('adminToken') || '';
-      var TRANSACTIONS_LIMIT = 15;
 
       // Cache DOM elements
       var els = {
         statsGrid:      document.getElementById('stats-grid'),
         dashboardChart: document.getElementById('dashboard-chart'),
-        transactionsTable:    document.getElementById('transactions-table'),
-        transactionsPrev:     document.getElementById('transactions-prev'),
-        transactionsNext:     document.getElementById('transactions-next'),
-        transactionsPageInfo: document.getElementById('transactions-page-info'),
         transactionsClearAll: document.getElementById('transactions-clear-all'),
         historyTable:    document.getElementById('history-table'),
         historyPrev:     document.getElementById('history-prev'),
@@ -1228,98 +1209,16 @@
         fetchStats();
       }
 
-      // ---- Recent Transactions (paginated webhook payment log) ----
-      var transactionsPage = 1;
-      var transactionsTotalPages = 1;
-
-      // webhook_events.amount is stored in Pesos already (unlike voucher
-      // prices, which are integer centavos) - so format it directly.
-      function formatTransactionAmount(amount) {
-        if (amount === null || amount === undefined || amount === '') return '&mdash;';
-        var n = Number(amount);
-        if (isNaN(n)) return '&mdash;';
-        return '\u20b1' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      }
-
-      function renderTransactions(transactions) {
-        if (!transactions.length) {
-          return '<p class="muted">No transactions yet.</p>';
-        }
-        var rows = transactions.map(function (tx) {
-          var status = tx.status || 'unclaimed';
-          var statusClass = status === 'claimed' ? 'tx-status--claimed' : 'tx-status--unclaimed';
-          return '<tr>' +
-            '<td>' + escapeHtml(formatDate(tx.processed_at)) + '</td>' +
-            '<td>' + (tx.ref_no ? escapeHtml(tx.ref_no) : '&mdash;') + '</td>' +
-            '<td>' + formatTransactionAmount(tx.amount) + '</td>' +
-            '<td><span class="' + statusClass + '">' + escapeHtml(status) + '</span></td>' +
-            '<td>' + (tx.code ? escapeHtml(tx.code) : '<span class="muted">&mdash;</span>') + '</td>' +
-            '</tr>';
-        }).join('');
-        return '<table><thead><tr><th>Date/Time</th><th>Reference No.</th><th>Amount</th><th>Status</th><th>Voucher Code</th></tr></thead><tbody>' + rows + '</tbody></table>';
-      }
-
-      function updateTransactionsPagination(currentPage, totalPages) {
-        if (els.transactionsPageInfo) {
-          els.transactionsPageInfo.textContent = 'Page ' + currentPage + ' of ' + totalPages;
-        }
-        if (els.transactionsPrev) {
-          els.transactionsPrev.disabled = currentPage <= 1;
-        }
-        if (els.transactionsNext) {
-          els.transactionsNext.disabled = currentPage >= totalPages;
-        }
-      }
-
-      // Uses the shared api() wrapper so an expired session still triggers the
-      // centralized 401 logout-and-redirect flow.
-      function loadTransactions(page) {
-        page = page || 1;
-        if (!els.transactionsTable) return;
-        setTableLoading(els.transactionsTable, 'Loading transactions\u2026');
-        api('/api/admin/transactions?page=' + page + '&limit=' + TRANSACTIONS_LIMIT)
-          .then(function (res) {
-            if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load transactions');
-            var data = res.data || {};
-            var transactions = data.transactions || [];
-            var pagination = data.pagination || {};
-            transactionsPage = pagination.currentPage || page;
-            transactionsTotalPages = pagination.totalPages || 1;
-            els.transactionsTable.innerHTML = renderTransactions(transactions);
-            setTableReady(els.transactionsTable);
-            updateTransactionsPagination(transactionsPage, transactionsTotalPages);
-          })
-          .catch(function (err) {
-            els.transactionsTable.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
-            setTableReady(els.transactionsTable);
-            transactionsPage = 1;
-            transactionsTotalPages = 1;
-            updateTransactionsPagination(1, 1);
-          });
-      }
-
-      if (els.transactionsPrev) {
-        els.transactionsPrev.addEventListener('click', function () {
-          if (transactionsPage > 1) loadTransactions(transactionsPage - 1);
-        });
-      }
-      if (els.transactionsNext) {
-        els.transactionsNext.addEventListener('click', function () {
-          if (transactionsPage < transactionsTotalPages) loadTransactions(transactionsPage + 1);
-        });
-      }
-
       // Clear All: clear terminal transaction logs and terminal session rows,
       // then reset the dashboard baseline. Live guests are preserved. Sessions
       // drive the Total Sessions, Paused Sessions and Total Revenue cards, so
-      // the dashboard is reloaded too.
+      // the dashboard is reloaded to show the reset.
       function clearAllTransactions() {
         if (!confirm('This clears terminal transaction logs and expired/failed session records, then resets the dashboard session and revenue metrics. Active and paused guests are preserved. Continue?')) return;
         if (els.transactionsClearAll) els.transactionsClearAll.disabled = true;
         api('/api/admin/transactions', { method: 'DELETE' })
           .then(function (res) {
             if (res.ok) {
-              loadTransactions(1);
               loadDashboard();
             } else {
               alert((res.data && res.data.error) || 'Failed to clear transactions');
@@ -1338,8 +1237,7 @@
 
       // ---- Transaction history (settled payments + CSV export) ----
       // GET /api/admin/transactions/history returns only payments that granted
-      // access (claimed or authorized). amount_centavos is integer centavos,
-      // unlike the webhook log above whose amount is already in pesos.
+      // access (claimed or authorized). amount_centavos is integer centavos.
       var historyPage = 1;
       var historyTotalPages = 1;
       var HISTORY_LIMIT = 25;
@@ -1563,7 +1461,6 @@
       if (isAuthenticated) {
         loadDashboard();
         loadVouchers();
-        loadTransactions(1);
       }
     })();
   </script>
