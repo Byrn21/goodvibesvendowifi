@@ -367,6 +367,48 @@ describe('local web-API rate limit', () => {
     }
   });
 
+  test('accepts a VOUCHER_DEFAULT_UP_KBPS above 1024 and applies it as Mbps', async () => {
+    // 2048 is a Kbps value, not a per-unit limit: it must reach the controller
+    // as unit 2 / limit 2 (2 Mbps) instead of failing the old 1–1024 check.
+    const savedDown = process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+    const savedUp = process.env.VOUCHER_DEFAULT_UP_KBPS;
+    process.env.VOUCHER_DEFAULT_DOWN_MBPS = '10';
+    process.env.VOUCHER_DEFAULT_UP_KBPS = '2048';
+    try {
+      queueSession();
+      queueResponse(200, { errorCode: 0, msg: 'Success' });
+
+      const result = await omada.setClientRateLimit({ clientMac: MAC });
+
+      expect(result.applied.customRateLimit).toEqual({
+        upEnable: true, upUnit: 2, upLimit: 2,
+        downEnable: true, downUnit: 2, downLimit: 10,
+      });
+    } finally {
+      if (savedDown === undefined) delete process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+      else process.env.VOUCHER_DEFAULT_DOWN_MBPS = savedDown;
+      if (savedUp === undefined) delete process.env.VOUCHER_DEFAULT_UP_KBPS;
+      else process.env.VOUCHER_DEFAULT_UP_KBPS = savedUp;
+    }
+  });
+
+  test('still rejects a VOUCHER_DEFAULT_UP_KBPS above the 100000 Kbps ceiling', async () => {
+    const savedDown = process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+    const savedUp = process.env.VOUCHER_DEFAULT_UP_KBPS;
+    process.env.VOUCHER_DEFAULT_DOWN_MBPS = '10';
+    process.env.VOUCHER_DEFAULT_UP_KBPS = '100001';
+    try {
+      await expect(omada.setClientRateLimit({ clientMac: MAC }))
+        .rejects.toMatchObject({ code: 'OMADA_CONFIG_ERROR' });
+      expect(calls).toHaveLength(0);
+    } finally {
+      if (savedDown === undefined) delete process.env.VOUCHER_DEFAULT_DOWN_MBPS;
+      else process.env.VOUCHER_DEFAULT_DOWN_MBPS = savedDown;
+      if (savedUp === undefined) delete process.env.VOUCHER_DEFAULT_UP_KBPS;
+      else process.env.VOUCHER_DEFAULT_UP_KBPS = savedUp;
+    }
+  });
+
   describe('buildRateLimitPayload — unit selection', () => {
     const { buildRateLimitPayload } = omada._internal;
 

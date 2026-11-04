@@ -115,6 +115,16 @@ const {
   toRateLimitUnit,
 } = require('../utils/qos');
 
+// Ceiling for VOUCHER_DEFAULT_UP_KBPS, expressed in Kbps. Deliberately NOT the
+// 1–1024 that Omada applies PER UNIT: the configured value is Kbps, and
+// toRateLimitUnit() moves anything from 1024 Kbps up onto unit 2 (Mbps), so a
+// .env value of 2048 is a valid 2 Mbps upload cap. The old 1–1024 check
+// rejected exactly that and took default-tier payments offline with
+// "VOUCHER_DEFAULT_UP_KBPS must be an integer between 1 and 1024 (Kbps)".
+// 100000 Kbps (≈ 97.7 Mbps, applied as 98 Mbps) is the practical operator
+// ceiling; MAX_BANDWIDTH_KBPS (1 Gbps) remains the hard controller limit.
+const MAX_DEFAULT_UP_KBPS = 100000;
+
 const BASE_URL   = process.env.OMADA_BASE_URL || '';
 const OMADAC_ID  = process.env.OMADA_OMADAC_ID || '';
 const SITE       = process.env.OMADA_SITE     || 'Default';
@@ -1450,11 +1460,12 @@ function rateLimitRejected(route, response) {
  * tier/voucher-specific cap.
  *
  * Both values go through parseInt(..., 10) so a quoted or suffixed value can
- * never reach the controller as a string, and both are range-checked against
- * the 1–1024 ceiling Omada accepts per unit. Down is configured in Mbps and up
- * in Kbps; each is converted to Kbps and then handed to toRateLimitUnit(), so
- * the payload's unit always matches the value instead of assuming one. Sending
- * a Mbps integer with unit 1 is what applied a 1 Mbps default as 1 Kbps.
+ * never reach the controller as a string. Down is configured in Mbps (1–1024)
+ * and up in Kbps (1–MAX_DEFAULT_UP_KBPS); down is multiplied by KBPS_PER_MBPS
+ * (1024) to become Kbps, and each direction is then handed to
+ * toRateLimitUnit(), so the payload's unit always matches the value instead of
+ * assuming one. Sending a Mbps integer with unit 1 is what applied a 1 Mbps
+ * default as 1 Kbps.
  *
  * Throws instead of sending mode 0 with no limits: a guest left uncapped while
  * the logs claim a cap was applied is exactly the silent failure this fallback
@@ -1469,8 +1480,11 @@ function defaultRateLimitPayload() {
   if (!Number.isInteger(downMbps) || downMbps < 1 || downMbps > 1024) {
     throw configError('VOUCHER_DEFAULT_DOWN_MBPS must be an integer between 1 and 1024 (Mbps)');
   }
-  if (!Number.isInteger(upKbps) || upKbps < 1 || upKbps > 1024) {
-    throw configError('VOUCHER_DEFAULT_UP_KBPS must be an integer between 1 and 1024 (Kbps)');
+  if (!Number.isInteger(upKbps) || upKbps < 1 || upKbps > MAX_DEFAULT_UP_KBPS) {
+    throw configError(
+      'VOUCHER_DEFAULT_UP_KBPS must be an integer between 1 and ' +
+      MAX_DEFAULT_UP_KBPS + ' (Kbps)'
+    );
   }
 
   const down = toRateLimitUnit(downMbps * KBPS_PER_MBPS);
