@@ -2660,6 +2660,35 @@ table tbody tr:hover {
 .badge-expired { background-color: var(--grey-light, #e5e7eb); color: var(--grey, #6b7280); }
 .badge-paused { background-color: var(--yellow-light, #fef3c7); color: var(--yellow, #a16207); }
 
+/* Compact select for admin card headers (e.g. the Transactions status filter).
+   Uses the same tokens as .form-select without the full-width 52px input
+   height, so it sits on one line with a .btn in .admin-card--header. */
+.admin-select {
+  height: 34px;
+  padding: 0 32px 0 12px;
+  font-family: var(--font);
+  font-size: 0.85rem;
+  color: var(--text);
+  background-color: var(--surface, #fff);
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  /* Same chevron as .form-select, positioned for the shorter control */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b4226' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.admin-select:hover { border-color: var(--primary-light); }
+
+.admin-select:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(93, 61, 17, 0.12);
+}
+
 /* Pagination controls */
 .admin-pagination {
   display: flex;
