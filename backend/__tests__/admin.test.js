@@ -85,7 +85,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events;');
+  await getDb().exec(
+    'DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events; DELETE FROM app_settings;'
+  );
   await seedVouchers();
 });
 
@@ -714,13 +716,23 @@ describe('GET /api/admin/transactions — Recent Transactions', () => {
 
 describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
 
-  async function seedWebhookEvents(count) {
+  async function seedWebhookEvents(count, status = 'claimed') {
     for (let i = 1; i <= count; i++) {
       await getDb().run(
         'INSERT INTO webhook_events (event_id, ref_no, amount, status, processed_at) VALUES (?, ?, ?, ?, ?)',
-        ['evt_del_' + i, 'DELREF' + i, 20 + i, 'unclaimed', '2026-10-01 00:00:' + String(i).padStart(2, '0')]
+        ['evt_del_' + i, 'DELREF' + i, 20 + i, status, '2026-10-01 00:00:' + String(i).padStart(2, '0')]
       );
     }
+  }
+
+  async function seedSession({ sessionId, state, paymentAmount = 0, createdAt = null }) {
+    // SQLite/PostgreSQL-compatible UTC text so the baseline comparison is stable.
+    const created = createdAt || new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await getDb().run(
+      `INSERT INTO sessions (session_id, client_mac, voucher_type, state, duration_minutes, payment_amount, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [sessionId, 'AA:BB:CC:DD:EE:' + sessionId.slice(-2), 'standard', state, 60, paymentAmount, created]
+    );
   }
 
   test('returns 401 without valid credentials', async () => {
@@ -729,7 +741,7 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
     expect(res.body.success).toBe(false);
   });
 
-  test('deletes all webhook events and reports how many were removed', async () => {
+  test('deletes terminal webhook events and reports how many were removed', async () => {
     await seedWebhookEvents(3);
     const res = await request(app)
       .delete('/api/admin/transactions')
@@ -743,20 +755,35 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
     expect(parseInt(remaining.count, 10)).toBe(0);
   });
 
-  test('also clears sessions so the dashboard session and revenue metrics reset', async () => {
+  test('preserves unclaimed payments that a guest may still claim', async () => {
+    await seedWebhookEvents(2, 'unclaimed');
+    const res = await request(app)
+      .delete('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(0);
+
+    const remaining = await getDb().getOne('SELECT COUNT(*) AS count FROM webhook_events');
+    expect(parseInt(remaining.count, 10)).toBe(2);
+  });
+
+  test('deletes only terminal sessions, preserves live guests, and resets the cards', async () => {
     await seedWebhookEvents(2);
-    await getDb().run(
-      `INSERT INTO sessions (session_id, client_mac, voucher_type, state, duration_minutes, payment_amount)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      ['sess_clear_all_1', 'AA:BB:CC:DD:EE:01', 'standard', 'paused', 60, 5000]
-    );
+    // Backdated: these rows existed before the dashboard reset baseline.
+    const beforeReset = '2026-10-01 00:00:00';
+    await seedSession({ sessionId: 'sess-exp-01', state: 'expired', paymentAmount: 2500, createdAt: beforeReset });
+    await seedSession({ sessionId: 'sess-fail-01', state: 'payment_failed', paymentAmount: 1000, createdAt: beforeReset });
+    await seedSession({ sessionId: 'sess-act-01', state: 'active', paymentAmount: 3000, createdAt: beforeReset });
+    await seedSession({ sessionId: 'sess-pau-01', state: 'paused', paymentAmount: 5000, createdAt: beforeReset });
 
     const beforeStats = await request(app)
       .get('/api/admin/stats')
       .set('X-API-Key', VALID_KEY);
-    expect(beforeStats.body.stats.totalSessions).toBe(1);
+    expect(beforeStats.body.stats.totalSessions).toBe(2);
+    expect(beforeStats.body.stats.activeSessions).toBe(1);
     expect(beforeStats.body.stats.pausedSessions).toBe(1);
-    expect(beforeStats.body.stats.totalRevenue).toBe(5000);
+    expect(beforeStats.body.stats.totalRevenue).toBe(11500);
 
     const res = await request(app)
       .delete('/api/admin/transactions')
@@ -764,7 +791,12 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.deletedSessions).toBe(1);
+    expect(res.body.deletedSessions).toBe(2);
+    expect(res.body.preservedSessions).toBe(2);
+    expect(res.body.statsResetAt).toBeTruthy();
+
+    const remaining = await getDb().query('SELECT state FROM sessions ORDER BY state');
+    expect(remaining.map((row) => row.state)).toEqual(['active', 'paused']);
 
     const afterStats = await request(app)
       .get('/api/admin/stats')
@@ -772,6 +804,26 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
     expect(afterStats.body.stats.totalSessions).toBe(0);
     expect(afterStats.body.stats.pausedSessions).toBe(0);
     expect(afterStats.body.stats.totalRevenue).toBe(0);
+    // Active Sessions is a live count, unaffected by the baseline.
+    expect(afterStats.body.stats.activeSessions).toBe(1);
+  });
+
+  test('counts sessions created after the reset baseline', async () => {
+    const reset = await request(app)
+      .delete('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+    expect(reset.status).toBe(200);
+
+    // Created after the reset, so they belong to the new reporting window.
+    await seedSession({ sessionId: 'sess-new-act', state: 'active', paymentAmount: 3000 });
+    await seedSession({ sessionId: 'sess-new-pau', state: 'paused', paymentAmount: 2000 });
+
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    const s = res.body.stats;
+    expect(s.totalSessions).toBe(2);
+    expect(s.activeSessions).toBe(1);
+    expect(s.pausedSessions).toBe(1);
+    expect(s.totalRevenue).toBe(5000);
   });
 
   test('is safe to call when the log is already empty', async () => {

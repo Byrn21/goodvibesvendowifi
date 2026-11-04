@@ -215,6 +215,20 @@ INSERT INTO payment_methods (method_key, display_name, is_active) VALUES
 ON CONFLICT (method_key) DO NOTHING;
 
 -- ================================================================
+-- Application settings (key/value)
+-- ================================================================
+-- Small persistent store for admin-controlled baselines. The only key in use
+-- is 'stats_reset_at': DELETE /api/admin/transactions records the instant of
+-- the last dashboard reset here, and GET /api/admin/stats reports session and
+-- revenue cards only for rows created at/after it. Stored as the database's
+-- UTC CURRENT_TIMESTAMP text so it compares directly with sessions.created_at.
+CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key   VARCHAR(64) PRIMARY KEY,
+    setting_value TEXT,
+    updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ================================================================
 -- Notes:
 --
 -- 1. MAC addresses stored with colons (e.g. aa:bb:cc:dd:ee:ff).

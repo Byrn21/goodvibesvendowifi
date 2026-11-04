@@ -243,6 +243,23 @@ async function fixMissingColumns() {
   // safe to re-run on every deploy.
   await reconcileTable(db, 'payment_methods', PAYMENT_METHODS_COLUMNS);
 
+  // --- Application settings table (new — ensure it exists on old DBs) ---
+  // Holds 'stats_reset_at', the baseline used by the admin dashboard reset.
+  // schema.sql creates it too; this keeps boot-time startup (which runs this
+  // reconciliation but not the full migration) from leaving an old database
+  // without the table.
+  try {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS app_settings (
+          setting_key   VARCHAR(64) PRIMARY KEY,
+          setting_value TEXT,
+          updated_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`);
+    console.log('[migrate_fix] app_settings table ready.');
+  } catch (err) {
+    console.warn('[migrate_fix] app_settings creation skipped:', err.message);
+  }
+
   // --- Pending payment verification table (new — ensure it exists on old DBs) ---
   // Written by POST /api/payment/claim before MacroDroid is asked to read the
   // e-wallet screen, and read by POST /api/webhooks/macrodroid/verify-result

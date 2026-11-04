@@ -1265,11 +1265,12 @@
         });
       }
 
-      // Clear All: delete every transaction log AND every session record after
-      // an explicit confirmation. Sessions drive the Total Sessions, Paused
-      // Sessions and Total Revenue cards, so the dashboard is reloaded too.
+      // Clear All: clear terminal transaction logs and terminal session rows,
+      // then reset the dashboard baseline. Live guests are preserved. Sessions
+      // drive the Total Sessions, Paused Sessions and Total Revenue cards, so
+      // the dashboard is reloaded too.
       function clearAllTransactions() {
-        if (!confirm('This permanently deletes all transaction logs and all session records, resetting the dashboard session and revenue metrics. Continue?')) return;
+        if (!confirm('This clears terminal transaction logs and expired/failed session records, then resets the dashboard session and revenue metrics. Active and paused guests are preserved. Continue?')) return;
         if (els.transactionsClearAll) els.transactionsClearAll.disabled = true;
         api('/api/admin/transactions', { method: 'DELETE' })
           .then(function (res) {

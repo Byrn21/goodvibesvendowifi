@@ -17,8 +17,8 @@
  *   GET    /api/admin/payment-methods        — Payment method availability + logos
  *   PUT    /api/admin/payment-methods/:key   — Enable/disable a method, set/clear its logo
  *   GET    /api/admin/transactions — Paginated webhook payment transactions
- *   DELETE /api/admin/transactions — Clear all webhook payment transaction logs
- *                                   and all session rows (dashboard reset)
+ *   DELETE /api/admin/transactions — Clear terminal payment logs/sessions and
+ *                                   move the dashboard stats baseline
  */
 
 const express = require('express');
@@ -617,6 +617,35 @@ router.post('/vouchers/import', upload.single('file'), async (req, res, next) =>
   }
 });
 
+// ── Dashboard reset baseline ──────────────────────────────────────────────
+// "Clear All" must never delete a live guest's session. It removes terminal
+// rows and records the reset instant in app_settings; the reset-able dashboard
+// cards then count only sessions created at/after that baseline.
+const STATS_RESET_KEY = 'stats_reset_at';
+// Sessions whose lifecycle is over. active / paused / pending* are preserved.
+const TERMINAL_SESSION_STATES = ['expired', 'payment_failed'];
+// Payments that can no longer be claimed: already turned into access
+// ('authorized'), consumed by a voucher claim ('claimed'), or a failed
+// authorization. 'unclaimed' rows stay so a guest can still claim them.
+const TERMINAL_WEBHOOK_STATUSES = ['claimed', 'authorized', 'auth_failed'];
+
+function sqlPlaceholders(values) {
+  return values.map(() => '?').join(', ');
+}
+
+/**
+ * Read the dashboard stats baseline, or null when it has never been reset.
+ * @param {{getOne: Function}} db  Database or transaction handle
+ * @returns {Promise<string|null>}
+ */
+async function getStatsResetAt(db) {
+  const row = await db.getOne(
+    'SELECT setting_value FROM app_settings WHERE setting_key = ?',
+    [STATS_RESET_KEY]
+  );
+  return row?.setting_value || null;
+}
+
 // Dashboard statistics
 router.get('/stats', async (req, res, next) => {
   try {
@@ -625,6 +654,15 @@ router.get('/stats', async (req, res, next) => {
     const totalVouchers = await db.getOne('SELECT COUNT(*) as count FROM vouchers');
     const activeVouchers = await db.getOne("SELECT COUNT(*) as count FROM vouchers WHERE state = 'active'");
     const usedVouchers = await db.getOne("SELECT COUNT(*) as count FROM vouchers WHERE state = 'used'");
+
+    // A dashboard reset moves the baseline forward without touching live
+    // sessions, so the reset-able cards ignore everything created before it.
+    // Active Sessions is deliberately NOT filtered: it remains the live count
+    // of guests currently online, including sessions that predate the reset.
+    const statsResetAt = await getStatsResetAt(db);
+    const sinceClause = statsResetAt ? ' AND created_at >= ?' : '';
+    const sinceParams = statsResetAt ? [statsResetAt] : [];
+
     // "Total Sessions" counts only the sessions the dashboard actually shows as
     // live (Active, Paused or Premium). The sessions table keeps terminal rows
     // (expired / payment_failed) and never-started rows (pending) for history,
@@ -634,11 +672,16 @@ router.get('/stats', async (req, res, next) => {
     // blind sum) so a Premium session that is also Active/Paused counts once.
     const totalSessions = await db.getOne(`
       SELECT COUNT(*) as count FROM sessions
-      WHERE state IN ('active', 'paused') OR voucher_type = 'premium'
-    `);
+      WHERE (state IN ('active', 'paused') OR voucher_type = 'premium')${sinceClause}
+    `, sinceParams);
     const activeSessions = await db.getOne("SELECT COUNT(*) as count FROM sessions WHERE state = 'active'");
-    const pausedSessions = await db.getOne("SELECT COUNT(*) as count FROM sessions WHERE state = 'paused'")
-    const totalRevenueRow = await db.getOne("SELECT SUM(payment_amount) as total FROM sessions WHERE payment_amount IS NOT NULL")
+    const pausedSessions = await db.getOne(`
+      SELECT COUNT(*) as count FROM sessions WHERE state = 'paused'${sinceClause}
+    `, sinceParams);
+    const totalRevenueRow = await db.getOne(`
+      SELECT SUM(payment_amount) as total FROM sessions
+      WHERE payment_amount IS NOT NULL${sinceClause}
+    `, sinceParams);
     const premiumSessions = await db.getOne("SELECT COUNT(*) as count FROM sessions WHERE voucher_type = 'premium'")
 
     res.json({
@@ -698,43 +741,88 @@ router.get('/transactions', async (req, res, next) => {
   }
 });
 
-// Clear ALL payment logs and ALL session rows (one-shot dashboard reset).
+// Safe dashboard reset (backs the "Clear All" button).
 //
-// This backs the dashboard's "Clear All" button. The dashboard's "Total
-// Sessions", "Paused Sessions" and "Total Revenue" cards are all derived from
-// the sessions table by GET /api/admin/stats, so emptying webhook_events alone
-// left those numbers unchanged. Both tables are cleared in ONE transaction:
-// either the whole reset lands or neither table is touched.
+// Earlier this deleted ALL sessions, which wiped the timer/pause state of
+// guests who were still online (their Omada authorization kept working, so the
+// portal simply lost track of them). It now deletes only terminal rows:
+//   sessions:       expired, payment_failed
+//   webhook_events: claimed, authorized, auth_failed
+// Live and in-flight rows are preserved: active/paused/pending* sessions and
+// 'unclaimed' payments that a guest may still claim. A stored baseline
+// (app_settings.stats_reset_at) then makes the dashboard's Total Sessions,
+// Paused Sessions and Total Revenue cards read 0 without touching those rows.
 //
-// Nothing references sessions or webhook_events by foreign key (webhook_events
-// keeps a plain session_id string, and vouchers are linked by code), so no
-// dependent rows need deleting first. Note that this also removes live
-// sessions: the Omada authorization itself is not revoked here, only the local
-// records the dashboard counts. Protected by the router-level requireAuth
-// middleware.
+// Everything happens in ONE transaction: if the baseline write fails, no rows
+// are deleted. There are no foreign keys from either table, so deletion order
+// is not constrained. Protected by the router-level requireAuth middleware.
 router.delete('/transactions', async (req, res, next) => {
   try {
     const db = getDb();
 
     const result = await db.transaction(async (tx) => {
-      const txCountRow = await tx.getOne('SELECT COUNT(*) AS count FROM webhook_events');
-      const before = parseInt(txCountRow?.count || 0, 10);
+      const sessionPlaceholders = sqlPlaceholders(TERMINAL_SESSION_STATES);
+      const eventPlaceholders = sqlPlaceholders(TERMINAL_WEBHOOK_STATUSES);
 
-      const sessionCountRow = await tx.getOne('SELECT COUNT(*) AS count FROM sessions');
-      const sessionsBefore = parseInt(sessionCountRow?.count || 0, 10);
+      const sessionCountRow = await tx.getOne(
+        `SELECT COUNT(*) AS count FROM sessions WHERE state IN (${sessionPlaceholders})`,
+        TERMINAL_SESSION_STATES
+      );
+      const deletedSessions = parseInt(sessionCountRow?.count || 0, 10);
 
-      await tx.run('DELETE FROM webhook_events');
-      await tx.run('DELETE FROM sessions');
+      const eventCountRow = await tx.getOne(
+        `SELECT COUNT(*) AS count FROM webhook_events WHERE status IN (${eventPlaceholders})`,
+        TERMINAL_WEBHOOK_STATUSES
+      );
+      const deletedTransactions = parseInt(eventCountRow?.count || 0, 10);
 
-      return { before, sessionsBefore };
+      if (deletedSessions > 0) {
+        await tx.run(
+          `DELETE FROM sessions WHERE state IN (${sessionPlaceholders})`,
+          TERMINAL_SESSION_STATES
+        );
+      }
+      if (deletedTransactions > 0) {
+        await tx.run(
+          `DELETE FROM webhook_events WHERE status IN (${eventPlaceholders})`,
+          TERMINAL_WEBHOOK_STATUSES
+        );
+      }
+
+      // Database clock, not the Node clock: the same UTC clock that stamps
+      // sessions.created_at, so the comparison is consistent on SQLite and PG.
+      await tx.run(`
+        INSERT INTO app_settings (setting_key, setting_value, updated_at)
+        VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT (setting_key) DO UPDATE SET
+          setting_value = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+      `, [STATS_RESET_KEY]);
+
+      const resetRow = await tx.getOne(
+        'SELECT setting_value FROM app_settings WHERE setting_key = ?',
+        [STATS_RESET_KEY]
+      );
+      const remainingRow = await tx.getOne('SELECT COUNT(*) AS count FROM sessions');
+
+      return {
+        deletedSessions,
+        deletedTransactions,
+        preservedSessions: parseInt(remainingRow?.count || 0, 10),
+        statsResetAt: resetRow?.setting_value || null,
+      };
     });
 
     res.json({
       success: true,
-      deleted: result.before,
-      deletedSessions: result.sessionsBefore,
-      message: `Deleted ${result.before} transaction log(s) and ` +
-        `${result.sessionsBefore} session(s). Dashboard session and revenue metrics reset.`,
+      deleted: result.deletedTransactions,
+      deletedSessions: result.deletedSessions,
+      preservedSessions: result.preservedSessions,
+      statsResetAt: result.statsResetAt,
+      message: `Deleted ${result.deletedSessions} terminal session(s) and ` +
+        `${result.deletedTransactions} terminal transaction log(s); ` +
+        `${result.preservedSessions} live/pending session(s) preserved. ` +
+        'Dashboard session and revenue metrics reset.',
     });
   } catch (err) {
     next(err);
