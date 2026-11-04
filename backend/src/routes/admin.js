@@ -16,7 +16,6 @@
  *   POST   /api/admin/sessions/:id/expire — Force-expire a session *   GET    /api/admin/stats     — Dashboard statistics
  *   GET    /api/admin/payment-methods        — Payment method availability + logos
  *   PUT    /api/admin/payment-methods/:key   — Enable/disable a method, set/clear its logo
- *   GET    /api/admin/transactions — Paginated webhook payment transactions
  *   GET    /api/admin/transactions/history — Settled payments (history table)
  *   GET    /api/admin/transactions/export  — Settled payments as a CSV download
  *   DELETE /api/admin/transactions — Clear terminal payment logs/sessions and
@@ -846,45 +845,6 @@ router.get('/transactions/export', async (req, res, next) => {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', 'attachment; filename="transactions.csv"');
     res.send(csv);
-  } catch (err) {
-    next(err);
-  }
-});
-
-// Recent transactions — paginated log of automated payment webhook events.
-// LEFT JOIN so a payment that has not been claimed yet still appears with a
-// null voucher code (vouchers.assigned_ref_no is only set on claim).
-router.get('/transactions', async (req, res, next) => {
-  try {
-    const db = getDb();
-
-    // Parse page/limit defensively: any missing or invalid value falls back to
-    // the defaults (page 1, 15 rows) and limit is capped so a hostile query
-    // string cannot ask for the whole table at once.
-    let page = parseInt(req.query.page, 10);
-    if (!Number.isInteger(page) || page < 1) page = 1;
-    let limit = parseInt(req.query.limit, 10);
-    if (!Number.isInteger(limit) || limit < 1) limit = 15;
-    if (limit > 100) limit = 100;
-    const offset = (page - 1) * limit;
-
-    // A separate COUNT gives accurate pagination metadata independent of the page window.
-    const totalRow = await db.getOne('SELECT COUNT(*) AS count FROM webhook_events');
-    const total = parseInt(totalRow?.count || 0, 10);
-    const totalPages = Math.max(1, Math.ceil(total / limit));
-
-    const transactions = await db.query(`
-      SELECT w.event_id, w.processed_at, w.ref_no, w.amount, w.status, v.code
-      FROM webhook_events w
-      LEFT JOIN vouchers v ON v.assigned_ref_no = w.ref_no
-      ORDER BY w.processed_at DESC
-      LIMIT ? OFFSET ?
-    `, [limit, offset]);
-
-    res.json({
-      transactions,
-      pagination: { currentPage: page, totalPages },
-    });
   } catch (err) {
     next(err);
   }
