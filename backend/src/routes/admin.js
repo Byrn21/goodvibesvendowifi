@@ -706,13 +706,31 @@ router.get('/stats', async (req, res, next) => {
   }
 });
 
-// ── Transaction history (settled payments) ────────────────────────────────
-// Payment history for the admin panel and its CSV export. Only settled
-// payments count: 'claimed' (voucher redeemed through the portal) and
-// 'authorized' (guest connected directly from the webhook). 'unclaimed' money
-// has not been reconciled to a guest yet and 'auth_failed' never granted
-// access, so neither belongs in a revenue history.
-const SUCCESSFUL_WEBHOOK_STATUSES = ['claimed', 'authorized'];
+// ── Transaction history ───────────────────────────────────────────────────
+// Payment history for the admin panel and its CSV export, in two views:
+//   completed — money that granted access: 'claimed' (voucher redeemed through
+//               the portal) and 'authorized' (guest connected directly from the
+//               webhook). This is the default revenue view.
+//   unclaimed — payments a webhook recorded that no guest has claimed yet, plus
+//               failed authorizations. Kept for customer support, not revenue.
+// A missing or unknown ?filter= falls back to 'completed'.
+const TRANSACTION_FILTER_STATUSES = {
+  completed: ['claimed', 'authorized'],
+  unclaimed: ['unclaimed', 'auth_failed'],
+};
+
+/**
+ * Resolve a ?filter= query value to its webhook status list.
+ * @param {*} filter
+ * @returns {{key: string, statuses: string[]}}
+ */
+function resolveTransactionFilter(filter) {
+  const key = String(filter || '').toLowerCase();
+  if (Object.prototype.hasOwnProperty.call(TRANSACTION_FILTER_STATUSES, key)) {
+    return { key, statuses: TRANSACTION_FILTER_STATUSES[key] };
+  }
+  return { key: 'completed', statuses: TRANSACTION_FILTER_STATUSES.completed };
+}
 
 // Money unit: sessions.payment_amount is INTEGER CENTAVOS, while
 // webhook_events.amount is PESOS. The fallback multiplies the webhook amount by
@@ -774,8 +792,9 @@ function csvAmount(centavos) {
   return isNaN(value) ? '' : (value / 100).toFixed(2);
 }
 
-// Payment history: settled transactions with guest, voucher and amount.
-// Paginated like GET /transactions; the CSV export always takes the full list.
+// Payment history: transactions with guest, voucher and amount, filtered by
+// status (?filter=completed|unclaimed). Paginated; the CSV export always takes
+// the full list for the selected filter.
 router.get('/transactions/history', async (req, res, next) => {
   try {
     const db = getDb();
@@ -787,14 +806,15 @@ router.get('/transactions/history', async (req, res, next) => {
     if (limit > 100) limit = 100;
     const offset = (page - 1) * limit;
 
-    const placeholders = sqlPlaceholders(SUCCESSFUL_WEBHOOK_STATUSES);
+    const { key: filter, statuses } = resolveTransactionFilter(req.query.filter);
+    const placeholders = sqlPlaceholders(statuses);
     // DISTINCT: the joins are 1:1 in practice, but a duplicated row must not
     // inflate the pagination count.
     const totalRow = await db.getOne(`
       SELECT COUNT(DISTINCT w.event_id) AS count
       FROM webhook_events w
       WHERE w.status IN (${placeholders})
-    `, SUCCESSFUL_WEBHOOK_STATUSES);
+    `, statuses);
     const total = parseInt(totalRow?.count || 0, 10);
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
@@ -803,10 +823,11 @@ router.get('/transactions/history', async (req, res, next) => {
       WHERE w.status IN (${placeholders})
       ORDER BY COALESCE(w.processed_at, s.created_at) DESC, w.id DESC
       LIMIT ? OFFSET ?
-    `, [...SUCCESSFUL_WEBHOOK_STATUSES, limit, offset]);
+    `, [...statuses, limit, offset]);
 
     res.json({
       success: true,
+      filter,
       transactions,
       pagination: { currentPage: page, totalPages },
     });
@@ -815,18 +836,19 @@ router.get('/transactions/history', async (req, res, next) => {
   }
 });
 
-// CSV export of every settled transaction. Built with native string handling
-// (no CSV dependency) and sent as a downloadable attachment.
+// CSV export of every transaction in the selected view. Built with native
+// string handling (no CSV dependency) and sent as a downloadable attachment.
 router.get('/transactions/export', async (req, res, next) => {
   try {
     const db = getDb();
 
-    const placeholders = sqlPlaceholders(SUCCESSFUL_WEBHOOK_STATUSES);
+    const { statuses } = resolveTransactionFilter(req.query.filter);
+    const placeholders = sqlPlaceholders(statuses);
     const rows = await db.query(`
       ${TRANSACTION_HISTORY_SELECT}
       WHERE w.status IN (${placeholders})
       ORDER BY COALESCE(w.processed_at, s.created_at) DESC, w.id DESC
-    `, SUCCESSFUL_WEBHOOK_STATUSES);
+    `, statuses);
 
     const lines = ['Date,Ref No,Mobile,Voucher,Amount'];
     for (const row of rows) {

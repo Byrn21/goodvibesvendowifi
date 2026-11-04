@@ -209,11 +209,15 @@
       <div class="admin-card content-section" id="section-transactions">
         <div class="admin-card--header">
           <h2 class="admin-card--title">Transactions</h2>
+          <select id="history-status-filter" class="admin-select" style="margin-right: auto; margin-left: 16px;">
+            <option value="completed">Completed Payments</option>
+            <option value="unclaimed">Unclaimed / Failed</option>
+          </select>
           <button type="button" class="btn btn--primary" id="history-export">Export to CSV</button>
         </div>
         <p class="muted">
-          Successful payments only: vouchers claimed at the portal and guests authorized
-          directly by the payment webhook.
+          Completed payments are vouchers claimed at the portal or guests authorized by the
+          payment webhook. Switch the filter to review unclaimed or failed payments for support.
         </p>
         <div class="admin-table-container" id="history-table" aria-busy="true">
           <div class="loading-container" role="status" aria-live="polite">
@@ -285,6 +289,7 @@
         historyNext:     document.getElementById('history-next'),
         historyPageInfo: document.getElementById('history-page-info'),
         historyExport:   document.getElementById('history-export'),
+        historyStatusFilter: document.getElementById('history-status-filter'),
         sectionTransactions: document.getElementById('section-transactions'),
         tabVouchers:    document.getElementById('tab-vouchers'),
         tabSessions:    document.getElementById('tab-sessions'),
@@ -1251,7 +1256,7 @@
 
       function renderHistory(transactions) {
         if (!transactions.length) {
-          return '<p class="muted">No successful transactions yet.</p>';
+          return '<p class="muted">No transactions match this filter.</p>';
         }
         var rows = transactions.map(function (tx) {
           return '<tr>' +
@@ -1273,13 +1278,20 @@
         if (els.historyNext) els.historyNext.disabled = currentPage >= totalPages;
       }
 
+      // Which view the table and the export both read: 'completed' (default) or
+      // 'unclaimed'. The backend falls back to 'completed' for anything else.
+      function currentHistoryFilter() {
+        return els.historyStatusFilter ? els.historyStatusFilter.value : 'completed';
+      }
+
       // Uses the shared api() wrapper so an expired session still triggers the
       // centralized 401 logout-and-redirect flow.
       function loadHistory(page) {
         page = page || 1;
         if (!els.historyTable) return;
         setTableLoading(els.historyTable, 'Loading transactions\u2026');
-        api('/api/admin/transactions/history?page=' + page + '&limit=' + HISTORY_LIMIT)
+        api('/api/admin/transactions/history?page=' + page + '&limit=' + HISTORY_LIMIT +
+            '&filter=' + encodeURIComponent(currentHistoryFilter()))
           .then(function (res) {
             if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load transactions');
             var data = res.data || {};
@@ -1317,7 +1329,8 @@
         els.historyExport.disabled = true;
         var headers = {};
         if (ADMIN_TOKEN) headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
-        fetch(API_BASE + '/api/admin/transactions/export', { headers: headers })
+        fetch(API_BASE + '/api/admin/transactions/export?filter=' +
+                encodeURIComponent(currentHistoryFilter()), { headers: headers })
           .then(function (r) {
             if (r.status === 401) {
               handleUnauthorized();
@@ -1345,6 +1358,11 @@
       }
       if (els.historyExport) {
         els.historyExport.addEventListener('click', exportHistory);
+      }
+      if (els.historyStatusFilter) {
+        els.historyStatusFilter.addEventListener('change', function () {
+          loadHistory(1);
+        });
       }
 
       // Sidebar navigation &mdash; event delegation on nav container

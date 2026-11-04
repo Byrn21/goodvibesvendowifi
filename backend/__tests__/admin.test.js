@@ -897,4 +897,45 @@ describe('GET /api/admin/transactions/history + /export — Settled payments', (
     expect(cols[3]).toBe('300001');
     expect(cols[4]).toBe('50.00');
   });
+
+  test('filters the history to unclaimed / failed payments for support', async () => {
+    await seedPayment({ n: 1, status: 'claimed', amountPesos: 50 });
+    await seedPayment({ n: 2, status: 'authorized', amountPesos: 20 });
+    await seedPayment({ n: 3, status: 'unclaimed', amountPesos: 99 });
+    await seedPayment({ n: 4, status: 'auth_failed', amountPesos: 30 });
+
+    const completed = await request(app)
+      .get('/api/admin/transactions/history?filter=completed')
+      .set('X-API-Key', VALID_KEY);
+    expect(completed.body.filter).toBe('completed');
+    expect(completed.body.transactions).toHaveLength(2);
+
+    const unclaimed = await request(app)
+      .get('/api/admin/transactions/history?filter=unclaimed')
+      .set('X-API-Key', VALID_KEY);
+    expect(unclaimed.body.filter).toBe('unclaimed');
+    expect(unclaimed.body.pagination).toEqual({ currentPage: 1, totalPages: 1 });
+    expect(unclaimed.body.transactions.map((t) => t.status).sort()).toEqual(['auth_failed', 'unclaimed']);
+
+    // Missing or unknown values fall back to the default view.
+    const fallback = await request(app)
+      .get('/api/admin/transactions/history?filter=bogus')
+      .set('X-API-Key', VALID_KEY);
+    expect(fallback.body.filter).toBe('completed');
+    expect(fallback.body.transactions).toHaveLength(2);
+  });
+
+  test('exports only the selected filter', async () => {
+    await seedPayment({ n: 1, status: 'claimed', amountPesos: 50 });
+    await seedPayment({ n: 2, status: 'unclaimed', amountPesos: 99 });
+
+    const res = await request(app)
+      .get('/api/admin/transactions/export?filter=unclaimed')
+      .set('X-API-Key', VALID_KEY);
+
+    const lines = res.text.replace(/^\uFEFF/, '').trim().split('\r\n');
+    expect(lines[0]).toBe('Date,Ref No,Mobile,Voucher,Amount');
+    expect(lines).toHaveLength(2);
+    expect(lines[1].split(',')[1]).toBe('HISTREF002');
+  });
 });
