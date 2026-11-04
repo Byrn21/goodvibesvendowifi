@@ -682,7 +682,10 @@ router.get('/stats', async (req, res, next) => {
       SELECT SUM(payment_amount) as total FROM sessions
       WHERE payment_amount IS NOT NULL${sinceClause}
     `, sinceParams);
-    const premiumSessions = await db.getOne("SELECT COUNT(*) as count FROM sessions WHERE voucher_type = 'premium'")
+    const premiumSessions = await db.getOne(`
+      SELECT COUNT(*) as count FROM sessions
+      WHERE voucher_type = 'premium'${sinceClause}
+    `, sinceParams)
 
     res.json({
       success: true,
