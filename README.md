@@ -463,8 +463,8 @@ nothing, so it can be retried once the device has opened the portal. A payment
 whose `amount` is one of `PREMIUM_AMOUNTS_PESOS` receives the premium bandwidth
 caps; every other amount receives the default caps. Values are parsed with
 `parseInt(..., 10)` and range-checked before reaching the controller
-(`*_DOWN_MBPS` 1–1024 Mbps, `PREMIUM_UP_KBPS` 1–1024 Kbps,
-`VOUCHER_DEFAULT_UP_KBPS` 1–100000 Kbps).
+(`*_DOWN_MBPS` 1–1024 Mbps, `PREMIUM_UP_KBPS` and `VOUCHER_DEFAULT_UP_KBPS`
+1–100000 Kbps).
 
 | Variable | Referenced in | Default | Description |
 |---|---|---|---|
@@ -472,7 +472,7 @@ caps; every other amount receives the default caps. Values are parsed with
 | `PREMIUM_AMOUNTS_PESOS` | `routes/webhook.js` | `25,45,80` | Comma-separated payment amounts (Pesos) treated as the premium tier. |
 | `PREMIUM_DOWN_MBPS` | `utils/qos.js` | *(empty → `PREMIUM_DOWN_KBPS`, else default caps)* | Premium download cap (Mbps). Unset/out-of-range falls back to the default caps. |
 | `PREMIUM_DOWN_KBPS` | `utils/qos.js` | *(empty → default caps)* | Alias for the premium download cap expressed in Kbps (≤1024 stays Kbps, above converts to Mbps). Used only when `PREMIUM_DOWN_MBPS` is unset/invalid. |
-| `PREMIUM_UP_KBPS` | `utils/qos.js` | *(empty → default caps)* | Premium upload cap (Kbps). Unset/out-of-range falls back to the default caps. |
+| `PREMIUM_UP_KBPS` | `utils/qos.js` | *(empty → default caps)* | Premium upload cap (Kbps, 1–100000; 1024 and above is sent as whole Mbps). Unset/non-numeric falls back to the default caps; above the ceiling is clamped to it. |
 | `VOUCHER_DEFAULT_DOWN_MBPS` | `services/omada.js` | *(empty → error)* | Default download cap (Mbps, 1–1024) for non-premium amounts. |
 | `VOUCHER_DEFAULT_UP_KBPS` | `services/omada.js` | *(empty → error)* | Default upload cap (Kbps, 1–100000; 1024 and above is sent as whole Mbps) for non-premium amounts. |
 

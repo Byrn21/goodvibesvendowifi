@@ -207,6 +207,38 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
     expect(resolveVoucherRateLimit({ voucherType: ' premium ' })).toEqual(premium);
   });
 
+  test('PREMIUM_UP_KBPS above 1024 Kbps is applied in Mbps, not clamped to 1 Mbps', () => {
+    const savedUp = process.env.PREMIUM_UP_KBPS;
+    process.env.PREMIUM_UP_KBPS = '5120';
+    try {
+      expect(resolveVoucherRateLimit({ voucherType: 'premium' })).toEqual({
+        upEnable: true, upUnit: 2, upLimit: 5,
+        downEnable: true, downUnit: 2, downLimit: 50,
+      });
+    } finally {
+      if (savedUp === undefined) delete process.env.PREMIUM_UP_KBPS;
+      else process.env.PREMIUM_UP_KBPS = savedUp;
+    }
+  });
+
+  test('clamps a PREMIUM_UP_KBPS above the ceiling instead of resetting it to 1024', () => {
+    const savedUp = process.env.PREMIUM_UP_KBPS;
+    process.env.PREMIUM_UP_KBPS = '200000';
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(resolveVoucherRateLimit({ voucherType: 'premium' })).toEqual({
+        // 100000 Kbps → 98 Mbps (rounded up), never the 1 Mbps default.
+        upEnable: true, upUnit: 2, upLimit: 98,
+        downEnable: true, downUnit: 2, downLimit: 50,
+      });
+      expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('clamping');
+    } finally {
+      warn.mockRestore();
+      if (savedUp === undefined) delete process.env.PREMIUM_UP_KBPS;
+      else process.env.PREMIUM_UP_KBPS = savedUp;
+    }
+  });
+
   test('PREMIUM_DOWN_KBPS is accepted when PREMIUM_DOWN_MBPS is unset', () => {
     const savedMbps = process.env.PREMIUM_DOWN_MBPS;
     try {
