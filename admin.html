@@ -89,6 +89,19 @@
             </button>
           </li>
           <li class="admin-sidebar__nav-item">
+            <button class="admin-sidebar__nav-link" data-page="transactions" aria-label="Transactions">
+              <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                  <path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/>
+                  <path d="M8 7h8"/>
+                  <path d="M8 11h8"/>
+                  <path d="M8 15h4"/>
+                </svg>
+              </span>
+              <span class="admin-sidebar__nav-link-text">Transactions</span>
+            </button>
+          </li>
+          <li class="admin-sidebar__nav-item">
             <button class="admin-sidebar__nav-link" data-page="import" aria-label="Import">
               <span class="admin-sidebar__nav-link-icon" aria-hidden="true">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
@@ -206,6 +219,29 @@
         </div>
       </div>
 
+      <!-- Transactions Section (settled payments + CSV export) -->
+      <div class="admin-card content-section" id="section-transactions">
+        <div class="admin-card--header">
+          <h2 class="admin-card--title">Transactions</h2>
+          <button type="button" class="btn btn--primary" id="history-export">Export to CSV</button>
+        </div>
+        <p class="muted">
+          Successful payments only: vouchers claimed at the portal and guests authorized
+          directly by the payment webhook.
+        </p>
+        <div class="admin-table-container" id="history-table" aria-busy="true">
+          <div class="loading-container" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <p class="muted">Loading&hellip;</p>
+          </div>
+        </div>
+        <div class="admin-pagination" id="history-pagination">
+          <button type="button" class="btn btn--secondary" id="history-prev" disabled>Previous</button>
+          <span class="admin-pagination__info" id="history-page-info">Page 1 of 1</span>
+          <button type="button" class="btn btn--secondary" id="history-next" disabled>Next</button>
+        </div>
+      </div>
+
       <!-- Import Section -->
       <div class="admin-card content-section" id="section-import">
         <h2>Import Vouchers</h2>
@@ -263,6 +299,12 @@
         transactionsNext:     document.getElementById('transactions-next'),
         transactionsPageInfo: document.getElementById('transactions-page-info'),
         transactionsClearAll: document.getElementById('transactions-clear-all'),
+        historyTable:    document.getElementById('history-table'),
+        historyPrev:     document.getElementById('history-prev'),
+        historyNext:     document.getElementById('history-next'),
+        historyPageInfo: document.getElementById('history-page-info'),
+        historyExport:   document.getElementById('history-export'),
+        sectionTransactions: document.getElementById('section-transactions'),
         tabVouchers:    document.getElementById('tab-vouchers'),
         tabSessions:    document.getElementById('tab-sessions'),
         tabImport:      document.getElementById('tab-import'),
@@ -343,6 +385,7 @@
           { el: els.sectionDashboard, name: 'dashboard' },
           { el: els.sectionVouchers, name: 'vouchers' },
           { el: els.sectionSessions, name: 'sessions' },
+          { el: els.sectionTransactions, name: 'transactions' },
           { el: els.sectionImport, name: 'import' },
           { el: els.sectionPaymentMethods, name: 'payment-methods' },
         ];
@@ -354,6 +397,7 @@
         });
         if (page === 'vouchers') { loadVouchers(); }
         else if (page === 'sessions') { loadSessions(); }
+        else if (page === 'transactions') { loadHistory(1); }
         else if (page === 'import') { renderImportForm(); }
         else if (page === 'payment-methods') { loadPaymentMethodsSettings(); }
       }
@@ -1290,6 +1334,119 @@
       }
       if (els.transactionsClearAll) {
         els.transactionsClearAll.addEventListener('click', clearAllTransactions);
+      }
+
+      // ---- Transaction history (settled payments + CSV export) ----
+      // GET /api/admin/transactions/history returns only payments that granted
+      // access (claimed or authorized). amount_centavos is integer centavos,
+      // unlike the webhook log above whose amount is already in pesos.
+      var historyPage = 1;
+      var historyTotalPages = 1;
+      var HISTORY_LIMIT = 25;
+
+      function formatHistoryAmount(centavos) {
+        if (centavos === null || centavos === undefined || centavos === '') return '&mdash;';
+        var n = Number(centavos);
+        if (isNaN(n)) return '&mdash;';
+        return formatPrice(n);
+      }
+
+      function renderHistory(transactions) {
+        if (!transactions.length) {
+          return '<p class="muted">No successful transactions yet.</p>';
+        }
+        var rows = transactions.map(function (tx) {
+          return '<tr>' +
+            '<td>' + escapeHtml(formatDate(tx.processed_at)) + '</td>' +
+            '<td>' + (tx.ref_no ? escapeHtml(tx.ref_no) : '&mdash;') + '</td>' +
+            '<td>' + (tx.mobile_number ? escapeHtml(tx.mobile_number) : '<span class="muted">&mdash;</span>') + '</td>' +
+            '<td>' + (tx.voucher_code ? escapeHtml(tx.voucher_code) : '<span class="muted">&mdash;</span>') + '</td>' +
+            '<td>' + formatHistoryAmount(tx.amount_centavos) + '</td>' +
+            '</tr>';
+        }).join('');
+        return '<table><thead><tr><th>Date/Time</th><th>Reference No.</th><th>Mobile Number</th><th>Voucher Code</th><th>Amount</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      }
+
+      function updateHistoryPagination(currentPage, totalPages) {
+        if (els.historyPageInfo) {
+          els.historyPageInfo.textContent = 'Page ' + currentPage + ' of ' + totalPages;
+        }
+        if (els.historyPrev) els.historyPrev.disabled = currentPage <= 1;
+        if (els.historyNext) els.historyNext.disabled = currentPage >= totalPages;
+      }
+
+      // Uses the shared api() wrapper so an expired session still triggers the
+      // centralized 401 logout-and-redirect flow.
+      function loadHistory(page) {
+        page = page || 1;
+        if (!els.historyTable) return;
+        setTableLoading(els.historyTable, 'Loading transactions\u2026');
+        api('/api/admin/transactions/history?page=' + page + '&limit=' + HISTORY_LIMIT)
+          .then(function (res) {
+            if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load transactions');
+            var data = res.data || {};
+            var pagination = data.pagination || {};
+            historyPage = pagination.currentPage || page;
+            historyTotalPages = pagination.totalPages || 1;
+            els.historyTable.innerHTML = renderHistory(data.transactions || []);
+            setTableReady(els.historyTable);
+            updateHistoryPagination(historyPage, historyTotalPages);
+          })
+          .catch(function (err) {
+            els.historyTable.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
+            setTableReady(els.historyTable);
+            historyPage = 1;
+            historyTotalPages = 1;
+            updateHistoryPagination(1, 1);
+          });
+      }
+
+      if (els.historyPrev) {
+        els.historyPrev.addEventListener('click', function () {
+          if (historyPage > 1) loadHistory(historyPage - 1);
+        });
+      }
+      if (els.historyNext) {
+        els.historyNext.addEventListener('click', function () {
+          if (historyPage < historyTotalPages) loadHistory(historyPage + 1);
+        });
+      }
+
+      // The export endpoint requires the Authorization header, so the download
+      // cannot be a plain <a href>: fetch the CSV, then save the blob as a file.
+      function exportHistory() {
+        if (!els.historyExport) return;
+        els.historyExport.disabled = true;
+        var headers = {};
+        if (ADMIN_TOKEN) headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
+        fetch(API_BASE + '/api/admin/transactions/export', { headers: headers })
+          .then(function (r) {
+            if (r.status === 401) {
+              handleUnauthorized();
+              return new Promise(function () {});
+            }
+            if (!r.ok) throw new Error('Export failed (HTTP ' + r.status + ')');
+            return r.blob();
+          })
+          .then(function (blob) {
+            var url = URL.createObjectURL(blob);
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = 'transactions.csv';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+          })
+          .catch(function (err) {
+            alert('Failed to export transactions: ' + err.message);
+          })
+          .finally(function () {
+            els.historyExport.disabled = false;
+          });
+      }
+      if (els.historyExport) {
+        els.historyExport.addEventListener('click', exportHistory);
       }
 
       // Sidebar navigation &mdash; event delegation on nav container

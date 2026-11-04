@@ -17,6 +17,8 @@
  *   GET    /api/admin/payment-methods        — Payment method availability + logos
  *   PUT    /api/admin/payment-methods/:key   — Enable/disable a method, set/clear its logo
  *   GET    /api/admin/transactions — Paginated webhook payment transactions
+ *   GET    /api/admin/transactions/history — Settled payments (history table)
+ *   GET    /api/admin/transactions/export  — Settled payments as a CSV download
  *   DELETE /api/admin/transactions — Clear terminal payment logs/sessions and
  *                                   move the dashboard stats baseline
  */
@@ -700,6 +702,150 @@ router.get('/stats', async (req, res, next) => {
         premiumSessions: parseInt(premiumSessions?.count || 0, 10),
       },
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── Transaction history (settled payments) ────────────────────────────────
+// Payment history for the admin panel and its CSV export. Only settled
+// payments count: 'claimed' (voucher redeemed through the portal) and
+// 'authorized' (guest connected directly from the webhook). 'unclaimed' money
+// has not been reconciled to a guest yet and 'auth_failed' never granted
+// access, so neither belongs in a revenue history.
+const SUCCESSFUL_WEBHOOK_STATUSES = ['claimed', 'authorized'];
+
+// Money unit: sessions.payment_amount is INTEGER CENTAVOS, while
+// webhook_events.amount is PESOS. The fallback multiplies the webhook amount by
+// 100 so every row is reported in the same unit — this API speaks centavos, and
+// only the CSV export converts back to pesos.
+const TRANSACTION_HISTORY_SELECT = `
+  SELECT
+    w.event_id,
+    COALESCE(w.processed_at, s.created_at) AS processed_at,
+    w.ref_no,
+    w.mobile_number,
+    COALESCE(v.code, s.voucher_used) AS voucher_code,
+    COALESCE(s.payment_amount, w.amount * 100) AS amount_centavos,
+    w.status
+  FROM webhook_events w
+  LEFT JOIN sessions s ON s.payment_event_id = w.event_id
+  LEFT JOIN vouchers v ON v.assigned_ref_no = w.ref_no
+`;
+
+/**
+ * Escape one CSV field. A value containing a comma, quote or line break is
+ * wrapped in double quotes and its own quotes are doubled (RFC 4180).
+ * @param {*} value
+ * @returns {string}
+ */
+function csvField(value) {
+  if (value === null || value === undefined) return '';
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+/**
+ * Normalize a stored timestamp to ISO-8601 UTC for the CSV.
+ *
+ * SQLite's CURRENT_TIMESTAMP yields 'YYYY-MM-DD HH:MM:SS' (UTC) while Node
+ * writes ISO-8601 with 'Z'. The space form must be marked as UTC explicitly,
+ * otherwise the JS date parser reads it as server-local time.
+ *
+ * @param {*} value
+ * @returns {string}
+ */
+function csvTimestamp(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const text = String(value).trim();
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(text)
+    ? text.replace(' ', 'T') + 'Z'
+    : text;
+  const date = new Date(normalized);
+  return isNaN(date.getTime()) ? text : date.toISOString();
+}
+
+/**
+ * Centavos -> plain peso string for the CSV, e.g. 5000 -> '50.00'.
+ * Blank stays blank so a row with no recorded amount is not exported as 0.00.
+ */
+function csvAmount(centavos) {
+  if (centavos === null || centavos === undefined || centavos === '') return '';
+  const value = Number(centavos);
+  return isNaN(value) ? '' : (value / 100).toFixed(2);
+}
+
+// Payment history: settled transactions with guest, voucher and amount.
+// Paginated like GET /transactions; the CSV export always takes the full list.
+router.get('/transactions/history', async (req, res, next) => {
+  try {
+    const db = getDb();
+
+    let page = parseInt(req.query.page, 10);
+    if (!Number.isInteger(page) || page < 1) page = 1;
+    let limit = parseInt(req.query.limit, 10);
+    if (!Number.isInteger(limit) || limit < 1) limit = 25;
+    if (limit > 100) limit = 100;
+    const offset = (page - 1) * limit;
+
+    const placeholders = sqlPlaceholders(SUCCESSFUL_WEBHOOK_STATUSES);
+    // DISTINCT: the joins are 1:1 in practice, but a duplicated row must not
+    // inflate the pagination count.
+    const totalRow = await db.getOne(`
+      SELECT COUNT(DISTINCT w.event_id) AS count
+      FROM webhook_events w
+      WHERE w.status IN (${placeholders})
+    `, SUCCESSFUL_WEBHOOK_STATUSES);
+    const total = parseInt(totalRow?.count || 0, 10);
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    const transactions = await db.query(`
+      ${TRANSACTION_HISTORY_SELECT}
+      WHERE w.status IN (${placeholders})
+      ORDER BY COALESCE(w.processed_at, s.created_at) DESC, w.id DESC
+      LIMIT ? OFFSET ?
+    `, [...SUCCESSFUL_WEBHOOK_STATUSES, limit, offset]);
+
+    res.json({
+      success: true,
+      transactions,
+      pagination: { currentPage: page, totalPages },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// CSV export of every settled transaction. Built with native string handling
+// (no CSV dependency) and sent as a downloadable attachment.
+router.get('/transactions/export', async (req, res, next) => {
+  try {
+    const db = getDb();
+
+    const placeholders = sqlPlaceholders(SUCCESSFUL_WEBHOOK_STATUSES);
+    const rows = await db.query(`
+      ${TRANSACTION_HISTORY_SELECT}
+      WHERE w.status IN (${placeholders})
+      ORDER BY COALESCE(w.processed_at, s.created_at) DESC, w.id DESC
+    `, SUCCESSFUL_WEBHOOK_STATUSES);
+
+    const lines = ['Date,Ref No,Mobile,Voucher,Amount'];
+    for (const row of rows) {
+      lines.push([
+        csvField(csvTimestamp(row.processed_at)),
+        csvField(row.ref_no),
+        csvField(row.mobile_number),
+        csvField(row.voucher_code),
+        csvField(csvAmount(row.amount_centavos)),
+      ].join(','));
+    }
+
+    // CRLF (RFC 4180). The UTF-8 BOM keeps Excel from mis-reading the file.
+    const csv = '\uFEFF' + lines.join('\r\n') + '\r\n';
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="transactions.csv"');
+    res.send(csv);
   } catch (err) {
     next(err);
   }

@@ -895,3 +895,123 @@ describe('GET /api/admin/stats — Dashboard statistics', () => {
     expect(s.totalSessions).toBe(1);
   });
 });
+
+describe('GET /api/admin/transactions/history + /export — Settled payments', () => {
+
+  // A settled payment as the two flows write it: a webhook_events row plus the
+  // session it paid for (linked by payment_event_id), and — for the claim
+  // flow — a voucher linked by assigned_ref_no.
+  async function seedPayment({
+    n,
+    status = 'claimed',
+    amountPesos = 50,
+    mobile = '09171234567',
+    voucherCode = null,
+    paymentCentavos = 5000,
+    processedAt = null,
+  }) {
+    const ref = 'HISTREF' + String(n).padStart(3, '0');
+    const eventId = 'evt_hist_' + n;
+
+    await getDb().run(
+      'INSERT INTO webhook_events (event_id, ref_no, amount, mobile_number, status, processed_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [eventId, ref, amountPesos, mobile, status, processedAt || ('2026-10-02 00:00:' + String(n).padStart(2, '0'))]
+    );
+
+    if (voucherCode) {
+      await getDb().run(
+        'INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no) VALUES (?, ?, ?, ?, ?, ?)',
+        [voucherCode, 'standard', 60, amountPesos * 100, 'claimed', ref]
+      );
+    }
+
+    await getDb().run(
+      `INSERT INTO sessions (session_id, client_mac, voucher_type, state, duration_minutes,
+                             payment_amount, payment_event_id, voucher_used, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ['sess_hist_' + n, 'AA:BB:CC:DD:EE:0' + (n % 10), 'standard', 'active', 60,
+        paymentCentavos, eventId, voucherCode, '2026-10-02 00:00:00']
+    );
+
+    return { ref, eventId };
+  }
+
+  test('both endpoints require valid credentials', async () => {
+    const history = await request(app).get('/api/admin/transactions/history');
+    expect(history.status).toBe(401);
+    const exportRes = await request(app).get('/api/admin/transactions/export');
+    expect(exportRes.status).toBe(401);
+  });
+
+  test('returns only settled payments, newest first, with guest, voucher and centavo amount', async () => {
+    await seedPayment({ n: 1, status: 'claimed', amountPesos: 50, voucherCode: '300001' });
+    await seedPayment({ n: 2, status: 'authorized', amountPesos: 20, voucherCode: null, paymentCentavos: 2000 });
+    await seedPayment({ n: 3, status: 'unclaimed', amountPesos: 99, voucherCode: null, paymentCentavos: 9900 });
+    await seedPayment({ n: 4, status: 'auth_failed', amountPesos: 30, voucherCode: null, paymentCentavos: 3000 });
+    // No session row: the amount must fall back to webhook_events.amount * 100.
+    await getDb().run(
+      'INSERT INTO webhook_events (event_id, ref_no, amount, mobile_number, status, processed_at) VALUES (?, ?, ?, ?, ?, ?)',
+      ['evt_hist_5', 'HISTREF005', 35, '09170000005', 'claimed', '2026-10-02 00:00:05']
+    );
+
+    const res = await request(app)
+      .get('/api/admin/transactions/history')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.transactions).toHaveLength(3);
+    expect(res.body.pagination).toEqual({ currentPage: 1, totalPages: 1 });
+    expect(res.body.transactions[0].event_id).toBe('evt_hist_5');
+    expect(res.body.transactions.map((t) => t.event_id)).not.toContain('evt_hist_3');
+    expect(res.body.transactions.map((t) => t.event_id)).not.toContain('evt_hist_4');
+
+    const byId = {};
+    res.body.transactions.forEach((t) => { byId[t.event_id] = t; });
+
+    expect(Object.keys(byId.evt_hist_1).sort()).toEqual(
+      ['amount_centavos', 'event_id', 'mobile_number', 'processed_at', 'ref_no', 'status', 'voucher_code'].sort()
+    );
+    expect(byId.evt_hist_1.ref_no).toBe('HISTREF001');
+    expect(byId.evt_hist_1.mobile_number).toBe('09171234567');
+    expect(byId.evt_hist_1.voucher_code).toBe('300001');
+    expect(Number(byId.evt_hist_1.amount_centavos)).toBe(5000);
+    expect(Number(byId.evt_hist_5.amount_centavos)).toBe(3500);
+    expect(byId.evt_hist_2.voucher_code).toBeNull();
+  });
+
+  test('paginates the history table', async () => {
+    for (let i = 1; i <= 5; i++) {
+      await seedPayment({ n: i, amountPesos: 60, paymentCentavos: 6000 });
+    }
+
+    const res = await request(app)
+      .get('/api/admin/transactions/history?page=2&limit=2')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.body.pagination).toEqual({ currentPage: 2, totalPages: 3 });
+    expect(res.body.transactions).toHaveLength(2);
+  });
+
+  test('exports settled payments as a CSV attachment with amounts converted to pesos', async () => {
+    await seedPayment({ n: 1, status: 'claimed', amountPesos: 50, voucherCode: '300001', paymentCentavos: 5000 });
+    await seedPayment({ n: 2, status: 'unclaimed', amountPesos: 99, paymentCentavos: 9900 });
+
+    const res = await request(app)
+      .get('/api/admin/transactions/export')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/csv/);
+    expect(res.headers['content-disposition']).toBe('attachment; filename="transactions.csv"');
+
+    const lines = res.text.replace(/^\uFEFF/, '').trim().split('\r\n');
+    expect(lines[0]).toBe('Date,Ref No,Mobile,Voucher,Amount');
+    expect(lines).toHaveLength(2);
+
+    const cols = lines[1].split(',');
+    expect(cols[1]).toBe('HISTREF001');
+    expect(cols[2]).toBe('09171234567');
+    expect(cols[3]).toBe('300001');
+    expect(cols[4]).toBe('50.00');
+  });
+});
