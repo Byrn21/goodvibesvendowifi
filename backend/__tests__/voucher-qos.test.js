@@ -255,6 +255,26 @@ describe('resolveVoucherRateLimit — voucher caps → Omada payload values', ()
     }
   });
 
+  test('clamps a PREMIUM_DOWN_KBPS above the ceiling instead of reverting to the default', () => {
+    const savedMbps = process.env.PREMIUM_DOWN_MBPS;
+    delete process.env.PREMIUM_DOWN_MBPS;
+    process.env.PREMIUM_DOWN_KBPS = '200000';
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(resolveVoucherRateLimit({ voucherType: 'premium' })).toEqual({
+        upEnable: true, upUnit: 2, upLimit: 1,
+        // 100000 Kbps → 98 Mbps (rounded up), never the 50 Mbps default.
+        downEnable: true, downUnit: 2, downLimit: 98,
+      });
+      expect(warn.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('clamping');
+    } finally {
+      warn.mockRestore();
+      delete process.env.PREMIUM_DOWN_KBPS;
+      if (savedMbps === undefined) delete process.env.PREMIUM_DOWN_MBPS;
+      else process.env.PREMIUM_DOWN_MBPS = savedMbps;
+    }
+  });
+
   test('a half-configured pair is ignored rather than capping one direction only', () => {
     expect(resolveVoucherRateLimit({ downKbps: 20000, upKbps: null, voucherType: 'standard' }))
       .toBeUndefined();

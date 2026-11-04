@@ -38,14 +38,16 @@ const DEFAULT_PREMIUM_AMOUNTS_PESOS = [25, 45, 80];
 const DEFAULT_PREMIUM_DOWN_MBPS = 50;
 const DEFAULT_PREMIUM_UP_KBPS = 1024;
 
-// Ceiling for PREMIUM_UP_KBPS, in Kbps — the same 100000 the standard tier's
+// Ceiling for the premium Kbps caps — the same 100000 the standard tier's
 // VOUCHER_DEFAULT_UP_KBPS uses (services/omada.js → MAX_DEFAULT_UP_KBPS). It is
 // deliberately NOT the 1–1024 Omada applies PER UNIT: the configured value is
 // Kbps, and toRateLimitUnit() sends 1024 Kbps and above as whole Mbps, so
 // PREMIUM_UP_KBPS=5120 is a valid 5 Mbps upload cap. The old 1–1024 check
 // treated it as invalid and fell back to the 1 Mbps default, silently
-// throttling a legitimate premium upload by 5x.
-const MAX_PREMIUM_UP_KBPS = 100000;
+// throttling a legitimate premium upload by 5x. It is shared by
+// PREMIUM_UP_KBPS and the PREMIUM_DOWN_KBPS alias so neither direction can be
+// configured above the same ceiling.
+const MAX_PREMIUM_KBPS = 100000;
 
 // One warning per missing variable, not one per guest.
 const warnedPremiumDefaults = new Set();
@@ -66,6 +68,34 @@ function warnPremiumDefault(name, used) {
     '[qos] ' + name + ' is unset or out of range — using the built-in premium default ' +
     String(used) + '. Set it in backend/.env to control the premium tier.'
   );
+}
+
+/**
+ * clampPremiumKbps — hold a premium Kbps value at or below MAX_PREMIUM_KBPS.
+ *
+ * A configured value above the ceiling is clamped to it (warned once per value)
+ * rather than rejected and thrown back to a built-in default, which would
+ * silently slow the guest well below the configured cap.
+ *
+ * @param {string} name environment variable the value came from
+ * @param {number} kbps validated positive integer Kbps value
+ * @returns {number} the value, clamped to MAX_PREMIUM_KBPS
+ */
+function clampPremiumKbps(name, kbps) {
+  if (kbps <= MAX_PREMIUM_KBPS) return kbps;
+
+  // Keyed by variable name as well as value: an upload and a download clamp to
+  // the same number are two distinct misconfigurations and each must be warned
+  // about.
+  const key = name + ':' + kbps;
+  if (!warnedPremiumClamps.has(key)) {
+    warnedPremiumClamps.add(key);
+    console.warn(
+      '[qos] ' + name + '=' + kbps + ' is above the ' + MAX_PREMIUM_KBPS +
+      ' Kbps ceiling — clamping to ' + MAX_PREMIUM_KBPS + ' Kbps.'
+    );
+  }
+  return MAX_PREMIUM_KBPS;
 }
 
 // One Mbps is 1024 Kbps as far as the controller is concerned, and this is the
@@ -210,6 +240,11 @@ function isPremiumVoucherType(value) {
  * silently lost the premium tier and capped premium guests at the standard
  * VOUCHER_DEFAULT_* speed.
  *
+ * PREMIUM_DOWN_KBPS gets exactly the same bounds logic as PREMIUM_UP_KBPS: unset
+ * or non-numeric falls back to DEFAULT_PREMIUM_DOWN_MBPS, while a value above
+ * MAX_PREMIUM_KBPS is clamped to the ceiling (warned once) instead of being
+ * discarded.
+ *
  * @returns {{unit: 1|2, limit: number}|undefined}
  */
 function resolvePremiumDown() {
@@ -218,8 +253,10 @@ function resolvePremiumDown() {
     return { unit: 2, limit: downMbps }; // Mbps
   }
 
-  const downKbps = normalizeBandwidthKbps(process.env.PREMIUM_DOWN_KBPS);
-  if (downKbps) return toRateLimitUnit(downKbps);
+  const parsedDownKbps = parseInt(process.env.PREMIUM_DOWN_KBPS, 10);
+  if (Number.isInteger(parsedDownKbps) && parsedDownKbps >= 1) {
+    return toRateLimitUnit(clampPremiumKbps('PREMIUM_DOWN_KBPS', parsedDownKbps));
+  }
 
   // Neither variable is usable: keep the premium tier premium instead of
   // letting the guest fall through to the standard VOUCHER_DEFAULT_* cap.
@@ -231,13 +268,13 @@ function resolvePremiumDown() {
  * resolvePremiumRateLimit — the PREMIUM_* operator caps as a customRateLimit.
  *
  * Download comes from PREMIUM_DOWN_MBPS (or its PREMIUM_DOWN_KBPS alias), upload
- * from PREMIUM_UP_KBPS (1–MAX_PREMIUM_UP_KBPS Kbps). A dimension that is unset
+ * from PREMIUM_UP_KBPS (1–MAX_PREMIUM_KBPS Kbps). A dimension that is unset
  * or not a number falls back to the built-in DEFAULT_PREMIUM_* value (the
  * numbers .env.example documents) with a one-time warning, so this NEVER
  * returns undefined: a premium plan always resolves to integers and cannot
- * silently drop to the standard VOUCHER_DEFAULT_* speed. An upload value above
- * the ceiling is clamped to the ceiling (also warned once) instead of being
- * thrown back to the 1 Mbps default.
+ * silently drop to the standard VOUCHER_DEFAULT_* speed. A Kbps value above the
+ * ceiling — in either direction — is clamped to the ceiling (also warned once)
+ * instead of being thrown back to the default.
  *
  * Every limit returned here is a plain integer in the 1–1024 range Omada
  * accepts per unit — never a string such as 'default'.
@@ -251,18 +288,10 @@ function resolvePremiumRateLimit() {
   if (!Number.isInteger(upKbps) || upKbps < 1) {
     warnPremiumDefault('PREMIUM_UP_KBPS', DEFAULT_PREMIUM_UP_KBPS);
     upKbps = DEFAULT_PREMIUM_UP_KBPS;
-  } else if (upKbps > MAX_PREMIUM_UP_KBPS) {
+  } else {
     // Above the ceiling: clamp to the ceiling, never down to the default. A
     // large-but-configured value must not be silently reduced to 1 Mbps.
-    const key = String(upKbps);
-    if (!warnedPremiumClamps.has(key)) {
-      warnedPremiumClamps.add(key);
-      console.warn(
-        '[qos] PREMIUM_UP_KBPS=' + upKbps + ' is above the ' + MAX_PREMIUM_UP_KBPS +
-        ' Kbps ceiling — clamping to ' + MAX_PREMIUM_UP_KBPS + ' Kbps.'
-      );
-    }
-    upKbps = MAX_PREMIUM_UP_KBPS;
+    upKbps = clampPremiumKbps('PREMIUM_UP_KBPS', upKbps);
   }
 
   // Upload goes through the same unit rule as everything else: 512 Kbps stays
@@ -413,7 +442,7 @@ module.exports = {
   DEFAULT_PREMIUM_AMOUNTS_PESOS,
   DEFAULT_PREMIUM_DOWN_MBPS,
   DEFAULT_PREMIUM_UP_KBPS,
-  MAX_PREMIUM_UP_KBPS,
+  MAX_PREMIUM_KBPS,
   KBPS_PER_MBPS,
   LEGACY_KBPS_FLOOR,
   rateLimitToKbps,
