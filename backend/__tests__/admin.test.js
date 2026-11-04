@@ -743,6 +743,37 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
     expect(parseInt(remaining.count, 10)).toBe(0);
   });
 
+  test('also clears sessions so the dashboard session and revenue metrics reset', async () => {
+    await seedWebhookEvents(2);
+    await getDb().run(
+      `INSERT INTO sessions (session_id, client_mac, voucher_type, state, duration_minutes, payment_amount)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['sess_clear_all_1', 'AA:BB:CC:DD:EE:01', 'standard', 'paused', 60, 5000]
+    );
+
+    const beforeStats = await request(app)
+      .get('/api/admin/stats')
+      .set('X-API-Key', VALID_KEY);
+    expect(beforeStats.body.stats.totalSessions).toBe(1);
+    expect(beforeStats.body.stats.pausedSessions).toBe(1);
+    expect(beforeStats.body.stats.totalRevenue).toBe(5000);
+
+    const res = await request(app)
+      .delete('/api/admin/transactions')
+      .set('X-API-Key', VALID_KEY);
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.deletedSessions).toBe(1);
+
+    const afterStats = await request(app)
+      .get('/api/admin/stats')
+      .set('X-API-Key', VALID_KEY);
+    expect(afterStats.body.stats.totalSessions).toBe(0);
+    expect(afterStats.body.stats.pausedSessions).toBe(0);
+    expect(afterStats.body.stats.totalRevenue).toBe(0);
+  });
+
   test('is safe to call when the log is already empty', async () => {
     const res = await request(app)
       .delete('/api/admin/transactions')

@@ -18,6 +18,7 @@
  *   PUT    /api/admin/payment-methods/:key   — Enable/disable a method, set/clear its logo
  *   GET    /api/admin/transactions — Paginated webhook payment transactions
  *   DELETE /api/admin/transactions — Clear all webhook payment transaction logs
+ *                                   and all session rows (dashboard reset)
  */
 
 const express = require('express');
@@ -697,23 +698,43 @@ router.get('/transactions', async (req, res, next) => {
   }
 });
 
-// Clear ALL webhook payment transaction logs (one-shot cleanup endpoint).
-// webhook_events is an append-only payment log used only for the Recent
-// Transactions table; nothing references its rows by foreign key, so emptying
-// it frees space without affecting sessions or vouchers. Protected by the
-// router-level requireAuth middleware.
+// Clear ALL payment logs and ALL session rows (one-shot dashboard reset).
+//
+// This backs the dashboard's "Clear All" button. The dashboard's "Total
+// Sessions", "Paused Sessions" and "Total Revenue" cards are all derived from
+// the sessions table by GET /api/admin/stats, so emptying webhook_events alone
+// left those numbers unchanged. Both tables are cleared in ONE transaction:
+// either the whole reset lands or neither table is touched.
+//
+// Nothing references sessions or webhook_events by foreign key (webhook_events
+// keeps a plain session_id string, and vouchers are linked by code), so no
+// dependent rows need deleting first. Note that this also removes live
+// sessions: the Omada authorization itself is not revoked here, only the local
+// records the dashboard counts. Protected by the router-level requireAuth
+// middleware.
 router.delete('/transactions', async (req, res, next) => {
   try {
     const db = getDb();
-    const countRow = await db.getOne('SELECT COUNT(*) AS count FROM webhook_events');
-    const before = parseInt(countRow?.count || 0, 10);
 
-    await db.run('DELETE FROM webhook_events');
+    const result = await db.transaction(async (tx) => {
+      const txCountRow = await tx.getOne('SELECT COUNT(*) AS count FROM webhook_events');
+      const before = parseInt(txCountRow?.count || 0, 10);
+
+      const sessionCountRow = await tx.getOne('SELECT COUNT(*) AS count FROM sessions');
+      const sessionsBefore = parseInt(sessionCountRow?.count || 0, 10);
+
+      await tx.run('DELETE FROM webhook_events');
+      await tx.run('DELETE FROM sessions');
+
+      return { before, sessionsBefore };
+    });
 
     res.json({
       success: true,
-      deleted: before,
-      message: `Deleted ${before} transaction log(s).`,
+      deleted: result.before,
+      deletedSessions: result.sessionsBefore,
+      message: `Deleted ${result.before} transaction log(s) and ` +
+        `${result.sessionsBefore} session(s). Dashboard session and revenue metrics reset.`,
     });
   } catch (err) {
     next(err);
