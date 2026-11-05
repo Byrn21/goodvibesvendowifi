@@ -1098,8 +1098,9 @@
        ================================================================ -->
   <!-- ================================================================
        HOW TO CONNECT GUIDE MODAL — instructional images
-       Auto-opens on the first visit of a browser session (see the IIFE
-       near the end of this file). Holds two portrait JPEGs (1792 x 2400):
+       Auto-opens on the first visit from a browser and is then suppressed by
+       a localStorage flag (see the IIFE near the end of this file). Holds two
+       portrait JPEGs (1792 x 2400):
        side by side on desktop,
        stacked on phones. Styled by .guide-modal* in assets/style.css and
        wired up by the inline IIFE near the end of this file.
@@ -1434,7 +1435,8 @@
   </script>
   <script>
     /* ================================================================
-       HOW TO CONNECT GUIDE MODAL — auto-opens once per browser session.
+       HOW TO CONNECT GUIDE MODAL — auto-opens once per browser, then stays
+       dismissed for good.
 
        Self-contained IIFE, same shape as the Contact Support / legal modal
        scripts above: it never touches the login form or portal.js.
@@ -1481,14 +1483,16 @@
 
       closeBtn.addEventListener('click', closeGuide);
 
-      // Auto-open on the first visit of a browser session. sessionStorage can
-      // throw in captive-portal WebViews (private mode / storage disabled), so
-      // every access is guarded: on failure the guide simply opens again.
+      // Auto-open on the first visit from a browser. The flag lives in
+      // localStorage, so a returning guest — new tab, new session, after a
+      // restart — never sees the guide again. localStorage can throw in
+      // captive-portal WebViews (private mode / storage disabled), so every
+      // access is guarded: on failure the guide simply opens again.
       var GUIDE_SEEN_KEY = 'gv_guide_seen';
 
       function hasSeenGuide() {
         try {
-          return window.sessionStorage.getItem(GUIDE_SEEN_KEY) === '1';
+          return window.localStorage.getItem(GUIDE_SEEN_KEY) === '1';
         } catch (err) {
           return false;
         }
@@ -1496,7 +1500,7 @@
 
       function markGuideSeen() {
         try {
-          window.sessionStorage.setItem(GUIDE_SEEN_KEY, '1');
+          window.localStorage.setItem(GUIDE_SEEN_KEY, '1');
         } catch (err) {
           /* storage unavailable — the guide will show again next load */
         }

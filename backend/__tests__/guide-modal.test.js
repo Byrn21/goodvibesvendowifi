@@ -3,12 +3,11 @@
  *
  * Locks in the visibility contract of index.html's "How to Connect" guide:
  *
- *   - it AUTO-OPENS on the first visit of a browser session, so a guest who
- *     has just paid sees the instructions before hitting the voucher form;
- *   - it records the visit in sessionStorage under `gv_guide_seen`, so it does
- *     not pop up again on a reload or on the success/status pages within that
- *     session;
- *   - if sessionStorage is unavailable (captive-portal WebViews, private mode)
+ *   - it AUTO-OPENS on the first visit from a browser;
+ *   - it records the dismissal in localStorage under `gv_guide_seen`, so a
+ *     RETURNING guest is not shown the guide again — not on a reload, not in a
+ *     new tab, not after closing the browser;
+ *   - if localStorage is unavailable (captive-portal WebViews, private mode)
  *     the guide still opens instead of breaking the portal;
  *   - and the close paths (X, dark overlay, Escape) still work.
  *
@@ -93,8 +92,11 @@ function createElement(id) {
   };
 }
 
-/** Map-backed sessionStorage, so a "second visit" can reuse the same store. */
-function makeSessionStorage(seed) {
+/**
+ * Map-backed localStorage. It outlives any single page load, which is exactly
+ * the property under test: a "returning guest" is a second load sharing it.
+ */
+function makeLocalStorage(seed) {
   const data = new Map(Object.entries(seed || {}));
   return {
     data,
@@ -105,8 +107,8 @@ function makeSessionStorage(seed) {
 }
 
 /** Stand-in for private mode / storage disabled in a captive-portal WebView. */
-function throwingSessionStorage() {
-  const boom = () => { throw new Error('SecurityError: sessionStorage disabled'); };
+function throwingLocalStorage() {
+  const boom = () => { throw new Error('SecurityError: localStorage disabled'); };
   return { getItem: boom, setItem: boom, removeItem: boom };
 }
 
@@ -114,7 +116,7 @@ function throwingSessionStorage() {
  * Load the real guide script into a fresh context.
  *
  * @param {Object}  [opts]
- * @param {Object}  [opts.sessionStorage] storage to reuse (default: empty)
+ * @param {Object}  [opts.localStorage] storage to reuse (default: empty)
  * @param {string}  [opts.readyState] document.readyState seen by the script
  * @returns {Object} element handles, storage, and document-event drivers
  */
@@ -140,10 +142,12 @@ function loadPage(opts = {}) {
     removeEventListener() {},
   };
 
-  const sessionStorage = opts.sessionStorage || makeSessionStorage();
+  const localStorage = opts.localStorage || makeLocalStorage();
 
+  // Deliberately no sessionStorage in the context: the dismissal has to
+  // survive a new tab, so the script must not be able to fall back to it.
   const context = {
-    window: { document: doc, sessionStorage },
+    window: { document: doc, localStorage },
     document: doc,
     console: { warn() {}, log() {}, error() {} },
     setTimeout,
@@ -156,8 +160,8 @@ function loadPage(opts = {}) {
     overlay: getEl('guide-modal'),
     closeBtn: getEl('guide-modal-close'),
     body: doc.body,
-    sessionStorage,
-    seenFlag: sessionStorage.data ? sessionStorage.data.get(GUIDE_SEEN_KEY) : undefined,
+    localStorage,
+    seenFlag: localStorage.data ? localStorage.data.get(GUIDE_SEEN_KEY) : undefined,
     /** Fire any DOMContentLoaded listeners the script registered. */
     fireDomContentLoaded() {
       (documentListeners.DOMContentLoaded || []).forEach((fn) => fn({}));
@@ -170,7 +174,7 @@ function loadPage(opts = {}) {
   };
 }
 
-describe('How to Connect guide — auto-opens once per browser session', () => {
+describe('How to Connect guide — auto-opens once per browser', () => {
   test('opens by itself on the first visit', () => {
     const page = loadPage();
 
@@ -181,27 +185,47 @@ describe('How to Connect guide — auto-opens once per browser session', () => {
     expect(page.closeBtn.focused).toBe(true);
   });
 
-  test('records the visit in sessionStorage under gv_guide_seen', () => {
+  test('records the dismissal in localStorage under gv_guide_seen', () => {
     const page = loadPage();
 
-    expect(page.sessionStorage.getItem(GUIDE_SEEN_KEY)).toBe('1');
+    expect(page.localStorage.getItem(GUIDE_SEEN_KEY)).toBe('1');
     expect(GUIDE_JS).toContain('gv_guide_seen');
+    expect(GUIDE_JS).toContain('localStorage');
   });
 
-  test('does not open again on a later visit in the same session', () => {
-    // Same storage object across both loads = reload within one session.
-    const sessionStorage = makeSessionStorage();
+  test('does not fall back to sessionStorage', () => {
+    // sessionStorage would reset in a new tab, which is the friction this
+    // change removes — so the shipped script must not reference it at all.
+    expect(GUIDE_JS).not.toMatch(/sessionStorage/);
+  });
 
-    const first = loadPage({ sessionStorage });
-    expect(first.overlay.classList.contains('is-open')).toBe(true);
-    first.closeBtn.fire('click');
-    expect(first.overlay.classList.contains('is-open')).toBe(false);
+  test('does not open again for a returning guest (new browser session)', () => {
+    // One store across both loads = the guest closes the browser and comes back.
+    const localStorage = makeLocalStorage();
 
-    const second = loadPage({ sessionStorage });
-    expect(second.overlay.classList.contains('is-open')).toBe(false);
-    expect(second.body.classList.contains('modal-open')).toBe(false);
-    // The flag is untouched by the second load, so the portal stays usable.
-    expect(sessionStorage.getItem(GUIDE_SEEN_KEY)).toBe('1');
+    const firstVisit = loadPage({ localStorage });
+    expect(firstVisit.overlay.classList.contains('is-open')).toBe(true);
+    firstVisit.closeBtn.fire('click');
+    expect(firstVisit.overlay.classList.contains('is-open')).toBe(false);
+
+    const returnVisit = loadPage({ localStorage });
+    expect(returnVisit.overlay.classList.contains('is-open')).toBe(false);
+    expect(returnVisit.body.classList.contains('modal-open')).toBe(false);
+    expect(returnVisit.closeBtn.focused).toBe(false);
+    // Still recorded, so every later visit stays quiet too.
+    expect(localStorage.getItem(GUIDE_SEEN_KEY)).toBe('1');
+  });
+
+  test('stays dismissed even if the guest never closed it manually', () => {
+    // The flag is written when the guide opens, not when it is dismissed, so a
+    // guest who paid and navigated away is not shown it again.
+    const localStorage = makeLocalStorage();
+
+    const firstVisit = loadPage({ localStorage });
+    expect(firstVisit.seenFlag).toBe('1');
+
+    const returnVisit = loadPage({ localStorage });
+    expect(returnVisit.overlay.classList.contains('is-open')).toBe(false);
   });
 
   test('waits for DOMContentLoaded when the parser is still running', () => {
@@ -214,11 +238,11 @@ describe('How to Connect guide — auto-opens once per browser session', () => {
     page.fireDomContentLoaded();
 
     expect(page.overlay.classList.contains('is-open')).toBe(true);
-    expect(page.sessionStorage.getItem(GUIDE_SEEN_KEY)).toBe('1');
+    expect(page.localStorage.getItem(GUIDE_SEEN_KEY)).toBe('1');
   });
 
-  test('still opens when sessionStorage throws (private mode / WebView)', () => {
-    const page = loadPage({ sessionStorage: throwingSessionStorage() });
+  test('still opens when localStorage throws (private mode / WebView)', () => {
+    const page = loadPage({ localStorage: throwingLocalStorage() });
 
     // Storage failure must not swallow the onboarding, and must not throw.
     expect(page.overlay.classList.contains('is-open')).toBe(true);
