@@ -442,9 +442,6 @@
             <button type="button" class="btn btn--secondary btn--full" id="claim-voucher-btn">Claim Voucher</button>
             <p class="form-hint form-hint--centered">Already paid? Claim your voucher with the last 4 digits of your reference number.</p>
             <button id="open-status-modal-btn" class="btn btn--outline btn--full" type="button" style="margin-top: 8px;">Check Voucher Status / Reconnect</button>
-            <!-- On-demand help. Nothing opens by itself: a pop-up over the
-                 voucher form was interrupting guests who never needed it. -->
-            <button type="button" id="guide-open-btn" class="text-link guide-open-link" aria-haspopup="dialog">Need help connecting?</button>
           </div>
         </section>
       <!-- ================================================================
@@ -1101,10 +1098,9 @@
        ================================================================ -->
   <!-- ================================================================
        HOW TO CONNECT GUIDE MODAL — instructional images
-       Opens ONLY when the guest taps "Need help connecting?" under the
-       voucher form (see the IIFE near the end of this file). It never
-       auto-opens, so the landing page and claim flow are usable immediately.
-       Holds two portrait JPEGs (1792 x 2400): side by side on desktop,
+       Auto-opens on the first visit of a browser session (see the IIFE
+       near the end of this file). Holds two portrait JPEGs (1792 x 2400):
+       side by side on desktop,
        stacked on phones. Styled by .guide-modal* in assets/style.css and
        wired up by the inline IIFE near the end of this file.
        ================================================================ -->
@@ -1438,12 +1434,10 @@
   </script>
   <script>
     /* ================================================================
-       HOW TO CONNECT GUIDE MODAL — opened on demand.
+       HOW TO CONNECT GUIDE MODAL — auto-opens once per browser session.
 
        Self-contained IIFE, same shape as the Contact Support / legal modal
        scripts above: it never touches the login form or portal.js.
-       Opened by "Need help connecting?" (#guide-open-btn) only — there is no
-       timed or first-visit trigger, and no sessionStorage flag to consult.
        Closes via the X, a click on the dark overlay, or Escape; Tab is
        kept inside the dialog while it is open.
        ================================================================ */
@@ -1487,12 +1481,40 @@
 
       closeBtn.addEventListener('click', closeGuide);
 
-      // Explicit trigger only. The guide used to auto-open once per browser
-      // session on load, which put a full-screen overlay between the guest and
-      // the voucher form; the link under the claim button replaces it, so
-      // nothing is opened unless the guest asks for help.
-      var openBtn = document.getElementById('guide-open-btn');
-      if (openBtn) openBtn.addEventListener('click', openGuide);
+      // Auto-open on the first visit of a browser session. sessionStorage can
+      // throw in captive-portal WebViews (private mode / storage disabled), so
+      // every access is guarded: on failure the guide simply opens again.
+      var GUIDE_SEEN_KEY = 'gv_guide_seen';
+
+      function hasSeenGuide() {
+        try {
+          return window.sessionStorage.getItem(GUIDE_SEEN_KEY) === '1';
+        } catch (err) {
+          return false;
+        }
+      }
+
+      function markGuideSeen() {
+        try {
+          window.sessionStorage.setItem(GUIDE_SEEN_KEY, '1');
+        } catch (err) {
+          /* storage unavailable — the guide will show again next load */
+        }
+      }
+
+      function autoOpenGuide() {
+        if (hasSeenGuide()) return;
+        markGuideSeen();
+        openGuide();
+      }
+
+      // This script sits at the end of <body>, but keep the guard for safety:
+      // readyState is 'loading' until the parser has finished the document.
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', autoOpenGuide);
+      } else {
+        autoOpenGuide();
+      }
 
       // Click on the dark overlay (outside the dialog) closes the modal
       overlay.addEventListener('click', function (e) {
