@@ -3,7 +3,7 @@
  *
  * All endpoints require an API key passed in the `X-API-Key` header,
  * or a valid login session token passed in the `Authorization: Bearer` header,
- * matching process.env.ADMIN_API_KEY.
+ * matching ADMIN_API_KEY from config/index.js.
  *
  * Endpoints:
  *   POST   /api/admin/login      — Authenticate and receive a session token
@@ -38,8 +38,12 @@ const {
   listPaymentMethodStates,
   updatePaymentMethod,
 } = require('../services/payment-methods');
+// Single source of truth for the operator credential: the same constant that
+// guards POST /api/session/expire (routes/session.js). Never read the env var
+// here — both consumers must resolve one identical value at process start,
+// including its production fail-closed default.
+const { ADMIN_API_KEY } = require('../config');
 
-const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ADMIN_API_KEY;
 
