@@ -389,7 +389,7 @@ portal to refresh its AP/SSID association.
 |---|---|---|---|
 | `DEFAULT_SESSION_DURATION` | `services/session.js` | `60` | Default session duration (minutes). |
 | `SESSION_ENFORCE_INTERVAL` | `services/session.js` | `60000` | How often the expiration worker checks sessions (ms). |
-| `PREMIUM_HARD_EXPIRY_HOURS` | `config/index.js` | `72` | Hard deadline of a Premium pass (hours), counted from the moment its session was created. Pausing never extends it: once it passes, the pass is expired with `expire_reason = 'hard_expired'` even if frozen time is still on it. BUSINESS CONSTANT — intentionally **not** env-configurable; change it in `config/index.js`. Standard sessions never have one. |
+| `PREMIUM_HARD_EXPIRY_HOURS` | `config/index.js` | `168` | Hard deadline of a Premium pass (hours), counted from the moment its session was created. Pausing never extends it: once it passes, the pass is expired with `expire_reason = 'hard_expired'` even if frozen time is still on it. BUSINESS CONSTANT — intentionally **not** env-configurable; change it in `config/index.js`. Standard sessions never have one. |
 | `PAUSE_ENABLED` | `routes/session.js` | *(unset → disabled)* | Must be exactly `true` to allow session pause/resume. |
 
 A Premium pass may pause and resume as often as the guest likes inside

@@ -3,7 +3,7 @@
  *
  * Covers the Premium "hard expiry": a Premium pass may be paused and resumed as
  * often as the guest likes, but it is VOID once PREMIUM_HARD_EXPIRY_HOURS
- * (default 72 h) have passed since the session was created — however much
+ * (168 h = 7 days) have passed since the session was created — however much
  * frozen time is still on it.
  *
  * Verified here:
@@ -68,7 +68,7 @@ async function absoluteExpiresAtOf(sessionId) {
   return row ? row.absolute_expires_at : undefined;
 }
 
-/** Move a session's absolute deadline into the past, as if 72 h had elapsed. */
+/** Move a session's absolute deadline into the past, as if 168 h had elapsed. */
 async function forceHardExpiry(sessionId, msAgo = HOUR_MS) {
   const past = new Date(Date.now() - msAgo).toISOString();
   await getDb().run(
@@ -96,11 +96,11 @@ beforeEach(async () => {
 });
 
 describe('Premium hard expiry — session creation', () => {
-  test('the configured window is 72 hours', () => {
-    expect(PREMIUM_HARD_EXPIRY_HOURS).toBe(72);
+  test('the configured window is 168 hours', () => {
+    expect(PREMIUM_HARD_EXPIRY_HOURS).toBe(168);
   });
 
-  test('a Premium session is stored with an absolute deadline 72 h out', async () => {
+  test('a Premium session is stored with an absolute deadline 168 h out', async () => {
     await sessionService.recordSession({
       sessionId: 'sess_prem_create',
       clientMac: MAC,
@@ -113,8 +113,8 @@ describe('Premium hard expiry — session creation', () => {
     expect(stored).toBeTruthy();
 
     const delta = new Date(stored).getTime() - Date.now();
-    expect(delta).toBeGreaterThan(71.5 * HOUR_MS);
-    expect(delta).toBeLessThanOrEqual(72 * HOUR_MS + 5000);
+    expect(delta).toBeGreaterThan(167.5 * HOUR_MS);
+    expect(delta).toBeLessThanOrEqual(168 * HOUR_MS + 5000);
 
     const session = await sessionService.getSession('sess_prem_create');
     expect(session.absoluteExpiresAt).toBeTruthy();
@@ -402,11 +402,11 @@ describe('Premium hard expiry — status payload', () => {
     expect(res.body.state).toBe('active');
     expect(res.body.canPause).toBe(true);
     expect(res.body.absolute_expires_at).toBeTruthy();
-    // Same value in both spellings, and roughly 72 h out.
+    // Same value in both spellings, and roughly 168 h out.
     expect(new Date(res.body.absoluteExpiresAt).getTime())
       .toBe(new Date(res.body.absolute_expires_at).getTime());
     expect(new Date(res.body.absolute_expires_at).getTime() - Date.now())
-      .toBeGreaterThan(71.5 * HOUR_MS);
+      .toBeGreaterThan(167.5 * HOUR_MS);
   });
 
   test('a hard-expired paused Premium session reports expired with zero remaining', async () => {

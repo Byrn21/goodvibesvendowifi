@@ -51,7 +51,7 @@ function isPausableVoucherType(voucherType) {
 /**
  * hardExpiryFor — the ABSOLUTE deadline a session created now would carry.
  *
- * Premium passes get one (config: PREMIUM_HARD_EXPIRY_HOURS, default 72 h);
+ * Premium passes get one (config: PREMIUM_HARD_EXPIRY_HOURS, 168 h = 7 days);
  * Standard sessions get null — they are strictly continuous and end when their
  * purchased active time runs out, so a hard deadline would cut long vouchers
  * (a multi-day Standard pass, say) short.

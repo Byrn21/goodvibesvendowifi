@@ -28,13 +28,13 @@ const PORTAL_CONTEXT_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
 // ── Premium hard expiry ────────────────────────────────────────────────
 // BUSINESS CONSTANT (intentionally NOT env-configurable, same reasoning as
-// the values above): how long a Premium pass may exist AT ALL, counted from
-// the moment its session was created. Premium guests get unlimited
-// pause/resume — pausing protects their purchased minutes — but the pass is
-// void once this window closes, however much frozen time it still holds, so a
-// cheap pass cannot be kept alive indefinitely. 72 hours is three days of
-// "pause overnight, resume tomorrow" without an open-ended obligation.
-const PREMIUM_HARD_EXPIRY_HOURS = 72;
+// the values above): how long a Premium pass may exist AT ALL — 7 days from
+// purchase, counted from the moment its session was created. Premium guests
+// get unlimited pause/resume — pausing protects their purchased minutes — but
+// the pass is void once this window closes, however much frozen time it still
+// holds, so a cheap pass cannot be kept alive indefinitely. A full week keeps
+// the published "1 week validity to pause" promise (index.html).
+const PREMIUM_HARD_EXPIRY_HOURS = 168;
 
 // ── Pending payment verification ───────────────────────────────────────
 // BUSINESS CONSTANT: how long a claim waiting on MacroDroid screen-scraping
