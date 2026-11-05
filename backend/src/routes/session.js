@@ -11,6 +11,7 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const {
   getSession,
@@ -24,6 +25,7 @@ const {
   getSessionByVoucher,
 } = require('../services/session');
 const omadaService = require('../services/omada');
+const { ADMIN_API_KEY } = require('../config');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
 const { resolveClientMacByIp } = require('../utils/portal-context');
@@ -71,6 +73,45 @@ function rejectIfNotOwner(req, res, session) {
     error: 'This session does not belong to this device.',
   });
   return true;
+}
+
+/**
+ * readAdminKey — the operator credential supplied with this request.
+ *
+ * The header is the documented transport; the body field exists for internal
+ * callers that already POST JSON. It is deliberately never read from a query
+ * string, which would leak it into access logs, browser history and Referer
+ * headers.
+ *
+ * @param {Object} req Express request
+ * @returns {string} the supplied key, '' when none
+ */
+function readAdminKey(req) {
+  const header = req && req.headers ? req.headers['x-admin-key'] : '';
+  if (typeof header === 'string' && header.trim()) return header.trim();
+  const body = req && req.body ? req.body.adminKey : '';
+  return typeof body === 'string' ? body.trim() : '';
+}
+
+/**
+ * isAdminRequest — constant-time comparison against ADMIN_API_KEY.
+ *
+ * Fail-closed: no configured key or no supplied key is false, so the guarded
+ * route refuses everyone rather than admitting everyone. The length check runs
+ * first because timingSafeEqual throws on mismatched buffer sizes.
+ *
+ * @param {Object} req Express request
+ * @returns {boolean}
+ */
+function isAdminRequest(req) {
+  const configured = String(ADMIN_API_KEY || '');
+  const provided = readAdminKey(req);
+  if (!configured || !provided) return false;
+
+  const given = Buffer.from(provided, 'utf8');
+  const want = Buffer.from(configured, 'utf8');
+  if (given.length !== want.length) return false;
+  return crypto.timingSafeEqual(given, want);
 }
 
 // ── GET /api/session/status ──────────────────────────────────
@@ -569,9 +610,22 @@ router.post('/resume', async (req, res, next) => {
 });
 
 // ── POST /api/session/expire ──────────────────────────────────
-// This is an admin/internal endpoint. In production, add admin auth.
+// Admin/internal: this cuts a guest offline immediately, so it is the one
+// session route that requires an OPERATOR credential instead of a device
+// identity. `x-admin-key` (or adminKey in the body) must match ADMIN_API_KEY —
+// anything else is a 401 and nothing is expired.
 router.post('/expire', async (req, res, next) => {
   try {
+    // Checked before the body is parsed for a sessionId: an unauthenticated
+    // caller learns nothing about which ids exist, and cannot trigger a write.
+    if (!isAdminRequest(req)) {
+      return res.status(401).json({
+        success: false,
+        code: 'UNAUTHORIZED',
+        error: 'Admin authorization required.',
+      });
+    }
+
     const { sessionId } = req.body;
 
     if (!sessionId) {

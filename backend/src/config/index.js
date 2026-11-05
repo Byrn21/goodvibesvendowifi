@@ -16,6 +16,16 @@
 // .env without a code change; falls back to the documented default.
 const PESOS_PER_MINUTE = parseInt(process.env.MACRODROID_PESOS_PER_MINUTE || '10', 10);
 
+// ── Admin API key ───────────────────────────────────────────────────────
+// ENV-CONFIGURABLE: the operator credential for internal endpoints a guest must
+// never reach (POST /api/session/expire, which cuts a paying session offline).
+// The development default is applied ONLY outside production: with
+// NODE_ENV=production and no ADMIN_API_KEY the value is empty, so the guard
+// fails closed (401 for everyone) instead of shipping a known key that any
+// guest could replay. Set ADMIN_API_KEY in the deployment env to use it.
+const ADMIN_API_KEY = process.env.ADMIN_API_KEY
+  || (process.env.NODE_ENV === 'production' ? '' : 'dev_admin_key');
+
 // ── Portal context staleness ────────────────────────────────────────────
 // BUSINESS CONSTANT (intentionally NOT env-configurable, consistent with
 // the payment rate above): how long a portal_client_context row captured
@@ -101,6 +111,7 @@ function macroDroidVerifyUrl(ref, mac) {
 const OMADA_TIME_UNIT = (process.env.OMADA_TIME_UNIT || 'ms').toLowerCase();
 
 module.exports = {
+  ADMIN_API_KEY,
   PESOS_PER_MINUTE,
   PORTAL_CONTEXT_MAX_AGE_MS,
   PREMIUM_HARD_EXPIRY_HOURS,
