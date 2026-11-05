@@ -33,6 +33,13 @@ const request = require('supertest');
 const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 const sessionService = require('../src/services/session');
+const omadaService = require('../src/services/omada');
+const { issueSessionToken } = require('../src/utils/session-token');
+
+/** Cookie header proving this device owns `sessionId` (pause/resume authz). */
+function asDevice(sessionId) {
+  return 'portal_session=' + issueSessionToken(sessionId);
+}
 
 const MAC = 'AA:BB:CC:DD:EE:FF';
 const OTHER_MAC = '11:22:33:44:55:66';
@@ -783,5 +790,230 @@ describe('GET /api/session/status?voucher= — identity cookie', () => {
     expect(res.body.active).toBe(false);
     expect(res.body.error).toBe('EXPIRED');
     expect(readSessionCookieLine(res)).toBe('');
+  });
+});
+
+// ── Phase 2 hardening: hard-expiry bypass, zero time, deauth, ownership ──────
+
+describe('POST /api/session/reauthorize — the absolute deadline is final', () => {
+  test('a pass past its hard deadline is not reauthorized, even with expires_at in the future', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_reau_hard_dead',
+      clientMac: MAC,
+      clientIp: '10.0.0.5',
+      apMac: 'AA:AA:AA:AA:AA:AA',
+      ssidName: 'GuestWiFi',
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 86400,
+    });
+
+    // Exactly the shape the old code re-authorized: still 'active', expires_at
+    // an hour out, but the pass's absolute deadline already behind us.
+    await getDb().run(
+      `UPDATE sessions SET expires_at = ?, absolute_expires_at = ?
+        WHERE session_id = ?`,
+      [
+        new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        new Date(Date.now() - 60 * 1000).toISOString(),
+        'sess_reau_hard_dead',
+      ]
+    );
+
+    const authSpy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
+
+    const res = await request(app)
+      .post('/api/session/reauthorize')
+      .send({ clientMac: MAC });
+
+    expect(res.status).toBe(404);
+    expect(res.body.active).toBe(false);
+    // Nothing was handed to the controller: no access was re-opened.
+    expect(authSpy).not.toHaveBeenCalled();
+    authSpy.mockRestore();
+
+    // The pass is terminal, and with the hard reason.
+    const swept = await sessionService.getSession('sess_reau_hard_dead');
+    expect(swept.state).toBe('expired');
+    const row = await getDb().getOne(
+      'SELECT expire_reason FROM sessions WHERE session_id = ?',
+      ['sess_reau_hard_dead']
+    );
+    expect(row.expire_reason).toBe('hard_expired');
+  });
+
+  test('the service refuses a session that is not active, before calling the controller', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_reau_svc_dead',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+    await sessionService.expireSession('sess_reau_svc_dead', 'time_expired');
+
+    const authSpy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
+
+    await expect(sessionService.reauthorizeSession('sess_reau_svc_dead'))
+      .rejects.toMatchObject({ code: 'SESSION_EXPIRED' });
+    expect(authSpy).not.toHaveBeenCalled();
+    authSpy.mockRestore();
+  });
+});
+
+describe('POST /api/session/resume — a frozen zero is not free time', () => {
+  test('remaining_seconds = 0 is refused with 410 and the row is expired', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_zero_resume',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+    // A pause in the final second floors to 0 — the old `||` fallback turned
+    // that into a whole fresh hour.
+    await getDb().run(
+      `UPDATE sessions SET state = 'paused', paused_at = ?, remaining_seconds = 0, expires_at = NULL
+        WHERE session_id = ?`,
+      [new Date().toISOString(), 'sess_zero_resume']
+    );
+
+    const authSpy = jest.spyOn(omadaService, 'authenticateClient').mockResolvedValue({ success: true });
+
+    const res = await request(app)
+      .post('/api/session/resume')
+      .set('Cookie', asDevice('sess_zero_resume'))
+      .send({ sessionId: 'sess_zero_resume' });
+
+    expect(res.status).toBe(410);
+    expect(res.body.code).toBe('SESSION_EXPIRED');
+    expect(authSpy).not.toHaveBeenCalled();
+    authSpy.mockRestore();
+
+    const row = await getDb().getOne(
+      'SELECT state, expire_reason FROM sessions WHERE session_id = ?',
+      ['sess_zero_resume']
+    );
+    expect(row.state).toBe('expired');
+    expect(row.expire_reason).toBe('time_expired');
+  });
+});
+
+describe('POST /api/session/pause — the timer only stops when the client is really off', () => {
+  test('a failed Omada deauth aborts the pause, keeps the timer, and answers 502', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_pause_deauth',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+    const before = await sessionService.getSession('sess_pause_deauth');
+
+    // No route accepted the unauth: the guest is still online.
+    const spy = jest.spyOn(omadaService, 'unauthenticateClient')
+      .mockResolvedValue({ success: false, path: 'admin+operator rejected' });
+
+    await expect(sessionService.pauseSession('sess_pause_deauth'))
+      .rejects.toMatchObject({ code: 'OMADA_ERROR' });
+    spy.mockRestore();
+
+    const after = await sessionService.getSession('sess_pause_deauth');
+    expect(after.state).toBe('active');
+    expect(after.pausedAt).toBeNull();
+    expect(after.expiresAt).toBe(before.expiresAt);
+
+    const routeSpy = jest.spyOn(omadaService, 'unauthenticateClient')
+      .mockResolvedValue({ success: false, path: 'admin+operator rejected' });
+    const res = await request(app)
+      .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_pause_deauth'))
+      .send({ sessionId: 'sess_pause_deauth' });
+    routeSpy.mockRestore();
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('OMADA_ERROR');
+  });
+});
+
+describe('POST /api/session/pause|resume — a sessionId is not proof of ownership', () => {
+  async function seedOwned(sessionId) {
+    await sessionService.recordSession({
+      sessionId,
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+  }
+
+  test('pause without any device identity is rejected with 403 SESSION_MISMATCH', async () => {
+    await seedOwned('sess_owner_missing');
+
+    const res = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_owner_missing' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SESSION_MISMATCH');
+
+    const after = await sessionService.getSession('sess_owner_missing');
+    expect(after.state).toBe('active');
+  });
+
+  test("pause with another session's token is rejected and the session stays active", async () => {
+    await seedOwned('sess_owner_other');
+
+    const res = await request(app)
+      .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_owner_someone_else'))
+      .send({ sessionId: 'sess_owner_other' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SESSION_MISMATCH');
+
+    const after = await sessionService.getSession('sess_owner_other');
+    expect(after.state).toBe('active');
+  });
+
+  test('pause with the matching token succeeds', async () => {
+    await seedOwned('sess_owner_ok');
+
+    const res = await request(app)
+      .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_owner_ok'))
+      .send({ sessionId: 'sess_owner_ok' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('paused');
+  });
+
+  test("resume with another session's token is rejected and the session stays paused", async () => {
+    await seedOwned('sess_owner_resume');
+    await sessionService.pauseSession('sess_owner_resume');
+
+    const res = await request(app)
+      .post('/api/session/resume')
+      .set('Cookie', asDevice('sess_owner_someone_else'))
+      .send({ sessionId: 'sess_owner_resume' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SESSION_MISMATCH');
+
+    const after = await sessionService.getSession('sess_owner_resume');
+    expect(after.state).toBe('paused');
+  });
+
+  test('resume with the matching token succeeds', async () => {
+    await seedOwned('sess_owner_resume_ok');
+    await sessionService.pauseSession('sess_owner_resume_ok');
+
+    const res = await request(app)
+      .post('/api/session/resume')
+      .set('Cookie', asDevice('sess_owner_resume_ok'))
+      .send({ sessionId: 'sess_owner_resume_ok' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('active');
   });
 });

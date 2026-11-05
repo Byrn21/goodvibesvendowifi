@@ -47,6 +47,15 @@ const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 const sessionService = require('../src/services/session');
 const { PREMIUM_HARD_EXPIRY_HOURS } = require('../src/config');
+const { issueSessionToken } = require('../src/utils/session-token');
+
+/**
+ * Cookie header proving this device owns `sessionId`. Pause and resume now
+ * require the signed identity GET /status issues, so fixtures present it.
+ */
+function asDevice(sessionId) {
+  return 'portal_session=' + issueSessionToken(sessionId);
+}
 
 const HOUR_MS = 60 * 60 * 1000;
 const MAC = 'aa:bb:cc:dd:ee:ff';
@@ -155,12 +164,14 @@ describe('Premium hard expiry — unlimited pauses inside the window', () => {
     for (let cycle = 0; cycle < 3; cycle++) {
       const paused = await request(app)
         .post('/api/session/pause')
+        .set('Cookie', asDevice('sess_prem_multi'))
         .send({ sessionId: 'sess_prem_multi' });
       expect(paused.status).toBe(200);
       expect(paused.body.state).toBe('paused');
 
       const resumed = await request(app)
         .post('/api/session/resume')
+        .set('Cookie', asDevice('sess_prem_multi'))
         .send({ sessionId: 'sess_prem_multi' });
       expect(resumed.status).toBe(200);
       expect(resumed.body.state).toBe('active');
@@ -191,6 +202,7 @@ describe('Premium hard expiry — unlimited pauses inside the window', () => {
 
     const res = await request(app)
       .post('/api/session/resume')
+      .set('Cookie', asDevice('sess_prem_long_pause'))
       .send({ sessionId: 'sess_prem_long_pause' });
 
     expect(res.status).toBe(200);
@@ -208,6 +220,7 @@ describe('Premium hard expiry — unlimited pauses inside the window', () => {
 
     const res = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_std_pause'))
       .send({ sessionId: 'sess_std_pause' });
 
     expect(res.status).toBe(403);
@@ -228,6 +241,7 @@ describe('Premium hard expiry — past the deadline', () => {
 
     const res = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_prem_active_late'))
       .send({ sessionId: 'sess_prem_active_late' });
 
     expect(res.status).toBe(410);
@@ -254,6 +268,7 @@ describe('Premium hard expiry — past the deadline', () => {
     // Pause while still inside the window, then let the hard deadline pass.
     const paused = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_prem_paused_late'))
       .send({ sessionId: 'sess_prem_paused_late' });
     expect(paused.status).toBe(200);
 
@@ -267,6 +282,7 @@ describe('Premium hard expiry — past the deadline', () => {
 
     const res = await request(app)
       .post('/api/session/resume')
+      .set('Cookie', asDevice('sess_prem_paused_late'))
       .send({ sessionId: 'sess_prem_paused_late' });
 
     expect(res.status).toBe(410);

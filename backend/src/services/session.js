@@ -469,22 +469,36 @@ async function pauseSession(sessionId) {
     ? Math.max(0, Math.floor((expiresAtMs - now.getTime()) / 1000))
     : Math.max(0, Math.floor(session.remainingSeconds || 0));
 
-  await db.run(`
-    UPDATE sessions
-    SET state = 'paused', paused_at = ?, remaining_seconds = ?, expires_at = NULL, updated_at = ?
-    WHERE session_id = ?
-  `, [now.toISOString(), remainingSeconds, now.toISOString(), sessionId]);
-
-  // Tell Omada to de-authorize the client
+  // Deauthorize BEFORE the state write. Freezing the timer while the client is
+  // still online would hand out unmetered browsing: the guest keeps using the
+  // network with a stopped clock. So a failed or refused unauth aborts the
+  // pause entirely and the countdown keeps running.
+  let revoked;
   try {
-    await omadaService.unauthenticateClient({
+    revoked = await omadaService.unauthenticateClient({
       clientMac: session.clientMac,
       apMac: session.apMac,
       ssidName: session.ssidName,
     });
   } catch (err) {
-    console.warn('[pauseSession] Omada unauth failed:', err.message);
+    revoked = { success: false, path: 'exception', error: err.message };
   }
+
+  if (!revoked || revoked.success === false) {
+    console.error(
+      '[pauseSession] Omada did NOT revoke access for ' + session.clientMac +
+      ' (path=' + (revoked && revoked.path) + ') — pause refused so the timer keeps running'
+    );
+    const err = new Error('Could not pause because the network session could not be stopped. Please try again.');
+    err.code = 'OMADA_ERROR';
+    throw err;
+  }
+
+  await db.run(`
+    UPDATE sessions
+    SET state = 'paused', paused_at = ?, remaining_seconds = ?, expires_at = NULL, updated_at = ?
+    WHERE session_id = ?
+  `, [now.toISOString(), remainingSeconds, now.toISOString(), sessionId]);
 
   return await getSession(sessionId);
 }
@@ -522,8 +536,39 @@ async function resumeSession(sessionId) {
     throw err;
   }
 
-    const remaining = session.remainingSeconds || (session.duration || 60) * 60;
-  const expiresAt = new Date(Date.now() + remaining * 1000).toISOString();
+  // A frozen 0 means the pass has no time left. `||` used to turn that into a
+  // WHOLE fresh duration (0 is falsy), so a pause landing in the final second
+  // granted a brand-new session on resume. Only a genuinely absent value —
+  // rows written before remaining_seconds was populated — may fall back.
+  const storedRemaining = session.remainingSeconds;
+  const remaining = (storedRemaining === null || storedRemaining === undefined)
+    ? (session.duration || 60) * 60
+    : Math.max(0, Math.floor(Number(storedRemaining)));
+
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    await expireSession(sessionId, 'time_expired', session);
+    const err = new Error('This pass has no time left to resume');
+    err.code = 'SESSION_EXPIRED';
+    throw err;
+  }
+
+  const nowMs = Date.now();
+  const hardDeadlineMs = session.absoluteExpiresAt
+    ? new Date(session.absoluteExpiresAt).getTime()
+    : Infinity;
+
+  // A resume must never run past the pass's absolute deadline, however much
+  // frozen time it still holds (the deadline is the ceiling, not a hint).
+  const expiresAtMs = Math.min(nowMs + remaining * 1000, hardDeadlineMs);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+    await expireSession(sessionId, 'hard_expired', session);
+    const err = new Error('This pass has reached its absolute expiry and can no longer be resumed');
+    err.code = 'HARD_EXPIRED';
+    throw err;
+  }
+
+  const expiresAt = new Date(expiresAtMs).toISOString();
+  const grantedSeconds = Math.max(1, Math.floor((expiresAtMs - nowMs) / 1000));
 
   const username = (session.voucherType === 'premium' ? 'prem_' : 'paid_') + sessionId;
 
@@ -535,7 +580,7 @@ async function resumeSession(sessionId) {
       apMac: session.apMac,
       ssidName: session.ssidName,
       radioId: session.radioId || 0,
-      durationMinutes: Math.ceil(remaining / 60),
+      durationMinutes: Math.ceil(grantedSeconds / 60),
       sessionId,
       // Re-send the same voucher the session was opened with, so every
       // extPortal/auth call carries the `code` field identically.
@@ -668,10 +713,29 @@ async function reauthorizeSession(sessionId) {
     throw err;
   }
 
+  // getSession() above has already terminalised a timed-out or hard-expired
+  // row AND kicked the client. Re-authorizing it here used to restart access
+  // past the pass deadline, because only expires_at was consulted. The state
+  // and the absolute deadline are both authoritative; either one failing means
+  // there is nothing left to re-open.
+  if (session.state !== 'active' || isHardExpired(session)) {
+    const err = new Error('Session has expired');
+    err.code = 'SESSION_EXPIRED';
+    throw err;
+  }
+
   const remainingSeconds = session.expiresAt
     ? Math.max(0, Math.floor((new Date(session.expiresAt).getTime() - Date.now()) / 1000))
     : 0;
-  if (remainingSeconds <= 0) {
+
+  // Never grant more time than the pass has left, whatever expires_at says:
+  // a resume near the deadline can leave expires_at beyond absolute_expires_at.
+  const hardLeftSeconds = session.absoluteExpiresAt
+    ? Math.max(0, Math.floor((new Date(session.absoluteExpiresAt).getTime() - Date.now()) / 1000))
+    : Infinity;
+  const grantSeconds = Math.min(remainingSeconds, hardLeftSeconds);
+
+  if (!Number.isFinite(grantSeconds) || grantSeconds <= 0) {
     const err = new Error('Session has expired');
     err.code = 'SESSION_EXPIRED';
     throw err;
@@ -686,7 +750,7 @@ async function reauthorizeSession(sessionId) {
       apMac: session.apMac,
       ssidName: session.ssidName,
       radioId: session.radioId || 0,
-      durationMinutes: Math.ceil(remainingSeconds / 60),
+      durationMinutes: Math.ceil(grantSeconds / 60),
       sessionId,
       // Same voucher the session was opened with, so every extPortal/auth call
       // carries the `code` field identically (see resumeSession).
@@ -702,7 +766,7 @@ async function reauthorizeSession(sessionId) {
   // row was edited afterwards cannot silently change a live session.
   await applySessionRateLimit(session);
 
-  return { session, remainingSeconds };
+  return { session, remainingSeconds: grantSeconds };
 }
 
 /**
@@ -829,39 +893,71 @@ async function activatePaidSession(sessionId, eventId, amount, webhookVoucherTyp
     throw new Error('Session not found for payment activation');
   }
 
-        const duration = session.duration;
+  const duration = session.duration;
   const voucherType = session.voucherType || webhookVoucherType || 'standard';
 
-  // Compute expiry: for premium, use remainingSeconds if already set (from pause); otherwise full duration
-  let expiresAt;
+  // How much time this activation is allowed to grant. Premium keeps the time
+  // frozen by a pause; a stored 0 is a real "nothing left" (the old `||`
+  // turned it into the full duration), so only an absent value falls back.
+  let entitlementSeconds;
   if (voucherType === 'premium' && session.totalDurationSeconds) {
-    const remaining = session.remainingSeconds || session.totalDurationSeconds;
-    expiresAt = new Date(Date.now() + remaining * 1000).toISOString();
+    const stored = session.remainingSeconds;
+    entitlementSeconds = (stored === null || stored === undefined)
+      ? Number(session.totalDurationSeconds)
+      : Math.max(0, Math.floor(Number(stored)));
   } else {
-    expiresAt = new Date(Date.now() + duration * 60 * 1000).toISOString();
+    entitlementSeconds = (duration || 60) * 60;
   }
-  const username = (voucherType === 'premium' ? 'prem_' : 'paid_') + sessionId;
 
-  // Authenticate via Omada
-  await omadaService.authenticateClient({
-    clientMac: session.clientMac,
-    clientIp:  session.clientIp,
-    apMac:     session.apMac,
-    ssidName:  session.ssidName,
-    radioId:   session.radioId || 0,
-    durationMinutes: duration,
-    sessionId: sessionId,
-    // Payment-activated sessions may have no voucher (webhook flow); the
-    // field is then omitted rather than sent empty.
-    voucherCode: session.voucherUsed || '',
-  });
-
+  if (!Number.isFinite(entitlementSeconds) || entitlementSeconds <= 0) {
+    await expireSession(sessionId, 'time_expired', session);
+    const err = new Error('This pass has no time left to activate');
+    err.code = 'SESSION_EXPIRED';
+    throw err;
+  }
   // A premium session activated by a payment gets the same absolute deadline a
   // voucher-created one gets, counted from this activation. An already-set
   // value is kept: the deadline belongs to the pass, not to the latest write.
   const absoluteExpiresAt = isPremiumVoucherType(voucherType)
     ? (session.absoluteExpiresAt || hardExpiryFor(voucherType))
     : null;
+
+  // Activating a pass past its absolute deadline would re-open the firewall for
+  // a session that is already void; refuse BEFORE the controller is called.
+  const activationNowMs = Date.now();
+  const activationDeadlineMs = absoluteExpiresAt
+    ? new Date(absoluteExpiresAt).getTime()
+    : Infinity;
+  if (activationDeadlineMs <= activationNowMs) {
+    await expireSession(sessionId, 'hard_expired', session);
+    const err = new Error('This pass has reached its absolute expiry and can no longer be activated');
+    err.code = 'HARD_EXPIRED';
+    throw err;
+  }
+
+  // Same ceiling as resume: never authorize (or store) time past the deadline.
+  const activationExpiresMs = Math.min(
+    activationNowMs + entitlementSeconds * 1000,
+    activationDeadlineMs
+  );
+  const expiresAt = new Date(activationExpiresMs).toISOString();
+  const grantedMinutes = Math.max(1, Math.ceil((activationExpiresMs - activationNowMs) / 60000));
+
+  const username = (voucherType === 'premium' ? 'prem_' : 'paid_') + sessionId;
+
+  // Authenticate via Omada for exactly the time computed above.
+  await omadaService.authenticateClient({
+    clientMac: session.clientMac,
+    clientIp:  session.clientIp,
+    apMac:     session.apMac,
+    ssidName:  session.ssidName,
+    radioId:   session.radioId || 0,
+    durationMinutes: grantedMinutes,
+    sessionId: sessionId,
+    // Payment-activated sessions may have no voucher (webhook flow); the
+    // field is then omitted rather than sent empty.
+    voucherCode: session.voucherUsed || '',
+  });
 
     await db.run(`
     UPDATE sessions

@@ -35,6 +35,44 @@ const {
   setSessionCookie,
 } = require('../utils/session-token');
 
+/**
+ * assertSessionOwner — may this request act on this session?
+ *
+ * A bare sessionId in a POST body is not proof of anything: it can be copied
+ * out of a URL, a screenshot or a log, and pause/resume change a paying guest's
+ * network access. The only identity this backend issues for a session is the
+ * signed token (`utils/session-token.js`), delivered as the HttpOnly
+ * `portal_session` cookie and mirrored as `?token=` for cookie-blocked
+ * browsers. The request must carry one that names exactly this session.
+ *
+ * GET /api/session/status re-issues the cookie on every successful resolve, so
+ * the status page always holds a fresh one before its buttons are usable.
+ *
+ * @param {Object} req Express request
+ * @param {Object} session session object from getSession()
+ * @returns {boolean} true when the caller proved it owns the session
+ */
+function assertSessionOwner(req, session) {
+  if (!session || !session.sessionId) return false;
+  const verified = verifySessionToken(tokenFromRequest(req));
+  return Boolean(verified && verified.sessionId === session.sessionId);
+}
+
+/**
+ * rejectIfNotOwner — send the 403 SESSION_MISMATCH answer and report whether
+ * the caller must stop. Kept next to assertSessionOwner so both pause and
+ * resume share one response shape.
+ */
+function rejectIfNotOwner(req, res, session) {
+  if (assertSessionOwner(req, session)) return false;
+  res.status(403).json({
+    success: false,
+    code: 'SESSION_MISMATCH',
+    error: 'This session does not belong to this device.',
+  });
+  return true;
+}
+
 // ── GET /api/session/status ──────────────────────────────────
 router.get('/status', async (req, res, next) => {
   try {
@@ -343,12 +381,16 @@ router.post('/reauthorize', async (req, res, next) => {
     // (not just state = 'active') so a session the expiration worker has not
     // swept yet is not mistaken for a resumable one.
     const row = await getDb().getOne(
+      // The absolute Premium deadline is part of the filter too: a pass past it
+      // is void no matter what expires_at says, so it must never be selected as
+      // a re-authorization candidate in the first place.
       `SELECT session_id FROM sessions
         WHERE LOWER(client_mac) = LOWER(?)
           AND state = 'active'
           AND expires_at IS NOT NULL AND expires_at > ?
+          AND (absolute_expires_at IS NULL OR absolute_expires_at > ?)
         ORDER BY id DESC LIMIT 1`,
-      [normalized, new Date().toISOString()]
+      [normalized, new Date().toISOString(), new Date().toISOString()]
     );
     if (!row || !row.session_id) {
       return res.status(404).json({
@@ -442,8 +484,10 @@ router.post('/pause', async (req, res, next) => {
     if (!isPausableVoucherType(session.voucherType)) {
       return res.status(403).json({ success: false, error: 'Pause is only available for Premium sessions.', code: 'PREMIUM_ONLY' });
     }
+    // Ownership: only the device this session was issued to may stop its clock.
+    if (rejectIfNotOwner(req, res, session)) return;
 
-        const paused = await pauseSession(sessionId);
+    const paused = await pauseSession(sessionId);
     return res.json({
       success: true,
       state: 'paused',
@@ -452,6 +496,18 @@ router.post('/pause', async (req, res, next) => {
       pausedAt: paused.pausedAt,
     });
   } catch (err) {
+    // A pause that could not stop the client must NOT read as a pause: answer
+    // 502 so the portal shows the retry message and the timer keeps running.
+    if (err && err.code === 'OMADA_ERROR') {
+      return res.status(502).json({
+        success: false,
+        code: 'OMADA_ERROR',
+        error: err.message || 'Could not stop the network session. Please try again.',
+      });
+    }
+    if (err && (err.code === 'SESSION_EXPIRED' || err.code === 'HARD_EXPIRED' || err.code === 'PAUSE_EXPIRED')) {
+      return res.status(410).json({ success: false, code: err.code, error: err.message });
+    }
     next(err);
   }
 });
@@ -485,8 +541,10 @@ router.post('/resume', async (req, res, next) => {
     if (!isPausableVoucherType(session.voucherType)) {
       return res.status(403).json({ success: false, error: 'Resume is only available for Premium sessions.', code: 'PREMIUM_ONLY' });
     }
+    // Ownership: a copied sessionId must not restart someone else's pass.
+    if (rejectIfNotOwner(req, res, session)) return;
 
-        const resumed = await resumeSession(sessionId);
+    const resumed = await resumeSession(sessionId);
     // Same session, refreshed identity: keep the browser bound to it.
     const statusToken = setSessionCookie(req, res, sessionId);
     return res.json({
@@ -498,6 +556,14 @@ router.post('/resume', async (req, res, next) => {
       statusToken: statusToken || null,
     });
   } catch (err) {
+    // A zero-time or past-deadline pass is GONE, not a server error: 410 with
+    // the precise reason, so the status page can stop offering Resume.
+    if (err && (err.code === 'SESSION_EXPIRED' || err.code === 'HARD_EXPIRED' || err.code === 'PAUSE_EXPIRED')) {
+      return res.status(410).json({ success: false, code: err.code, error: err.message });
+    }
+    if (err && err.code === 'OMADA_ERROR') {
+      return res.status(502).json({ success: false, code: 'OMADA_ERROR', error: err.message });
+    }
     next(err);
   }
 });

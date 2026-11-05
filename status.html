@@ -1064,6 +1064,11 @@
       // PREMIUM_ONLY when a standard session tries to pause).
       function postSessionAction(action) {
         var url = API_BASE + '/api/session/' + action;
+        // The backend only acts on a session this device can prove it owns. The
+        // signed identity rides the HttpOnly cookie; ?token= is the same value
+        // for a browser that blocks it (the twin every poll already uses).
+        var actionToken = currentToken();
+        if (actionToken) url += '?token=' + encodeURIComponent(actionToken);
         return fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

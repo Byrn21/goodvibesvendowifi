@@ -32,6 +32,15 @@ const request = require('supertest');
 const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 const sessionService = require('../src/services/session');
+const { issueSessionToken } = require('../src/utils/session-token');
+
+/**
+ * Cookie header proving this device owns `sessionId`. Pause/resume are guarded
+ * on the signed identity GET /status issues, so every fixture presents one.
+ */
+function asDevice(sessionId) {
+  return 'portal_session=' + issueSessionToken(sessionId);
+}
 
 async function applySchema() {
   const schema = fs.readFileSync(
@@ -70,6 +79,7 @@ describe('POST /api/session/pause — plan-tier authorization', () => {
 
     const res = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_std_route'))
       .send({ sessionId: 'sess_std_route' });
 
     expect(res.status).toBe(403);
@@ -92,6 +102,7 @@ describe('POST /api/session/pause — plan-tier authorization', () => {
 
     const res = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_prem_route'))
       .send({ sessionId: 'sess_prem_route' });
 
     expect(res.status).toBe(200);
@@ -124,6 +135,7 @@ describe('Premium pause is not a one-shot allowance', () => {
 
     const firstPause = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_cycle'))
       .send({ sessionId: 'sess_cycle' });
     expect(firstPause.status).toBe(200);
     expect(firstPause.body.state).toBe('paused');
@@ -135,6 +147,7 @@ describe('Premium pause is not a one-shot allowance', () => {
 
     const resumed = await request(app)
       .post('/api/session/resume')
+      .set('Cookie', asDevice('sess_cycle'))
       .send({ sessionId: 'sess_cycle' });
     expect(resumed.status).toBe(200);
     expect(resumed.body.state).toBe('active');
@@ -147,6 +160,7 @@ describe('Premium pause is not a one-shot allowance', () => {
 
     const secondPause = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_cycle'))
       .send({ sessionId: 'sess_cycle' });
     expect(secondPause.status).toBe(200);
     expect(secondPause.body.state).toBe('paused');
@@ -180,6 +194,7 @@ describe('Premium pause is not a one-shot allowance', () => {
 
     const pause = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_short_pause'))
       .send({ sessionId: 'sess_short_pause' });
     expect(pause.status).toBe(200);
   });
@@ -211,6 +226,7 @@ describe('POST /api/session/pause — the frozen timer', () => {
 
     const res = await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_freeze'))
       .send({ sessionId: 'sess_freeze' });
 
     expect(res.status).toBe(200);
@@ -237,6 +253,7 @@ describe('POST /api/session/pause — the frozen timer', () => {
 
     await request(app)
       .post('/api/session/pause')
+      .set('Cookie', asDevice('sess_frozen_status'))
       .send({ sessionId: 'sess_frozen_status' });
 
     const stored = (await rowOf('sess_frozen_status')).remaining_seconds;
