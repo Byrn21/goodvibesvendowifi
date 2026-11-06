@@ -16,15 +16,82 @@
 // .env without a code change; falls back to the documented default.
 const PESOS_PER_MINUTE = parseInt(process.env.MACRODROID_PESOS_PER_MINUTE || '10', 10);
 
+// ── Environment ─────────────────────────────────────────────────────────
+// Resolved once, at require time. NODE_ENV=production is the only mode that
+// applies the fail-closed rules below.
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+/**
+ * Read an operator secret from the environment.
+ *
+ * A missing, empty or whitespace-only value is treated as UNSET (a copy-paste
+ * slip, or `ADMIN_API_KEY=` left blank in .env), never as a credential. The
+ * value itself is NOT trimmed: if an operator really configured surrounding
+ * whitespace, the string compared at login is the string they configured.
+ *
+ * @param {*} value
+ * @returns {string} the secret, or '' when unset/blank
+ */
+function readSecret(value) {
+  const raw = typeof value === 'string' ? value : '';
+  return raw.trim() === '' ? '' : raw;
+}
+
 // ── Admin API key ───────────────────────────────────────────────────────
 // ENV-CONFIGURABLE: the operator credential for internal endpoints a guest must
 // never reach (POST /api/session/expire, which cuts a paying session offline).
 // The development default is applied ONLY outside production: with
-// NODE_ENV=production and no ADMIN_API_KEY the value is empty, so the guard
-// fails closed (401 for everyone) instead of shipping a known key that any
-// guest could replay. Set ADMIN_API_KEY in the deployment env to use it.
-const ADMIN_API_KEY = process.env.ADMIN_API_KEY
-  || (process.env.NODE_ENV === 'production' ? '' : 'dev_admin_key');
+// NODE_ENV=production and no ADMIN_API_KEY the value is empty, so every guard
+// that consumes it refuses instead of shipping a known key that any guest could
+// replay. A production process in that state is stopped outright by
+// assertAdminCredentials() below. Set ADMIN_API_KEY in the deployment env.
+const ADMIN_API_KEY = readSecret(process.env.ADMIN_API_KEY)
+  || (IS_PRODUCTION ? '' : 'dev_admin_key');
+
+// ── Admin login password ────────────────────────────────────────────────
+// ENV-CONFIGURABLE: the credential behind POST /api/admin/login (which mints a
+// bearer token for the admin panel). An explicit ADMIN_PASSWORD wins; otherwise
+// it falls back to ADMIN_API_KEY, the documented single-credential behaviour.
+//
+// This lives HERE, beside ADMIN_API_KEY, for one reason: every consumer must
+// resolve one identical value at process start. It used to be read straight
+// from process.env inside routes/admin.js, which is how an unset password
+// became the empty string and matched an empty login password.
+const ADMIN_PASSWORD = readSecret(process.env.ADMIN_PASSWORD) || ADMIN_API_KEY;
+
+/**
+ * assertAdminCredentials — refuse to run production with no operator credential.
+ *
+ * Fail-closed at the process level rather than at the login form: a production
+ * process with neither ADMIN_API_KEY nor ADMIN_PASSWORD must not reach the
+ * point where it serves /api/admin at all. Called at module load, so a
+ * misconfigured start-up throws before Express listens.
+ *
+ * Development and test are unaffected (the dev default above applies).
+ *
+ * @returns {void}
+ * @throws {Error} code ADMIN_CREDENTIALS_MISSING in production
+ */
+function assertAdminCredentials() {
+  if (!IS_PRODUCTION) return;
+
+  const missing = [];
+  if (!ADMIN_API_KEY) missing.push('ADMIN_API_KEY');
+  if (!ADMIN_PASSWORD) missing.push('ADMIN_PASSWORD');
+  if (missing.length === 0) return;
+
+  const err = new Error(
+    '[config] Refusing to start in production: ' + missing.join(' and ') +
+    ' resolved to an empty string. Set ADMIN_API_KEY (and optionally ' +
+    'ADMIN_PASSWORD) in the environment or backend/.env. An empty operator ' +
+    'credential is not a valid configuration — it must never be the value a ' +
+    'login is compared against.'
+  );
+  err.code = 'ADMIN_CREDENTIALS_MISSING';
+  throw err;
+}
+
+assertAdminCredentials();
 
 // ── Portal context staleness ────────────────────────────────────────────
 // BUSINESS CONSTANT (intentionally NOT env-configurable, consistent with
@@ -111,7 +178,10 @@ function macroDroidVerifyUrl(ref, mac) {
 const OMADA_TIME_UNIT = (process.env.OMADA_TIME_UNIT || 'ms').toLowerCase();
 
 module.exports = {
+  IS_PRODUCTION,
   ADMIN_API_KEY,
+  ADMIN_PASSWORD,
+  assertAdminCredentials,
   PESOS_PER_MINUTE,
   PORTAL_CONTEXT_MAX_AGE_MS,
   PREMIUM_HARD_EXPIRY_HOURS,

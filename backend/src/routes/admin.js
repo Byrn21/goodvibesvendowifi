@@ -3,7 +3,9 @@
  *
  * All endpoints require an API key passed in the `X-API-Key` header,
  * or a valid login session token passed in the `Authorization: Bearer` header,
- * matching ADMIN_API_KEY from config/index.js.
+ * matching ADMIN_API_KEY from config/index.js. POST /api/admin/login exchanges
+ * ADMIN_USERNAME + ADMIN_PASSWORD (also resolved in config/index.js) for a
+ * session token.
  *
  * Endpoints:
  *   POST   /api/admin/login      — Authenticate and receive a session token
@@ -42,10 +44,10 @@ const {
 // guards POST /api/session/expire (routes/session.js). Never read the env var
 // here — both consumers must resolve one identical value at process start,
 // including its production fail-closed default.
-const { ADMIN_API_KEY } = require('../config');
+const { ADMIN_API_KEY, ADMIN_PASSWORD } = require('../config');
+const { safeEqual } = require('../utils/safe-compare');
 
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || ADMIN_API_KEY;
 
 // In-memory admin session-token store, bounded to the most recent N logins.
 // A Set preserves insertion order, so trimming from the front evicts the
@@ -108,18 +110,45 @@ function requireAuth(req, res, next) {
   if (!provided) {
     return res.status(401).json({ success: false, error: 'Unauthorized — valid token or API key required.' });
   }
-  // Accept either a valid session token or the admin API key
-  if (VALID_TOKENS.has(provided) || (ADMIN_API_KEY && provided === ADMIN_API_KEY)) {
+  // Accept either a valid session token or the admin API key. safeEqual()
+  // rejects an empty/blank operand, so an unconfigured key admits no one.
+  if (VALID_TOKENS.has(provided) || safeEqual(provided, ADMIN_API_KEY)) {
     return next();
   }
   return res.status(401).json({ success: false, error: 'Unauthorized — valid token or API key required.' });
 }
 
 // Login endpoint (before requireAuth)
+//
+// Fail-closed on every axis:
+//   - no configured password       -> 401 (never "anything matches")
+//   - missing / non-string field   -> 401
+//   - empty-string password        -> 401 (previously matched an empty config)
+//   - wrong username or password   -> 401, compared in constant time
+//
+// The generic message is deliberate: the response never reveals whether the
+// username or the password was the part that did not match.
 router.post('/login', (req, res, next) => {
   try {
-    const { username, password } = req.body || {};
-    if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+    if (!ADMIN_PASSWORD) {
+      console.error(
+        '[admin] login refused: no ADMIN_PASSWORD/ADMIN_API_KEY is configured — ' +
+        'set one before using the admin panel'
+      );
+      return res.status(401).json({ success: false, error: 'Invalid credentials.' });
+    }
+
+    const body = req.body || {};
+    const username = typeof body.username === 'string' ? body.username : '';
+    const password = typeof body.password === 'string' ? body.password : '';
+
+    // Reject blank credentials BEFORE comparing: safeEqual() already refuses
+    // empty operands, and this makes the intent explicit at the call site.
+    if (!username || !password) {
+      return res.status(401).json({ success: false, error: 'Invalid credentials.' });
+    }
+
+    if (safeEqual(username, ADMIN_USERNAME) && safeEqual(password, ADMIN_PASSWORD)) {
       const token = require('crypto').randomBytes(32).toString('hex');
       rememberToken(token);
       return res.json({ success: true, token, expiresIn: 8 * 3600 });

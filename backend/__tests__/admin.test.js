@@ -122,6 +122,154 @@ describe('POST /api/admin/login — bounded token store', () => {
   });
 });
 
+// ── C-01: empty-string login bypass ───────────────────────────────────────
+// Regression cover for the admin authentication bypass: an unset
+// ADMIN_PASSWORD used to resolve to '' and match an empty body password,
+// minting a full admin bearer token in production.
+describe('POST /api/admin/login — credential validation (C-01)', () => {
+  const { safeEqual } = require('../src/utils/safe-compare');
+  const config = require('../src/config');
+
+  test('resolves a non-empty admin password so a login is always compared against a real secret', () => {
+    expect(config.ADMIN_PASSWORD).toBeTruthy();
+    expect(config.ADMIN_PASSWORD).not.toBe('');
+  });
+
+  test('returns 401 for an empty-string password and issues no token', async () => {
+    const res = await request(app)
+      .post('/api/admin/login')
+      .send({ username: 'admin', password: '' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+    expect(res.body.token).toBeUndefined();
+  });
+
+  test('returns 401 when the password field is missing entirely', async () => {
+    const res = await request(app)
+      .post('/api/admin/login')
+      .send({ username: 'admin' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.success).toBe(false);
+    expect(res.body.token).toBeUndefined();
+  });
+
+  test('returns 401 when the username field is missing or empty', async () => {
+    const missing = await request(app)
+      .post('/api/admin/login')
+      .send({ password: VALID_KEY });
+    expect(missing.status).toBe(401);
+
+    const empty = await request(app)
+      .post('/api/admin/login')
+      .send({ username: '', password: VALID_KEY });
+    expect(empty.status).toBe(401);
+  });
+
+  test('returns 401 for a whitespace-only password', async () => {
+    const res = await request(app)
+      .post('/api/admin/login')
+      .send({ username: 'admin', password: '   ' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.token).toBeUndefined();
+  });
+
+  test('returns 401 for non-string credentials instead of coercing them', async () => {
+    const numeric = await request(app)
+      .post('/api/admin/login')
+      .send({ username: 'admin', password: 12345 });
+    expect(numeric.status).toBe(401);
+
+    const object = await request(app)
+      .post('/api/admin/login')
+      .send({ username: 'admin', password: { toString: () => VALID_KEY } });
+    expect(object.status).toBe(401);
+  });
+
+  test('still issues a token for the configured credentials', async () => {
+    const res = await request(app)
+      .post('/api/admin/login')
+      .send({ username: 'admin', password: VALID_KEY });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(typeof res.body.token).toBe('string');
+  });
+
+  test('safeEqual never treats two blank credentials as a match', () => {
+    expect(safeEqual('', '')).toBe(false);
+    expect(safeEqual('   ', '   ')).toBe(false);
+    expect(safeEqual(null, null)).toBe(false);
+    expect(safeEqual(undefined, '')).toBe(false);
+    expect(safeEqual('', 'test-admin-key')).toBe(false);
+  });
+
+  test('safeEqual matches identical values and rejects everything else', () => {
+    expect(safeEqual('test-admin-key', 'test-admin-key')).toBe(true);
+    expect(safeEqual('test-admin-key', 'test-admin-kez')).toBe(false);
+    expect(safeEqual('test-admin-key', 'test-admin-key ')).toBe(false);
+    expect(safeEqual('short', 'a-much-longer-value')).toBe(false);
+  });
+});
+
+describe('config — production startup assertion (C-01)', () => {
+  const { spawnSync } = require('child_process');
+  const CONFIG_PATH = path.join(__dirname, '..', 'src', 'config');
+
+  /** Run a snippet in a child process with exactly the given admin env. */
+  function runWith(env, script) {
+    return spawnSync(process.execPath, ['-e', script], {
+      env: Object.assign({}, process.env, env),
+      encoding: 'utf8',
+    });
+  }
+
+  test('refuses to load in production when no admin credential is configured', () => {
+    const result = runWith(
+      { NODE_ENV: 'production', ADMIN_API_KEY: '', ADMIN_PASSWORD: '' },
+      'require(' + JSON.stringify(CONFIG_PATH) + '); process.exit(0);'
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Refusing to start in production/);
+    expect(result.stderr).toMatch(/ADMIN_API_KEY/);
+  });
+
+  test('loads in production when ADMIN_API_KEY is set and falls back ADMIN_PASSWORD to it', () => {
+    const result = runWith(
+      { NODE_ENV: 'production', ADMIN_API_KEY: 'prod-admin-key', ADMIN_PASSWORD: '' },
+      'const c = require(' + JSON.stringify(CONFIG_PATH) + ');' +
+      'c.assertAdminCredentials();' +
+      'process.exit(c.ADMIN_PASSWORD === "prod-admin-key" && c.ADMIN_API_KEY === "prod-admin-key" ? 0 : 3);'
+    );
+
+    expect(result.status).toBe(0);
+  });
+
+  test('treats a whitespace-only secret as unset in production', () => {
+    const result = runWith(
+      { NODE_ENV: 'production', ADMIN_API_KEY: '   ', ADMIN_PASSWORD: '   ' },
+      'require(' + JSON.stringify(CONFIG_PATH) + '); process.exit(0);'
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/Refusing to start in production/);
+  });
+
+  test('does not throw outside production (development keeps the dev default)', () => {
+    const result = runWith(
+      { NODE_ENV: 'development', ADMIN_API_KEY: '', ADMIN_PASSWORD: '' },
+      'const c = require(' + JSON.stringify(CONFIG_PATH) + ');' +
+      'c.assertAdminCredentials();' +
+      'process.exit(c.ADMIN_PASSWORD ? 0 : 3);'
+    );
+
+    expect(result.status).toBe(0);
+  });
+});
+
 describe('DELETE /api/admin/vouchers/:id — Voucher Deletion', () => {
 
   test('returns 200 + success when deleting an existing voucher with valid API key', async () => {
