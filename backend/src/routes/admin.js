@@ -170,17 +170,38 @@ router.get('/me', (req, res) => {
 });
 
 
-// List all vouchers
+// List vouchers (paginated)
+// ?page=1&limit=50 — both clamped so a bad query cannot dump the whole table
+// or request a negative row count. The exact total comes from COUNT(*), never
+// from the size of the returned page.
 router.get('/vouchers', async (req, res, next) => {
   try {
     const db = getDb();
-    const rows = await db.query(`
-      SELECT id, code, type, duration_minutes, price, down_kbps, up_kbps,
-             state, assigned_ref_no, used_by_mac, used_at, created_at, expires_at
-      FROM vouchers
-      ORDER BY created_at DESC
-    `);
-        res.json({ success: true, vouchers: rows });
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = (page - 1) * limit;
+
+    const totalRow = await db.getOne('SELECT COUNT(*) AS count FROM vouchers');
+    const total = parseInt(totalRow && totalRow.count, 10) || 0;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+
+    const rows = await db.query(
+      `SELECT id, code, type, duration_minutes, price, down_kbps, up_kbps,
+              state, assigned_ref_no, used_by_mac, used_at, created_at, expires_at
+       FROM vouchers
+       ORDER BY created_at DESC, id DESC
+       LIMIT ? OFFSET ?`,
+      [limit, offset]
+    );
+
+    res.json({
+      success: true,
+      data: rows,
+      // Kept for existing API consumers that read `vouchers`; new clients use `data`.
+      vouchers: rows,
+      pagination: { total, page, limit, totalPages },
+    });
   } catch (err) {
     next(err);
   }

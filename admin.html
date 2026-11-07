@@ -192,6 +192,10 @@
             <p class="muted">Loading&hellip;</p>
           </div>
         </div>
+        <div class="admin-vouchers-footer">
+          <span class="admin-pagination__info" id="voucher-total">Total Vouchers: &mdash;</span>
+          <div class="admin-pagination" id="voucher-pagination" role="navigation" aria-label="Voucher pages"></div>
+        </div>
       </div>
 
       <!-- Sessions Section -->
@@ -292,6 +296,8 @@
         historyStatusFilter: document.getElementById('history-status-filter'),
         sectionTransactions: document.getElementById('section-transactions'),
         tabVouchers:    document.getElementById('tab-vouchers'),
+        voucherTotal:   document.getElementById('voucher-total'),
+        voucherPagination: document.getElementById('voucher-pagination'),
         tabSessions:    document.getElementById('tab-sessions'),
         tabImport:      document.getElementById('tab-import'),
         sectionDashboard: document.getElementById('section-dashboard'),
@@ -485,22 +491,85 @@
       }
 
 
-      function loadVouchers() {
+      // ---- Vouchers: paginated list ----
+      // The backend owns the page size (max 500) and returns the exact total
+      // from COUNT(*), so the footer never has to infer it from the page rows.
+      var VOUCHER_LIMIT = 50;
+      var voucherPage = 1;
+      var voucherTotalPages = 1;
+      var voucherTotal = 0;
+
+      function loadVouchers(page) {
         if (!els.tabVouchers) return;
+        var requestedPage = Math.max(1, page || voucherPage || 1);
         setTableLoading(els.tabVouchers, 'Loading vouchers\u2026');
-        api('/api/admin/vouchers')
+        api('/api/admin/vouchers?page=' + requestedPage + '&limit=' + VOUCHER_LIMIT)
           .then(function (res) {
             if (!res.ok) throw new Error((res.data && res.data.error) || 'Failed to load vouchers');
-            var vouchers = res.data.vouchers || [];
-            els.tabVouchers.innerHTML = renderVouchers(vouchers);
+            var payload = res.data || {};
+            var vouchers = payload.data || payload.vouchers || [];
+            var pagination = payload.pagination || {
+              total: vouchers.length,
+              page: requestedPage,
+              limit: VOUCHER_LIMIT,
+              totalPages: 1
+            };
+            // Deleting the last row of the last page leaves a page past the
+            // end; load the new last page instead of an empty table.
+            if (!vouchers.length && pagination.total > 0 && requestedPage > pagination.totalPages) {
+              loadVouchers(pagination.totalPages);
+              return;
+            }
+            voucherPage = pagination.page || requestedPage;
+            voucherTotalPages = pagination.totalPages || 1;
+            voucherTotal = pagination.total || 0;
+            var offset = (voucherPage - 1) * (pagination.limit || VOUCHER_LIMIT);
+            els.tabVouchers.innerHTML = renderVouchers(vouchers, offset);
             setTableReady(els.tabVouchers);
-            updateDeleteAllState(vouchers.length);
+            renderVoucherPagination();
+            if (els.voucherTotal) {
+              els.voucherTotal.textContent = 'Total Vouchers: ' + voucherTotal;
+            }
+            updateDeleteAllState(voucherTotal);
           })
           .catch(function (err) {
             els.tabVouchers.innerHTML = '<p class="error-msg">' + escapeHtml(err.message) + '</p>';
             setTableReady(els.tabVouchers);
+            renderVoucherPagination();
             updateDeleteAllState(0);
           });
+      }
+
+      // Previous / numbered tiles / Next. Numbers are windowed (first, last,
+      // current ±2) so a large voucher table never renders hundreds of tiles.
+      function renderVoucherPagination() {
+        if (!els.voucherPagination) return;
+        if (voucherTotalPages <= 1) {
+          els.voucherPagination.innerHTML = '';
+          return;
+        }
+        var pages = [];
+        for (var p = 1; p <= voucherTotalPages; p++) {
+          if (p === 1 || p === voucherTotalPages || Math.abs(p - voucherPage) <= 2) {
+            pages.push(p);
+          } else if (pages[pages.length - 1] !== '\u2026') {
+            pages.push('\u2026');
+          }
+        }
+        var html = '<button type="button" class="page-tile" data-page="' + (voucherPage - 1) + '"' +
+          (voucherPage <= 1 ? ' disabled' : '') + '>Previous</button>';
+        pages.forEach(function (p) {
+          if (p === '\u2026') {
+            html += '<span class="page-tile page-tile--gap" aria-hidden="true">\u2026</span>';
+          } else {
+            html += '<button type="button" class="page-tile' + (p === voucherPage ? ' is-active' : '') +
+              '" data-page="' + p + '"' + (p === voucherPage ? ' aria-current="page"' : '') +
+              ' aria-label="Page ' + p + '">' + p + '</button>';
+          }
+        });
+        html += '<button type="button" class="page-tile" data-page="' + (voucherPage + 1) + '"' +
+          (voucherPage >= voucherTotalPages ? ' disabled' : '') + '>Next</button>';
+        els.voucherPagination.innerHTML = html;
       }
 
       // Enable the Delete All button only when there is something to delete
@@ -554,7 +623,7 @@
                   'All vouchers deleted. IDs will restart from 1 on the next import.'
                 ) + '</p>';
               }
-              loadVouchers();
+              loadVouchers(1);
               loadDashboard();
             } else {
               // Show the specific error returned by the backend, dismissible
@@ -578,7 +647,7 @@
       }
 
       // Render vouchers table using event delegation &mdash; no inline onclick handlers
-      function renderVouchers(vouchers) {
+      function renderVouchers(vouchers, offset) {
         if (!vouchers.length) {
           return '<p class="muted">No vouchers found.</p>';
         }
@@ -588,7 +657,7 @@
           // ID is kept only as data-voucher-id (never shown) so the single
           // Delete button still works after the raw ID column was removed.
           return '<tr data-id="' + (item.id || 0) + '">' +
-            '<td>' + (idx + 1) + '</td>' +
+            '<td>' + (offset + idx + 1) + '</td>' +
             '<td>' + escapeHtml(item.code) + '</td>' +
             '<td><span class="badge badge-' + (item.type || 'standard') + '">' + escapeHtml(item.type || 'standard') + '</span></td>' +
             '<td>' + (item.duration_minutes || 0) + ' min</td>' +
@@ -612,7 +681,7 @@
         api('/api/admin/vouchers/' + id, { method: 'DELETE' })
           .then(function (res) {
             if (res.ok) {
-              loadVouchers();
+              loadVouchers(voucherPage);
               loadDashboard();
             } else {
               alert(res.data && res.data.error || 'Delete failed');
@@ -1408,12 +1477,23 @@
         }
       });
 
+      // Event delegation for the voucher page tiles
+      if (els.voucherPagination) {
+        els.voucherPagination.addEventListener('click', function (e) {
+          var tile = e.target.closest('.page-tile[data-page]');
+          if (!tile || tile.disabled) return;
+          var target = parseInt(tile.getAttribute('data-page'), 10);
+          if (!isNaN(target) && target >= 1 && target <= voucherTotalPages && target !== voucherPage) {
+            loadVouchers(target);
+          }
+        });
+      }
+
       // Delete All Vouchers wiring
       if (els.btnDeleteAll) {
         els.btnDeleteAll.addEventListener('click', function () {
-          // Count vouchers currently shown in the table
-          var rows = els.tabVouchers ? els.tabVouchers.querySelectorAll('tbody tr').length : 0;
-          if (rows > 0) openDeleteAllModal(rows);
+          // Use the exact total from the backend, not just the rows on this page.
+          if (voucherTotal > 0) openDeleteAllModal(voucherTotal);
         });
       }
       if (els.deleteAllCancel) {

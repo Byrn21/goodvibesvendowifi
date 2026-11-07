@@ -2666,6 +2666,63 @@ table tbody tr:hover {
   color: var(--text-muted, #64748b);
 }
 
+/* Voucher footer: exact total on the left, page tiles on the right */
+.admin-vouchers-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.admin-vouchers-footer .admin-pagination { margin-top: 0; }
+
+/* Numbered page tiles (Previous / 1 2 3 / Next) */
+.page-tile {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 10px;
+  font-family: var(--font);
+  font-size: 0.85rem;
+  color: var(--text);
+  background-color: var(--surface, #fff);
+  border: 1.5px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.page-tile:hover:not(:disabled):not(.is-active) {
+  border-color: var(--primary-light);
+}
+
+.page-tile:focus-visible {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(93, 61, 17, 0.12);
+}
+
+.page-tile.is-active {
+  color: #fff;
+  background-color: var(--primary);
+  border-color: var(--primary);
+  font-weight: 600;
+}
+
+.page-tile:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.page-tile--gap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border-color: transparent;
+  cursor: default;
+}
+
 /* Buttons */
 .btn {
   display: inline-block;
