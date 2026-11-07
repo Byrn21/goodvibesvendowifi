@@ -104,7 +104,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events; DELETE FROM portal_client_context;');
+  await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events; DELETE FROM portal_client_context; DELETE FROM claim_attempts;');
   await seedPortalContext();
   jest.clearAllMocks();
   omadaService.authenticateClient.mockResolvedValue({ success: true, verified: true, result: 0 });
@@ -123,11 +123,11 @@ async function flushQosDelay() {
 
 describe('POST /api/payment/claim', () => {
   // Seed an 'unclaimed' webhook_events row (what the MacroDroid webhook writes).
-  async function seedUnclaimed(refNo, amountPesos) {
+  async function seedUnclaimed(refNo, amountPesos, mobile = MOBILE) {
     await getDb().run(
-      `INSERT INTO webhook_events (event_id, ref_no, amount, status)
-       VALUES (?, ?, ?, 'unclaimed')`,
-      ['evt_' + refNo, refNo, amountPesos]
+      `INSERT INTO webhook_events (event_id, ref_no, amount, status, mobile_number)
+       VALUES (?, ?, ?, 'unclaimed', ?)`,
+      ['evt_' + refNo, refNo, amountPesos, mobile]
     );
   }
 
@@ -303,11 +303,11 @@ describe('POST /api/payment/claim', () => {
     // None of the rejected attempts consumed anything.
     const event = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-MOB0001']);
     expect(event.status).toBe('unclaimed');
-    expect(event.mobile_number).toBe(null);
+    expect(event.mobile_number).toBe(MOBILE);
   });
 
-  test('saves mobile_number on the payment it reconciled', async () => {
-    await seedUnclaimed('REF-MOB0002', 50);
+  test('backfills mobile_number on a legacy payment it reconciled', async () => {
+    await seedUnclaimed('REF-MOB0002', 50, null);
     await seedVoucher('818181', 5000);
 
     const res = await request(app)
@@ -319,6 +319,54 @@ describe('POST /api/payment/claim', () => {
     const event = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-MOB0002']);
     expect(event.status).toBe('claimed');
     expect(event.mobile_number).toBe(MOBILE);
+  });
+
+  // ── C-02 regressions ─────────────────────────────────────────────────
+
+  test('C-02: a claim with the wrong mobile number does not reveal the voucher', async () => {
+    await seedUnclaimed('REF-SEC0001', 50);
+    await seedVoucher('717171', 5000);
+
+    const res = await request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: '0001', mobile_number: '09180000000' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('PAYMENT_NOT_FOUND');
+    expect(res.body.voucherCode).toBeUndefined();
+    expect(res.body.ref_no).toBeUndefined();
+
+    // Nothing was consumed and the ownership binding is untouched.
+    const event = await getDb().getOne(
+      'SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?',
+      ['REF-SEC0001']
+    );
+    expect(event.status).toBe('unclaimed');
+    expect(event.mobile_number).toBe(MOBILE);
+
+    const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['717171']);
+    expect(voucher.state).toBe('active');
+    expect(voucher.assigned_ref_no).toBeNull();
+  });
+
+  test('C-02: the 6th failed claim for a suffix is locked even when X-Forwarded-For rotates', async () => {
+    for (let i = 1; i <= 5; i++) {
+      const res = await request(app)
+        .post('/api/payment/claim')
+        .set('X-Forwarded-For', '10.0.0.' + i)
+        .send({ ref_suffix: '7777', mobile_number: MOBILE });
+      expect(res.status).toBe(404);
+      expect(res.body.code).toBe('PAYMENT_NOT_FOUND');
+    }
+
+    const locked = await request(app)
+      .post('/api/payment/claim')
+      .set('X-Forwarded-For', '10.0.0.6')
+      .send({ ref_suffix: '7777', mobile_number: MOBILE });
+
+    expect(locked.status).toBe(429);
+    expect(locked.body.code).toBe('CLAIM_SUFFIX_LOCKED');
+    expect(Number(locked.headers['retry-after'])).toBeGreaterThan(0);
   });
 
   // ── Direct MAC authorization ──────────────────────────────────────────
@@ -633,7 +681,7 @@ describe('POST /api/payment/claim', () => {
     expect(untouchedVoucher.assigned_ref_no).toBeNull();
     const untouchedEvent = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-FAIL0001']);
     expect(untouchedEvent.status).toBe('unclaimed');
-    expect(untouchedEvent.mobile_number).toBeNull();
+    expect(untouchedEvent.mobile_number).toBe(MOBILE);
 
     // The SECOND attempt with the same 4 digits is a real retry — not the
     // 'Payment not found or already claimed' dead end this route used to hit.

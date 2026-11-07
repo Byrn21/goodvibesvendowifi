@@ -44,6 +44,7 @@ const { loadPortalContext } = require('../utils/portal-context');
 const { normalizeMac } = require('../utils/device-id');
 const { computeMinutesFromAmount } = require('../utils/duration');
 const { resolveCustomRateLimit } = require('../utils/qos');
+const { normalizeMobile } = require('../utils/mobile');
 
 /**
  * Constant-time string comparison — avoids leaking the secret through
@@ -64,7 +65,8 @@ function safeEqual(a, b) {
 
 router.post('/macrodroid', async (req, res, next) => {
   try {
-    const { secret_token, amount, ref_no } = req.body || {};
+    const body = req.body || {};
+    const { secret_token, amount, ref_no } = body;
 
     // 1. Field presence / format validation
     if (!secret_token || typeof secret_token !== 'string') {
@@ -75,6 +77,33 @@ router.post('/macrodroid', async (req, res, next) => {
     }
     if (!ref_no || typeof ref_no !== 'string' || ref_no.trim().length === 0 || ref_no.length > 64) {
       return res.status(400).json({ success: false, error: 'Invalid ref_no.', code: 'INVALID_REF_NO' });
+    }
+
+    // ── Payer mobile (C-02) ────────────────────────────────────────────
+    // The number the payment came from is what later proves a claimant OWNS
+    // this payment: POST /api/payment/claim refuses to release it unless the
+    // caller supplies this same number. It is captured HERE, when the money
+    // arrives, because a claimant cannot be trusted to say who paid.
+    //
+    // The aliases cover the shapes a MacroDroid variable whitelist tends to
+    // produce. The field stays OPTIONAL so an un-updated macro still records
+    // payments — those rows are claimable with the full reference number from
+    // the receipt instead. When it IS present it must be a real PH mobile:
+    // dropping a malformed value silently would create an unclaimable payment
+    // that looks exactly like a valid one.
+    const rawMobile = body.mobile_number !== undefined ? body.mobile_number
+      : (body.mobile !== undefined ? body.mobile
+        : (body.payer_number !== undefined ? body.payer_number : body.sender_number));
+    let payerMobile = null;
+    if (rawMobile !== undefined && rawMobile !== null && String(rawMobile).trim() !== '') {
+      payerMobile = normalizeMobile(rawMobile);
+      if (!payerMobile) {
+        return res.status(400).json({
+          success: false,
+          error: 'mobile_number must be a PH mobile number (09XXXXXXXXX).',
+          code: 'INVALID_MOBILE_NUMBER',
+        });
+      }
     }
 
     // 2. Constant-time secret check
@@ -102,9 +131,9 @@ router.post('/macrodroid', async (req, res, next) => {
     const eventId = 'evt_' + uuidv4().replace(/-/g, '').slice(0, 16);
     try {
       await db.run(
-        `INSERT INTO webhook_events (event_id, ref_no, amount, status)
-         VALUES (?, ?, ?, 'unclaimed')`,
-        [eventId, refNo, Number(amount)]
+        `INSERT INTO webhook_events (event_id, ref_no, amount, status, mobile_number)
+         VALUES (?, ?, ?, 'unclaimed', ?)`,
+        [eventId, refNo, Number(amount), payerMobile]
       );
     } catch (err) {
       if (err.code === '23505' || err.code === 'SQLITE_CONSTRAINT') {
@@ -113,6 +142,12 @@ router.post('/macrodroid', async (req, res, next) => {
       throw err;
     }
 
+    // Never log the number itself — it is customer PII. Its PRESENCE is what
+    // decides whether the payment can be claimed by number or by full ref.
+    console.log(
+      '[webhook/macrodroid] recorded ref ' + refNo +
+      ' (payer mobile ' + (payerMobile ? 'recorded' : 'absent — claim needs the full reference') + ')'
+    );
     return res.json({ success: true });
   } catch (err) {
     next(err);
@@ -282,6 +317,35 @@ router.post('/macrodroid/verify-result', async (req, res, next) => {
       });
     }
 
+    // The handset read the receipt, so it can also read the payer's number.
+    // Record it with the payment (same rule as the notification webhook): it is
+    // what a later claim is checked against. Optional — a macro that cannot
+    // read it leaves the payment claimable only by full reference.
+    const rawMobile = body.mobile_number !== undefined ? body.mobile_number
+      : (body.payer_number !== undefined ? body.payer_number : body.sender_number);
+    let payerMobile = null;
+    if (rawMobile !== undefined && rawMobile !== null && String(rawMobile).trim() !== '') {
+      payerMobile = normalizeMobile(rawMobile);
+      if (!payerMobile) {
+        return res.status(400).json({
+          success: false,
+          error: 'mobile_number must be a PH mobile number (09XXXXXXXXX).',
+          code: 'INVALID_MOBILE_NUMBER',
+        });
+      }
+    }
+
+    // A receipt read that names a different payer than the one the customer
+    // typed is not a failure here (the claim itself enforces the match), but it
+    // is exactly the case support will be asked about, so record that the two
+    // disagreed — never the numbers themselves.
+    if (payerMobile && claim.mobile_number && payerMobile !== claim.mobile_number) {
+      console.warn(
+        '[webhook/verify] ref ' + refNo + ' was verified for claim ' + claim.claim_id +
+        ' but the receipt number differs from the number entered at claim time'
+      );
+    }
+
     // 6. Record the payment FIRST — it is the thing that makes the customer's
     //    money recoverable. The pending claim is marked verified afterwards; if
     //    the process dies in between, the portal's retried claim still finds the
@@ -297,9 +361,19 @@ router.post('/macrodroid/verify-result', async (req, res, next) => {
       ));
       if (!alreadyRecorded) {
         await db.run(
-          `INSERT INTO webhook_events (event_id, ref_no, amount, status, provider, event_type)
-           VALUES (?, ?, ?, 'unclaimed', 'macrodroid', 'payment.scraped')`,
-          ['evt_' + uuidv4().replace(/-/g, '').slice(0, 16), refNo, amount]
+          `INSERT INTO webhook_events (event_id, ref_no, amount, status, provider, event_type, mobile_number)
+           VALUES (?, ?, ?, 'unclaimed', 'macrodroid', 'payment.scraped', ?)`,
+          ['evt_' + uuidv4().replace(/-/g, '').slice(0, 16), refNo, amount, payerMobile]
+        );
+      } else if (payerMobile) {
+        // The notification webhook may have recorded this reference without a
+        // payer number. Fill it in — but only when it is still empty, so a
+        // verified receipt can never rewrite an ownership binding that a claim
+        // will be checked against.
+        await db.run(
+          `UPDATE webhook_events SET mobile_number = ?
+            WHERE ref_no = ? AND mobile_number IS NULL`,
+          [payerMobile, refNo]
         );
       }
     } catch (err) {

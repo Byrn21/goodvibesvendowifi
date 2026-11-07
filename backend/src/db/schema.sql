@@ -118,6 +118,23 @@ CREATE INDEX IF NOT EXISTS idx_pending_claims_claim_id ON pending_claims(claim_i
 CREATE INDEX IF NOT EXISTS idx_pending_claims_lookup   ON pending_claims(ref_suffix, state);
 
 -- ----------------------------------------------------------------
+-- claim_attempts — per-suffix failed-claim budget
+--
+-- POST /api/payment/claim takes the last 4 digits of a reference, so its
+-- 10,000-value space has to be budgeted independently of the caller's IP
+-- address (which is spoofable via X-Forwarded-For). One row per suffix; a
+-- successful claim deletes it, and the row stops locking once its window has
+-- elapsed. See services/claim-attempts.js.
+-- ----------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS claim_attempts (
+    ref_suffix        VARCHAR(8) NOT NULL PRIMARY KEY,
+    failed_count      INTEGER NOT NULL DEFAULT 0,
+    window_started_at TIMESTAMP,
+    last_attempt_at   TIMESTAMP,
+    last_client_ip    VARCHAR(45)          -- diagnostics only; never the key
+);
+
+-- ----------------------------------------------------------------
 -- ref_no duplicate protection
 -- Payment reference numbers are unique per transaction. SQLite
 -- enforces this via the UNIQUE column constraint in each CREATE

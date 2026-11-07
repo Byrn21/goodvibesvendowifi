@@ -97,7 +97,8 @@ afterAll(async () => {
 beforeEach(async () => {
   await getDb().exec(
     'DELETE FROM sessions; DELETE FROM vouchers; DELETE FROM webhook_events;' +
-    ' DELETE FROM portal_client_context; DELETE FROM pending_claims;'
+    ' DELETE FROM portal_client_context; DELETE FROM pending_claims;' +
+    ' DELETE FROM claim_attempts;'
   );
   await seedPortalContext();
   jest.clearAllMocks();

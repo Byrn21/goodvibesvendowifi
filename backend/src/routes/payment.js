@@ -32,7 +32,12 @@ const {
 const omadaService = require('../services/omada');
 const { recordSession } = require('../services/session');
 const { loadPortalContext, resolveClientMacByIp } = require('../utils/portal-context');
-const { setSessionCookie } = require('../utils/session-token');
+const {
+  tokenFromRequest,
+  verifySessionToken,
+  setSessionCookie,
+} = require('../utils/session-token');
+const claimAttempts = require('../services/claim-attempts');
 const { macroDroidVerifyUrl, PENDING_CLAIM_TTL_MS } = require('../config');
 const { listPaymentMethodStates } = require('../services/payment-methods');
 const { v4: uuidv4 } = require('uuid');
@@ -93,11 +98,12 @@ function isValidIp(value) {
 }
 
 // ── Mobile number (PH format) ───────────────────────────────────────────
-// An 11-digit Philippine mobile number: 09 followed by 9 digits. This is the
-// same rule the portal enforces client-side, restated here because it decides
-// whether the customer can be texted the code they paid for — a value the
-// client must never be trusted to guarantee.
-const MOBILE_RE = /^09\d{9}$/;
+// An 11-digit Philippine mobile number: 09 followed by 9 digits. Shared with
+// the webhook (utils/mobile.js) because the number is now an OWNERSHIP
+// credential, not just the SMS destination: the webhook records the number the
+// payment came from and this route only releases the payment to a caller who
+// supplies the same one. Both sides must agree on the canonical form.
+const { MOBILE_RE } = require('../utils/mobile');
 
 // The controller does not always expose a just-authorized client to the
 // client/QoS endpoints in the same tick, so a QoS PATCH sent immediately is
@@ -773,15 +779,90 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
 
     const db = getDb();
 
-    // ── 1. Locate the payment and the voucher that pays for it ───────────
-    // Both lookups are READ-ONLY: nothing is consumed until step 3, after the
+    // ── 0. Per-suffix failure budget (C-02) ─────────────────────────────
+    // Checked BEFORE any lookup, and keyed ONLY on the 4 digits — never on the
+    // caller's address, which is spoofable through X-Forwarded-For. Once a
+    // suffix accumulates CLAIM_FAILURE_BUDGET failed attempts it is locked for
+    // the window, so enumerating the 10,000-value space costs real time even
+    // for an attacker who rotates IPs on every request.
+    const budget = await claimAttempts.getState(db, refSuffix);
+    if (budget.locked) {
+      const minutes = Math.max(1, Math.ceil(budget.retryAfterSeconds / 60));
+      console.warn(
+        '[payment/claim] suffix ' + refSuffix + ' is locked (' + budget.failedCount +
+        ' failed attempts) — refusing before any lookup'
+      );
+      res.set('Retry-After', String(budget.retryAfterSeconds));
+      return res.status(429).json({
+        success: false,
+        code: 'CLAIM_SUFFIX_LOCKED',
+        error: 'Too many attempts for these 4 digits. Please try again in ' +
+          minutes + ' minute' + (minutes === 1 ? '' : 's') + ', or contact support.',
+        retryAfterSeconds: budget.retryAfterSeconds,
+      });
+    }
+
+    /**
+     * Count a failed attempt and answer it. Every branch that refuses a claim
+     * goes through here, so the budget reflects exactly the guesses that were
+     * made — and the counter is the same whether the caller came from a LAN
+     * address or a rotated X-Forwarded-For value.
+     */
+    const rejectClaim = async (status, payload) => {
+      try {
+        await claimAttempts.recordFailure(db, refSuffix, req.ip);
+      } catch (err) {
+        // A budget that cannot be written must not mask the real answer.
+        console.error('[payment/claim] could not record a failed attempt for suffix ' +
+          refSuffix + ': ' + ((err && err.message) || String(err)));
+      }
+      return res.status(status).json(payload);
+    };
+
+    // ── 1. Locate the payment THAT BELONGS TO THIS NUMBER ────────────────
+    // The lookups are READ-ONLY: nothing is consumed until step 3, after the
     // authorization has been decided.
-    const event = await db.getOne(
+    //
+    // The 4 digits alone are no longer a credential. The webhook records the
+    // payer's mobile number when the money arrives, and a claim must present
+    // that same number. A wrong number is indistinguishable from "no such
+    // payment" — same 404, same budget hit — so this is not an oracle for
+    // which suffixes exist or which numbers paid.
+    let ownershipProof = null;
+    let event = await db.getOne(
       `SELECT event_id, ref_no, amount FROM webhook_events
-        WHERE status = 'unclaimed' AND ref_no LIKE ?
+        WHERE status = 'unclaimed' AND ref_no LIKE ? AND mobile_number = ?
         ORDER BY id DESC LIMIT 1`,
-      ['%' + refSuffix]
+      ['%' + refSuffix, mobileNumber]
     );
+    if (event) ownershipProof = 'mobile';
+
+    // 1a. Legacy rows: payments recorded before the webhook carried a payer
+    //     number have mobile_number = NULL. They are still real payments, so
+    //     the claim is allowed — but the number it is claimed with is written
+    //     to the row BEFORE the claim continues, binding the payment from that
+    //     moment on. A concurrent guess therefore loses the conditional update
+    //     and receives the same generic 404 as any other unknown suffix.
+    if (!event) {
+      const legacy = await db.getOne(
+        `SELECT event_id, ref_no, amount FROM webhook_events
+          WHERE status = 'unclaimed' AND ref_no LIKE ? AND mobile_number IS NULL
+          ORDER BY id DESC LIMIT 1`,
+        ['%' + refSuffix]
+      );
+      if (legacy) {
+        const bound = await db.run(
+          `UPDATE webhook_events SET mobile_number = ?
+            WHERE event_id = ? AND status = 'unclaimed' AND mobile_number IS NULL`,
+          [mobileNumber, legacy.event_id]
+        );
+        if (bound.rowCount > 0) {
+          event = legacy;
+          ownershipProof = 'legacy-backfill';
+        }
+      }
+    }
+
     if (!event) {
       // ── 1b. Already claimed by THIS customer? Replay it ─────────────────
       // The first tap may have committed and then lost its response (dropped
@@ -796,6 +877,10 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
           ' was already claimed by this mobile — replaying voucher ' +
           replay.voucherCode + ' (' + replay.minutes + 'min); nothing consumed'
         );
+        // The replay proves ownership by the stored mobile number
+        // (findClaimedEntitlement matches it), so the budget is cleared: this
+        // caller is the payer, not a guesser.
+        await claimAttempts.clearSuffix(db, refSuffix).catch(() => {});
         return res.json({
           success: true,
           authorized: false,
@@ -835,9 +920,9 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         console.warn(
           '[payment/claim] no claimable payment ends with ' + refSuffix +
           ' for this mobile — nothing consumed (webhook not received yet, already' +
-          ' claimed by another number, or no number stored on the claim)'
+          ' claimed by another number, or the number does not match the payer)'
         );
-        return res.status(404).json({
+        return rejectClaim(404, {
           success: false,
           error: 'Payment not found or already claimed.',
           code: 'PAYMENT_NOT_FOUND',
@@ -848,6 +933,10 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         '[payment/claim] pending verification ' + pending.claimId +
         ' for suffix ' + refSuffix + ' (client_mac ' + (clientMac || '(none)') + ')'
       );
+      // An unmatched claim is also a guess: count it, so the screen-scrape
+      // channel cannot be used to enumerate suffixes (each one wakes the
+      // handset and opens the e-wallet).
+      await claimAttempts.recordFailure(db, refSuffix, req.ip).catch(() => {});
       return res.status(202).json({
         success: true,
         pending: true,
@@ -879,7 +968,9 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         '[payment/claim] no active unassigned voucher priced ' + amountCentavos +
         ' centavos for ref ' + event.ref_no + ' (suffix ' + refSuffix + ') — nothing consumed'
       );
-      return res.status(404).json({
+      // Counted as a failure too: the amount↔voucher pairing is otherwise a
+      // way to probe which denominations are in stock for a guessed payment.
+      return rejectClaim(404, {
         success: false,
         error: 'No voucher is available for this amount. Please contact support.',
         code: 'NO_VOUCHER_AVAILABLE',

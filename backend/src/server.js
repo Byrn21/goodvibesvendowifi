@@ -30,6 +30,7 @@ const omadaService = require('./services/omada');
 const { startExpirationWorker } = require('./services/session');
 const { fixMissingColumns } = require('./db/migrate_fix');
 const { run: runVoucherRefMigration } = require('./db/migrate_add_voucher_ref');
+const { run: runClaimAttemptsMigration } = require('./db/migrate_add_claim_attempts');
 
 const app = express();
 
@@ -436,6 +437,8 @@ const startup = async () => {
     // Add vouchers.assigned_ref_no (pre-generated voucher claim architecture).
     // Idempotent — a no-op once the column exists.
     await runVoucherRefMigration();
+    // Create claim_attempts (per-suffix failed-claim budget). Idempotent.
+    await runClaimAttemptsMigration();
   } catch (err) {
     console.error('[startup] Column migration failed:', err.message);
   }
