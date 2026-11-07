@@ -264,7 +264,7 @@ router.post('/vouchers', async (req, res, next) => {
 // Bulk-create vouchers for the admin "Voucher Print Studio".
 //
 // Body: { type, quantity, duration?, price? }
-//   - quantity: whole number 1–100 (the studio prints 50 cards per sheet)
+//   - quantity: whole number 1–500 (the studio prints 50 cards per sheet)
 //   - type: 'standard' | 'premium'
 //   - duration: positive whole minutes; defaults to 60
 //   - price: amount in PHP (50 or "50.00"); blank/null keeps dynamic pricing
@@ -278,7 +278,7 @@ router.post('/vouchers', async (req, res, next) => {
 // checked against the vouchers table in batches, and the whole run is inserted
 // in ONE transaction, so a late collision rolls everything back instead of
 // leaving a half-printed batch in the database.
-const BULK_MAX_QUANTITY = 100;
+const BULK_MAX_QUANTITY = 500;
 const BULK_MAX_ROUNDS = 20;
 
 /**

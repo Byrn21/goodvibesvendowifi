@@ -480,8 +480,8 @@
           <div class="studio-field">
             <label for="quantity">Quantity to Generate</label>
             <input class="studio-input" type="number" id="quantity" name="quantity"
-                   min="1" max="100" step="1" value="50" inputmode="numeric" required>
-            <p class="studio-hint">1 to 100 vouchers. Each sheet holds 50.</p>
+                   min="1" max="500" step="1" value="50" inputmode="numeric" required>
+            <p class="studio-hint">1 to 500 vouchers. Each sheet holds 50.</p>
           </div>
 
           <div class="studio-field">
@@ -738,8 +738,8 @@
       function generate(event) {
         event.preventDefault();
         var quantity = parseInt(els.quantity.value, 10);
-        if (!isFinite(quantity) || quantity < 1 || quantity > 100) {
-          setMessage('Quantity must be a whole number between 1 and 100.', true);
+        if (!isFinite(quantity) || quantity < 1 || quantity > 500) {
+          setMessage('Quantity must be a whole number between 1 and 500.', true);
           els.quantity.focus();
           return;
         }

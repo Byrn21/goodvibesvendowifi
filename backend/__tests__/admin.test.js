@@ -1115,7 +1115,7 @@ describe('POST /api/admin/vouchers/bulk — Voucher Print Studio', () => {
     )).toBe(true);
   });
 
-  test('stores the premium tier and rejects quantities outside 1–100', async () => {
+  test('stores the premium tier, accepts 500, and rejects quantities outside 1–500', async () => {
     const ok = await request(app)
       .post('/api/admin/vouchers/bulk')
       .set('X-API-Key', VALID_KEY)
@@ -1130,7 +1130,14 @@ describe('POST /api/admin/vouchers/bulk — Voucher Print Studio', () => {
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.type === 'premium')).toBe(true);
 
-    for (const quantity of [0, 101, 1.5]) {
+    const max = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 500 });
+    expect(max.status).toBe(201);
+    expect(max.body.codes).toHaveLength(500);
+
+    for (const quantity of [0, 501, 1.5]) {
       const bad = await request(app)
         .post('/api/admin/vouchers/bulk')
         .set('X-API-Key', VALID_KEY)
