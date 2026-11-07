@@ -1201,7 +1201,7 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // token: a guest who taps it on mobile data (different origin, no cookie,
     // no localStorage) is then identified by the URL itself.
     const statusToken = claim.sessionId
-      ? setSessionCookie(req, res, claim.sessionId)
+      ? setSessionCookie(req, res, claim.sessionId, 'control')
       : null;
 
     // The status link must identify the session on its own. A bare

@@ -122,19 +122,47 @@ function sign(payload) {
 }
 
 /**
+ * Token scopes.
+ *
+ * READ    — names a session for status polling. It can be minted by any
+ *           lookup that resolves a session (MAC, voucher, address), because
+ *           knowing a session exists is not the same as being allowed to act
+ *           on it.
+ * CONTROL — proves this browser was the one that authenticated, claimed, or
+ *           resumed the session. Only those routes mint it, and only it may
+ *           authorize pause/resume.
+ */
+const SCOPE_READ = 'read';
+const SCOPE_CONTROL = 'control';
+
+/**
  * Issue a token naming one session.
  *
  * @param {string} sessionId
  * @param {number} [ttlMs]
+ * @param {'read'|'control'} [scope] defaults to read (least privilege)
  * @returns {string|null} the token, or null when sessionId is unusable
  */
-function issueSessionToken(sessionId, ttlMs) {
+function issueSessionToken(sessionId, ttlMs, scope) {
   const id = String(sessionId == null ? '' : sessionId).trim();
   if (!id) return null;
 
   const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : TOKEN_TTL_MS;
-  const payload = base64url(id + '.' + (Date.now() + ttl));
+  const prefix = scope === SCOPE_CONTROL ? 'c' : 'r';
+  const payload = base64url(prefix + '.' + id + '.' + (Date.now() + ttl));
   return payload + '.' + sign(payload);
+}
+
+/**
+ * Issue a control token. Kept explicit so state-change call sites cannot
+ * accidentally rely on the default read scope.
+ *
+ * @param {string} sessionId
+ * @param {number} [ttlMs]
+ * @returns {string|null}
+ */
+function issueControlToken(sessionId, ttlMs) {
+  return issueSessionToken(sessionId, ttlMs, SCOPE_CONTROL);
 }
 
 /**
@@ -145,7 +173,7 @@ function issueSessionToken(sessionId, ttlMs) {
  * identifiers.
  *
  * @param {string} token
- * @returns {{sessionId: string, expiresAt: number}|null}
+ * @returns {{sessionId: string, expiresAt: number, scope: 'read'|'control'}|null}
  */
 function verifySessionToken(token) {
   const text = String(token == null ? '' : token).trim();
@@ -170,13 +198,26 @@ function verifySessionToken(token) {
   const dot = decoded.lastIndexOf('.');
   if (dot <= 0) return null;
 
-  const sessionId = decoded.slice(0, dot);
   const expiresAt = Number.parseInt(decoded.slice(dot + 1), 10);
+  let rest = decoded.slice(0, dot);
 
+  // New tokens start with 'r.' / 'c.'. Any legacy token (issued before scopes
+  // existed) has no prefix and is treated as READ ONLY: a token that may have
+  // been minted by an unauthenticated status lookup must never retain control
+  // authority after this change.
+  let scope = SCOPE_READ;
+  if (rest.indexOf('c.') === 0) {
+    scope = SCOPE_CONTROL;
+    rest = rest.slice(2);
+  } else if (rest.indexOf('r.') === 0) {
+    rest = rest.slice(2);
+  }
+
+  const sessionId = rest;
   if (!sessionId || !Number.isFinite(expiresAt)) return null;
   if (Date.now() >= expiresAt) return null;
 
-  return { sessionId, expiresAt };
+  return { sessionId, expiresAt, scope };
 }
 
 /**
@@ -235,10 +276,11 @@ function isSecureRequest(req) {
  * @param {Object} req
  * @param {Object} res
  * @param {string} sessionId
+ * @param {'read'|'control'} [scope] defaults to read
  * @returns {string|null} the token that was set, or null for an unusable id
  */
-function setSessionCookie(req, res, sessionId) {
-  const token = issueSessionToken(sessionId);
+function setSessionCookie(req, res, sessionId, scope) {
+  const token = issueSessionToken(sessionId, undefined, scope);
   if (!token || !res || typeof res.cookie !== 'function') return token;
 
   res.cookie(COOKIE_NAME, token, {
@@ -284,7 +326,10 @@ module.exports = {
   COOKIE_NAME,
   TOKEN_PARAM,
   TOKEN_TTL_MS,
+  SCOPE_READ,
+  SCOPE_CONTROL,
   issueSessionToken,
+  issueControlToken,
   verifySessionToken,
   readCookie,
   tokenFromRequest,

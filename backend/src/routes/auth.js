@@ -208,7 +208,8 @@ router.post('/', async (req, res, next) => {
       // A re-login (active re-authorization or Premium resume) is still this
       // browser's session, so refresh the identity cookie with it.
       if (outcome.status === 200 && outcome.body && outcome.body.sessionId) {
-        const token = setSessionCookie(req, res, outcome.body.sessionId);
+        // Re-login is an authenticated state change: mint control authority.
+        const token = setSessionCookie(req, res, outcome.body.sessionId, 'control');
         outcome.body.statusToken = token || null;
 
         // A status deep link must name the session on its own: the guest can
@@ -531,7 +532,8 @@ router.post('/', async (req, res, next) => {
     // the status page identify the device even when the captive mini-browser
     // starts with empty localStorage and the request arrives from a carrier or
     // tunnel address (req.ip can never match portal_client_context there).
-    const statusToken = setSessionCookie(req, res, sessionId);
+    // Initial login — the one place the browser earns control authority.
+    const statusToken = setSessionCookie(req, res, sessionId, 'control');
 
     return res.json({
       success: true,

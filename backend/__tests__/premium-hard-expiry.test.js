@@ -47,14 +47,14 @@ const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 const sessionService = require('../src/services/session');
 const { PREMIUM_HARD_EXPIRY_HOURS } = require('../src/config');
-const { issueSessionToken } = require('../src/utils/session-token');
+const { issueControlToken } = require('../src/utils/session-token');
 
 /**
  * Cookie header proving this device owns `sessionId`. Pause and resume now
  * require the signed identity GET /status issues, so fixtures present it.
  */
 function asDevice(sessionId) {
-  return 'portal_session=' + issueSessionToken(sessionId);
+  return 'portal_session=' + issueControlToken(sessionId);
 }
 
 const HOUR_MS = 60 * 60 * 1000;

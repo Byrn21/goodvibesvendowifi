@@ -32,14 +32,15 @@ const request = require('supertest');
 const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 const sessionService = require('../src/services/session');
-const { issueSessionToken } = require('../src/utils/session-token');
+const { issueControlToken } = require('../src/utils/session-token');
 
 /**
- * Cookie header proving this device owns `sessionId`. Pause/resume are guarded
- * on the signed identity GET /status issues, so every fixture presents one.
+ * Cookie header proving this device owns `sessionId`. Pause/resume require a
+ * CONTROL token (minted by auth/claim/resume), not the read token GET /status
+ * hands out, so every fixture presents the control scope explicitly.
  */
 function asDevice(sessionId) {
-  return 'portal_session=' + issueSessionToken(sessionId);
+  return 'portal_session=' + issueControlToken(sessionId);
 }
 
 async function applySchema() {
@@ -204,6 +205,37 @@ describe('Premium pause is not a one-shot allowance', () => {
     const names = cols.map((c) => c.name);
     expect(names).not.toContain('can_pause');
     expect(names).not.toContain('used_pause');
+  });
+});
+
+describe('GET /api/session/status — read identity is not control authority', () => {
+  test('a token minted by an unauthenticated ?mac= status read cannot pause the session', async () => {
+    const MAC = 'aa:bb:cc:dd:ee:ff';
+    await sessionService.recordSession({
+      sessionId: 'sess_mac_read_only',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+
+    // Anyone who knows the MAC can read status; that must yield READ scope.
+    const status = await request(app).get('/api/session/status?mac=' + encodeURIComponent(MAC));
+    expect(status.status).toBe(200);
+    expect(status.body.sessionId).toBe('sess_mac_read_only');
+    expect(status.body.statusToken).toBeTruthy();
+
+    const pause = await request(app)
+      .post('/api/session/pause')
+      .set('Cookie', 'portal_session=' + status.body.statusToken)
+      .send({ sessionId: 'sess_mac_read_only' });
+
+    expect(pause.status).toBe(403);
+    expect(pause.body.code).toBe('SESSION_MISMATCH');
+
+    // Nothing changed: the session is still running.
+    const after = await sessionService.getSession('sess_mac_read_only');
+    expect(after.state).toBe('active');
   });
 });
 

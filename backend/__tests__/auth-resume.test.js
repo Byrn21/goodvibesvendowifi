@@ -34,11 +34,11 @@ const app = require('../src/server');
 const { getDb, closeDb } = require('../src/db/client');
 const sessionService = require('../src/services/session');
 const omadaService = require('../src/services/omada');
-const { issueSessionToken } = require('../src/utils/session-token');
+const { issueControlToken } = require('../src/utils/session-token');
 
 /** Cookie header proving this device owns `sessionId` (pause/resume authz). */
 function asDevice(sessionId) {
-  return 'portal_session=' + issueSessionToken(sessionId);
+  return 'portal_session=' + issueControlToken(sessionId);
 }
 
 const MAC = 'AA:BB:CC:DD:EE:FF';

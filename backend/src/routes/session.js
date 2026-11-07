@@ -42,13 +42,18 @@ const {
  *
  * A bare sessionId in a POST body is not proof of anything: it can be copied
  * out of a URL, a screenshot or a log, and pause/resume change a paying guest's
- * network access. The only identity this backend issues for a session is the
- * signed token (`utils/session-token.js`), delivered as the HttpOnly
- * `portal_session` cookie and mirrored as `?token=` for cookie-blocked
- * browsers. The request must carry one that names exactly this session.
+ * network access. The identity this backend issues for a session comes in two
+ * scopes (`utils/session-token.js`):
  *
- * GET /api/session/status re-issues the cookie on every successful resolve, so
- * the status page always holds a fresh one before its buttons are usable.
+ *   read    — minted by any lookup that resolves a session (GET /status by
+ *             MAC, voucher or address). Good for displaying status only.
+ *   control — minted ONLY by POST /api/auth, POST /api/payment/claim and
+ *             POST /api/session/resume, i.e. routes that already performed an
+ *             authenticated action. Required here.
+ *
+ * Both travel as the HttpOnly `portal_session` cookie and as `?token=` for
+ * cookie-blocked browsers. A read token (including every token issued before
+ * scopes existed) is deliberately NOT sufficient for a state change.
  *
  * @param {Object} req Express request
  * @param {Object} session session object from getSession()
@@ -57,7 +62,31 @@ const {
 function assertSessionOwner(req, session) {
   if (!session || !session.sessionId) return false;
   const verified = verifySessionToken(tokenFromRequest(req));
-  return Boolean(verified && verified.sessionId === session.sessionId);
+  return Boolean(
+    verified &&
+    verified.scope === 'control' &&
+    verified.sessionId === session.sessionId
+  );
+}
+
+/**
+ * identityScopeFor — what scope may this request's identity be refreshed at?
+ *
+ * Status lookups are allowed to mint a READ token for anyone who can resolve a
+ * session, but they must never turn that lookup into control authority. When
+ * the request already carries a valid CONTROL token for the same session, that
+ * stronger identity is preserved (the caller already had it — refreshing it
+ * grants nothing new). Otherwise the issued token is read-only.
+ *
+ * @param {Object} req Express request
+ * @param {string} sessionId resolved session
+ * @returns {'read'|'control'}
+ */
+function identityScopeFor(req, sessionId) {
+  const verified = verifySessionToken(tokenFromRequest(req));
+  return verified && verified.scope === 'control' && verified.sessionId === sessionId
+    ? 'control'
+    : 'read';
 }
 
 /**
@@ -303,7 +332,13 @@ router.get('/status', async (req, res, next) => {
     // purpose: the guest should still be told "expired" (with the reason and
     // the deadline) instead of "no session found". The same token is echoed in
     // the body for callers whose browser blocks cookies but keeps localStorage.
-    const statusToken = setSessionCookie(req, res, sessionId);
+    //
+    // Scope is the security boundary (H-01): a lookup by MAC / voucher / address
+    // only refreshes a READ token. A CONTROL token is preserved only when this
+    // request already presented one for the same session.
+    const statusToken = setSessionCookie(
+      req, res, sessionId, identityScopeFor(req, sessionId)
+    );
 
     const serverTime = Math.floor(Date.now() / 1000);
 
@@ -586,8 +621,9 @@ router.post('/resume', async (req, res, next) => {
     if (rejectIfNotOwner(req, res, session)) return;
 
     const resumed = await resumeSession(sessionId);
-    // Same session, refreshed identity: keep the browser bound to it.
-    const statusToken = setSessionCookie(req, res, sessionId);
+    // Same session, refreshed identity: keep the browser bound to it. This route
+    // already required a control token, so it may mint a fresh one.
+    const statusToken = setSessionCookie(req, res, sessionId, 'control');
     return res.json({
       success: true,
       state: 'active',
@@ -777,7 +813,9 @@ async function handleVoucherStatus(req, res, voucher) {
   // name, and an expired one is reported inline instead — no cookie is set for
   // either, so a stale code can never bind the browser to a dead session.
   if (session && session.state === 'active') {
-    const statusToken = setSessionCookie(req, res, session.sessionId);
+    const statusToken = setSessionCookie(
+      req, res, session.sessionId, identityScopeFor(req, session.sessionId)
+    );
     return res.json({
       success: true,
       active: true,
@@ -792,7 +830,9 @@ async function handleVoucherStatus(req, res, voucher) {
 
   if (session && session.state === 'paused') {
     // Premium pause freezes the remaining time on the session row.
-    const statusToken = setSessionCookie(req, res, session.sessionId);
+    const statusToken = setSessionCookie(
+      req, res, session.sessionId, identityScopeFor(req, session.sessionId)
+    );
     return res.json({
       success: true,
       active: true,
@@ -807,7 +847,9 @@ async function handleVoucherStatus(req, res, voucher) {
 
   if (session && (session.state === 'pending_payment' || session.state === 'pending_verification')) {
     // Payment recorded, duration not started yet — the full time is still due.
-    const statusToken = setSessionCookie(req, res, session.sessionId);
+    const statusToken = setSessionCookie(
+      req, res, session.sessionId, identityScopeFor(req, session.sessionId)
+    );
     return res.json({
       success: true,
       active: true,
