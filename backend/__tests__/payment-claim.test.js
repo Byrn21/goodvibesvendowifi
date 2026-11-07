@@ -256,6 +256,44 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.voucherCode).toBeUndefined();
   });
 
+  test('concurrent claims for the same amount reserve distinct vouchers', async () => {
+    await seedUnclaimed('REF-CONC0001', 50);
+    await seedUnclaimed('REF-CONC0002', 50);
+    await seedVoucher('909090', 5000);
+    await seedVoucher('919191', 5000);
+
+    // Hold both requests inside the Omada call: by then each must already own a
+    // DIFFERENT reserved voucher, which is the race the old flow lost.
+    let releaseAuth;
+    const authGate = new Promise((resolve) => { releaseAuth = resolve; });
+    omadaService.authenticateClient.mockImplementation(async () => {
+      await authGate;
+      return { success: true, verified: true, result: 0 };
+    });
+
+    const claim = (suffix) => request(app)
+      .post('/api/payment/claim')
+      .send({ ref_suffix: suffix, mobile_number: MOBILE, client_mac: MAC });
+
+    const first = claim('0001');
+    const second = claim('0002');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    releaseAuth();
+
+    const [a, b] = await Promise.all([first, second]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect([a.body.voucherCode, b.body.voucherCode].sort()).toEqual(['909090', '919191']);
+
+    const claimed = await getDb().query(
+      "SELECT code, state, assigned_ref_no FROM vouchers WHERE code IN ('909090', '919191') ORDER BY code"
+    );
+    expect(claimed.map((v) => v.state)).toEqual(['claimed', 'claimed']);
+    expect(new Set(claimed.map((v) => v.assigned_ref_no)).size).toBe(2);
+
+    await flushQosDelay();
+  });
+
   test('matches the newest unclaimed payment when several share the suffix', async () => {
     await seedUnclaimed('REF-ONE1234', 50);
     await seedUnclaimed('REF-TWO1234', 50);

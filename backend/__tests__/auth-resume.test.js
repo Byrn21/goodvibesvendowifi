@@ -377,7 +377,7 @@ describe('GET /api/session/status?voucher= — offline status checker', () => {
     expect(res.body.remainingSeconds).toBe(180 * 60);
   });
 
-  test('reports EXPIRED for a used voucher whose session has elapsed', async () => {
+  test('answers the collapsed unavailable shape for a used voucher whose session has elapsed', async () => {
     await seedUsedVoucher('444444', 'standard', MAC);
     await sessionService.recordSession({
       sessionId: 'sess_status_done',
@@ -392,26 +392,26 @@ describe('GET /api/session/status?voucher= — offline status checker', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.active).toBe(false);
-    expect(res.body.error).toBe('EXPIRED');
-    expect(res.body.remainingSeconds).toBe(0);
+    expect(res.body.state).toBe('unknown');
+    expect(res.body.error).toBeUndefined();
   });
 
-  test('reports EXPIRED for a used voucher with no session row at all', async () => {
+  test('answers the collapsed unavailable shape for a used voucher with no session row at all', async () => {
     await seedUsedVoucher('555555', 'standard', MAC);
 
     const res = await request(app).get('/api/session/status?voucher=555555');
 
     expect(res.status).toBe(200);
     expect(res.body.active).toBe(false);
-    expect(res.body.error).toBe('EXPIRED');
+    expect(res.body.state).toBe('unknown');
+    expect(res.body.error).toBeUndefined();
   });
 
-  test('returns 404 when the voucher code does not exist', async () => {
+  test('answers the same shape for a code that does not exist (no enumeration oracle)', async () => {
     const res = await request(app).get('/api/session/status?voucher=999999');
 
-    expect(res.status).toBe(404);
-    expect(res.body.active).toBe(false);
-    expect(res.body.code).toBe('VOUCHER_NOT_FOUND');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, active: false, state: 'unknown' });
   });
 
   test('rejects a malformed voucher code with 400', async () => {
@@ -421,7 +421,7 @@ describe('GET /api/session/status?voucher= — offline status checker', () => {
     expect(res.body.code).toBe('INVALID_VOUCHER_FORMAT');
   });
 
-  test('reports EXPIRED for a voucher past its own expiry date', async () => {
+  test('answers the collapsed unavailable shape for a voucher past its own expiry date', async () => {
     await getDb().run(
       `INSERT INTO vouchers (code, type, duration_minutes, state, expires_at)
        VALUES ('777777', 'standard', 60, 'active', '2020-01-01T00:00:00.000Z')`
@@ -431,7 +431,7 @@ describe('GET /api/session/status?voucher= — offline status checker', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.active).toBe(false);
-    expect(res.body.error).toBe('EXPIRED');
+    expect(res.body.state).toBe('unknown');
 
     // The lazy sweep marks the row 'expired', matching validateVoucher().
     const row = await getDb().getOne(`SELECT state FROM vouchers WHERE code = '777777'`);
@@ -696,7 +696,7 @@ describe('GET /api/session/status?voucher= — identity cookie', () => {
     expect(res.body.statusToken).toBeUndefined();
   });
 
-  test('an expired session sets no cookie and reports EXPIRED inline', async () => {
+  test('an expired session sets no cookie and answers the collapsed shape', async () => {
     await seedUsedVoucher('810006', 'standard', MAC);
     await sessionService.recordSession({
       sessionId: 'sess_cookie_dead',
@@ -710,16 +710,16 @@ describe('GET /api/session/status?voucher= — identity cookie', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.active).toBe(false);
-    expect(res.body.error).toBe('EXPIRED');
+    expect(res.body.state).toBe('unknown');
     expect(readSessionCookieLine(res)).toBe('');
     expect(res.body.statusToken).toBeUndefined();
   });
 
-  test('an unknown code sets no cookie', async () => {
+  test('an unknown code sets no cookie and answers the collapsed shape', async () => {
     const res = await request(app).get('/api/session/status?voucher=810007');
 
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('VOUCHER_NOT_FOUND');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ success: true, active: false, state: 'unknown' });
     expect(readSessionCookieLine(res)).toBe('');
   });
 
@@ -783,7 +783,7 @@ describe('GET /api/session/status?voucher= — identity cookie', () => {
     expect(res.body.statusToken).toBeUndefined();
   });
 
-  test('a CLAIMED voucher whose session elapsed reports EXPIRED without binding', async () => {
+  test('a CLAIMED voucher whose session elapsed answers the collapsed shape without binding', async () => {
     await seedClaimedVoucher('810010', 60, 'sess_claim_elapsed');
     await sessionService.expireSession('sess_claim_elapsed', 'time_expired');
 
@@ -791,7 +791,7 @@ describe('GET /api/session/status?voucher= — identity cookie', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.active).toBe(false);
-    expect(res.body.error).toBe('EXPIRED');
+    expect(res.body.state).toBe('unknown');
     expect(readSessionCookieLine(res)).toBe('');
   });
 });

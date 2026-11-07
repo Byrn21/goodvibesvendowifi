@@ -25,6 +25,120 @@ const DEFAULT_DURATION = parseInt(process.env.DEFAULT_SESSION_DURATION || '60', 
 const EXPIRE_CHECK_INTERVAL = parseInt(process.env.SESSION_ENFORCE_INTERVAL || '60000', 10);
 let expirationTimer = null;
 
+// ── Deauth retry policy (M-04) ─────────────────────────────────────────
+// A controller timeout/5xx must not be terminal: the guest may still be online
+// while the local row says expired. Failed kicks are queued in-process and
+// retried by the worker with exponential backoff, bounded to MAX attempts so a
+// permanently dead controller cannot grow the queue or loop forever.
+//
+// The worker processes sessions in small batches (not one long sequential
+// chain), so a controller that hangs for its full timeout delays a cycle by a
+// few seconds per batch instead of tens of minutes for 50 sessions.
+const DEAUTH_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.DEAUTH_MAX_ATTEMPTS || '3', 10) || 3);
+const DEAUTH_RETRY_BASE_MS = Math.max(1000, parseInt(process.env.DEAUTH_RETRY_BASE_MS || '30000', 10) || 30000);
+const SESSION_WORKER_CONCURRENCY = Math.max(1, parseInt(process.env.SESSION_WORKER_CONCURRENCY || '3', 10) || 3);
+
+/** sessionId -> { sessionId, clientMac, apMac, ssidName, attempts, nextAttemptAt } */
+const deauthRetryQueue = new Map();
+
+function deauthRetryDelay(attempts) {
+  return Math.min(DEAUTH_RETRY_BASE_MS * Math.pow(2, Math.max(0, attempts - 1)), 5 * 60 * 1000);
+}
+
+/**
+ * attemptDeauth — one kick attempt, with the same fail-closed semantics as the
+ * old inline call: only an explicit success counts.
+ *
+ * @param {Object} session session or queue entry
+ * @returns {Promise<boolean>}
+ */
+async function attemptDeauth(session) {
+  try {
+    const result = await omadaService.unauthenticateClient({
+      clientMac: session.clientMac,
+      apMac: session.apMac,
+      ssidName: session.ssidName,
+    });
+    if (!result || result.success === false) {
+      console.error(
+        '[expireSession] Omada did NOT revoke access for ' + session.clientMac +
+        ' (path=' + (result && result.path) + ') — the client may stay online'
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[expireSession] Omada unauth failed:', err.message);
+    return false;
+  }
+}
+
+/**
+ * queueDeauthRetry — remember a failed kick for the worker to retry.
+ *
+ * @param {Object} session
+ * @param {number} attempts attempts already performed (including the failure)
+ * @returns {boolean} true when it was queued, false when the budget is spent
+ */
+function queueDeauthRetry(session, attempts) {
+  if (!session || !session.sessionId) return false;
+  if (attempts >= DEAUTH_MAX_ATTEMPTS) return false;
+
+  deauthRetryQueue.set(session.sessionId, {
+    sessionId: session.sessionId,
+    clientMac: session.clientMac,
+    apMac: session.apMac,
+    ssidName: session.ssidName,
+    attempts,
+    nextAttemptAt: Date.now() + deauthRetryDelay(attempts),
+  });
+  return true;
+}
+
+/**
+ * processDeauthRetries — retry due kicks. Called once per worker cycle; also
+ * exported so tests (and an operator script) can drain the queue deterministically.
+ *
+ * @param {number} [nowMs]
+ * @param {boolean} [force] ignore the backoff deadline (tests/manual drain)
+ * @returns {Promise<number>} number of entries attempted
+ */
+async function processDeauthRetries(nowMs = Date.now(), force = false) {
+  const due = [];
+  for (const entry of deauthRetryQueue.values()) {
+    if (force || entry.nextAttemptAt <= nowMs) due.push(entry);
+  }
+
+  for (const entry of due) {
+    const attempts = entry.attempts + 1;
+    const ok = await attemptDeauth(entry);
+    if (ok) {
+      deauthRetryQueue.delete(entry.sessionId);
+      continue;
+    }
+    if (attempts >= DEAUTH_MAX_ATTEMPTS) {
+      console.error(
+        '[expireSession] giving up deauth for ' + entry.clientMac +
+        ' after ' + attempts + ' attempts — the client may stay online'
+      );
+      deauthRetryQueue.delete(entry.sessionId);
+      continue;
+    }
+    entry.attempts = attempts;
+    entry.nextAttemptAt = nowMs + deauthRetryDelay(attempts);
+    deauthRetryQueue.set(entry.sessionId, entry);
+  }
+  return due.length;
+}
+
+function getDeauthQueueSize() {
+  return deauthRetryQueue.size;
+}
+
+function clearDeauthRetries() {
+  deauthRetryQueue.clear();
+}
+
 /**
  * Plan tiers allowed to pause/resume a session.
  *
@@ -402,20 +516,21 @@ async function expireSession(sessionId, reason = 'time_expired', loaded) {
   // success:false means NO route was accepted, so the guest may still be
   // online — that must be visible in the logs, never swallowed.
   if (prevState === 'active' || prevState === 'paused') {
-    try {
-      const result = await omadaService.unauthenticateClient({
-        clientMac: session.clientMac,
-        apMac: session.apMac,
-        ssidName: session.ssidName,
-      });
-      if (!result || result.success === false) {
+    const ok = await attemptDeauth(session);
+    if (!ok) {
+      if (queueDeauthRetry(session, 1)) {
+        console.warn(
+          '[expireSession] queued deauth retry for ' + session.clientMac +
+          ' (session ' + sessionId + ', attempt 1/' + DEAUTH_MAX_ATTEMPTS + ')'
+        );
+      } else {
         console.error(
-          '[expireSession] Omada did NOT revoke access for ' + session.clientMac +
-          ' (path=' + (result && result.path) + ') — the client may stay online'
+          '[expireSession] giving up deauth for ' + session.clientMac +
+          ' after 1 attempt — the client may stay online'
         );
       }
-    } catch (err) {
-      console.error('[expireSession] Omada unauth failed:', err.message);
+    } else {
+      deauthRetryQueue.delete(sessionId);
     }
   }
 
@@ -808,10 +923,6 @@ function startExpirationWorker() {
         LIMIT 50
       `, [now]);
 
-      for (const row of expiredSessions) {
-        await expireSession(row.session_id, 'time_expired');
-      }
-
       // Hard-expired Premium passes, in either live state: the absolute
       // deadline has passed, so the remaining frozen time is void.
       let hardExpired = [];
@@ -831,9 +942,28 @@ function startExpirationWorker() {
         }
       }
 
-      for (const row of hardExpired) {
-        await expireSession(row.session_id, 'hard_expired');
+      // Deduplicate: a Premium session can be in BOTH lists (its time expired
+      // and its absolute deadline passed). Hard expiry is the more specific
+      // reason and must win; processing the id twice would double-kick Omada.
+      const work = new Map();
+      for (const row of expiredSessions) work.set(row.session_id, 'time_expired');
+      for (const row of hardExpired) work.set(row.session_id, 'hard_expired');
+
+      const entries = Array.from(work.entries());
+      for (let i = 0; i < entries.length; i += SESSION_WORKER_CONCURRENCY) {
+        const batch = entries.slice(i, i + SESSION_WORKER_CONCURRENCY);
+        await Promise.all(batch.map(([sessionId, reason]) =>
+          expireSession(sessionId, reason).catch((err) => {
+            console.error(
+              '[expiration-worker] could not expire ' + sessionId + ': ' +
+              ((err && err.message) || String(err))
+            );
+          })
+        ));
       }
+
+      // Retry kicks that failed on this or an earlier cycle (bounded backoff).
+      await processDeauthRetries();
 
       if (expiredSessions.length > 0) {
         console.log(`[expiration-worker] Expired ${expiredSessions.length} session(s)`);
@@ -1101,6 +1231,9 @@ module.exports = {
   isSessionActive,
   startExpirationWorker,
   stopExpirationWorker,
+  processDeauthRetries,
+  getDeauthQueueSize,
+  clearDeauthRetries,
   normalizeMac,
   markPaymentPending,
   activatePaidSession,

@@ -59,6 +59,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await getDb().exec('DELETE FROM sessions; DELETE FROM vouchers;');
+  sessionService.clearDeauthRetries();
   await seedVouchers();
 });
 
@@ -222,6 +223,40 @@ describe('Session State Machine', () => {
     } finally {
       kick.mockRestore();
       errSpy.mockRestore();
+    }
+  });
+
+  test('a failed kick is retried at most DEAUTH_MAX_ATTEMPTS then dropped', async () => {
+    const omadaService = require('../src/services/omada');
+    const kick = jest.spyOn(omadaService, 'unauthenticateClient')
+      .mockRejectedValue(new Error('controller timeout'));
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await sessionService.recordSession({
+        sessionId: 'sess_kick_retry',
+        clientMac: 'aa:bb:cc:dd:ee:ff',
+        duration: 60,
+      });
+
+      await sessionService.expireSession('sess_kick_retry', 'time_expired');
+      expect(kick).toHaveBeenCalledTimes(1);
+      expect(sessionService.getDeauthQueueSize()).toBe(1);
+
+      // Two more attempts exhaust the 3-attempt budget; a fourth drain does
+      // nothing because the entry is dropped.
+      await sessionService.processDeauthRetries(Date.now(), true);
+      await sessionService.processDeauthRetries(Date.now(), true);
+      expect(kick).toHaveBeenCalledTimes(3);
+      expect(sessionService.getDeauthQueueSize()).toBe(0);
+
+      await sessionService.processDeauthRetries(Date.now(), true);
+      expect(kick).toHaveBeenCalledTimes(3);
+    } finally {
+      kick.mockRestore();
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+      sessionService.clearDeauthRetries();
     }
   });
 

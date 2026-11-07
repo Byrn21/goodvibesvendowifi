@@ -68,6 +68,104 @@ const claimLimiter = rateLimit({
   message: { success: false, error: 'Too many requests. Try again later.', code: 'RATE_LIMITED' },
 });
 
+// ── Voucher reservation (M-03) ──────────────────────────────────────────
+// The old flow picked a voucher read-only, authorized the device on Omada
+// (seconds), and only then tried to mark the voucher claimed. Two concurrent
+// claims for the same amount could both pick the same row; one won and the
+// other was already online with nothing accounting for them.
+//
+// The voucher is now RESERVED in its own short transaction before the
+// controller is contacted. PostgreSQL uses FOR UPDATE SKIP LOCKED so two
+// claims cannot even select the same row; SQLite relies on the conditional
+// update (its writer lock serialises the two transactions) and the retry loop
+// below picks the next voucher when a row was taken in between.
+const RESERVATION_ATTEMPTS = 3;
+const RESERVATION_RETRY_DELAY_MS = 20;
+
+/**
+ * Is this a transient lock/contention error worth retrying?
+ * @param {*} err
+ * @returns {boolean}
+ */
+function isRetryableLockError(err) {
+  const code = String((err && err.code) || '');
+  const message = String((err && err.message) || '');
+  return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED' || code === '40P01' ||
+    /database is locked|deadlock detected/i.test(message);
+}
+
+/**
+ * Reserve ONE active, unassigned voucher priced for this payment.
+ *
+ * @param {Object} db database handle
+ * @param {number} priceCentavos
+ * @param {string} refNo payment reference this reservation is bound to
+ * @returns {Promise<Object|null>} the reserved voucher row, or null when none
+ */
+async function reserveVoucherForClaim(db, priceCentavos, refNo) {
+  for (let attempt = 0; attempt < RESERVATION_ATTEMPTS; attempt++) {
+    try {
+      const outcome = await db.transaction(async (tx) => {
+        const lock = db._driver === 'pg' ? ' FOR UPDATE SKIP LOCKED' : '';
+        const candidate = await tx.getOne(
+          `SELECT id, code, type, duration_minutes, down_kbps, up_kbps FROM vouchers
+            WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
+            ORDER BY id ASC LIMIT 1${lock}`,
+          [priceCentavos]
+        );
+        if (!candidate) return { voucher: null, hadCandidate: false };
+
+        const update = await tx.run(
+          `UPDATE vouchers
+              SET state = 'reserved', assigned_ref_no = ?
+            WHERE id = ? AND state = 'active' AND assigned_ref_no IS NULL`,
+          [refNo, candidate.id]
+        );
+        return {
+          voucher: update.rowCount > 0 ? candidate : null,
+          hadCandidate: true,
+        };
+      });
+
+      if (outcome.voucher) return outcome.voucher;
+      // A concurrent claim took the row between SELECT and UPDATE. Try again;
+      // the next attempt selects the next active voucher.
+      if (!outcome.hadCandidate) return null;
+    } catch (err) {
+      if (!isRetryableLockError(err) || attempt === RESERVATION_ATTEMPTS - 1) throw err;
+      await new Promise((resolve) => setTimeout(resolve, RESERVATION_RETRY_DELAY_MS));
+    }
+  }
+  return null;
+}
+
+/**
+ * Put a reservation back after the authorization or commit failed. The row is
+ * only touched while it is still OURS (state 'reserved' + this ref), so a
+ * concurrent claim that somehow finished cannot be undone here.
+ *
+ * @param {Object} db
+ * @param {number} voucherId
+ * @param {string} refNo
+ * @returns {Promise<void>}
+ */
+async function releaseVoucherReservation(db, voucherId, refNo) {
+  if (!voucherId) return;
+  try {
+    await db.run(
+      `UPDATE vouchers
+          SET state = 'active', assigned_ref_no = NULL
+        WHERE id = ? AND state = 'reserved' AND assigned_ref_no = ?`,
+      [voucherId, refNo]
+    );
+  } catch (err) {
+    console.error(
+      '[payment/claim] could not release reserved voucher ' + voucherId +
+      ' for ref ' + refNo + ': ' + ((err && err.message) || String(err))
+    );
+  }
+}
+
 // ── Validation helpers ──────────────────────────────────────────────────
 const MAC_RE = /^[0-9A-F]{2}(:[0-9A-F]{2}){5}$/;
 
@@ -693,6 +791,10 @@ async function findClaimedEntitlement(db, refSuffix, mobileNumber) {
 }
 
 router.post('/claim', claimLimiter, async (req, res, next) => {
+  // Set when a voucher is reserved and cleared when it is consumed/released.
+  // The outer catch uses it as a last-resort safety net so no unexpected throw
+  // leaves an unreserved voucher stuck in 'reserved'.
+  let reservedVoucher = null;
   try {
     const body = req.body || {};
     const refSuffix = typeof body.ref_suffix === 'string' ? body.ref_suffix.trim() : '';
@@ -957,12 +1059,12 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // 60 for a 1-hour voucher), stored as a plain integer. It is NOT
     // milliseconds and must never be divided by 60000 — it is already the
     // exact total-minutes value the session, Omada and the SMS report.
-    const voucher = await db.getOne(
-      `SELECT id, code, type, duration_minutes, down_kbps, up_kbps FROM vouchers
-        WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
-        ORDER BY id ASC LIMIT 1`,
-      [amountCentavos]
-    );
+    //
+    // Reserve BEFORE contacting the controller. Two concurrent claims for the
+    // same amount must reserve two DIFFERENT vouchers; neither may authorize a
+    // device while the other could still consume the same row.
+    const voucher = await reserveVoucherForClaim(db, amountCentavos, event.ref_no);
+    if (voucher) reservedVoucher = { id: voucher.id, refNo: event.ref_no };
     if (!voucher) {
       console.warn(
         '[payment/claim] no active unassigned voucher priced ' + amountCentavos +
@@ -1071,6 +1173,12 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
     // captive portal page (which refreshes the context beacon) and claiming
     // again.
     if (authAttempted && !authorized) {
+      // The controller refused: put the voucher back so the payment remains
+      // claimable. Nothing was written for this claim, so the retry is clean.
+      if (reservedVoucher) {
+        await releaseVoucherReservation(db, reservedVoucher.id, reservedVoucher.refNo);
+        reservedVoucher = null;
+      }
       const contextMissing = authErrorCode === 'MISSING_PORTAL_CONTEXT';
       return res.status(502).json({
         success: false,
@@ -1091,9 +1199,9 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       claim = await db.transaction(async (tx) => {
         const voucherUpdate = await tx.run(
           `UPDATE vouchers
-              SET state = 'claimed', assigned_ref_no = ?
-            WHERE id = ? AND state = 'active' AND assigned_ref_no IS NULL`,
-          [event.ref_no, voucher.id]
+              SET state = 'claimed'
+            WHERE id = ? AND state = 'reserved' AND assigned_ref_no = ?`,
+          [voucher.id, event.ref_no]
         );
         if (voucherUpdate.rowCount === 0) {
           throw httpError(404, 'NO_VOUCHER_AVAILABLE', 'No voucher is available for this amount. Please contact support.');
@@ -1165,6 +1273,12 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
         return { voucherCode: voucher.code, refNo: event.ref_no, sessionId };
       });
     } catch (err) {
+      // The transaction rolled back, so the voucher is still 'reserved' — hand
+      // it back before answering, or it would never be sellable again.
+      if (reservedVoucher) {
+        await releaseVoucherReservation(db, reservedVoucher.id, reservedVoucher.refNo);
+        reservedVoucher = null;
+      }
       if (err.code === 'PAYMENT_NOT_FOUND' || err.code === 'NO_VOUCHER_AVAILABLE') {
         console.warn(
           '[payment/claim] commit rolled back for ref ' + event.ref_no +
@@ -1174,6 +1288,9 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       }
       throw err;
     }
+
+    // Committed: the reservation is now a claimed voucher.
+    reservedVoucher = null;
 
     // The claim is COMMITTED from here on: the customer's money is reconciled
     // to a voucher. Nothing below may turn this into an error response.
@@ -1262,6 +1379,12 @@ router.post('/claim', claimLimiter, async (req, res, next) => {
       });
     }
   } catch (err) {
+    // Unexpected failure after a reservation: release it so a transient error
+    // cannot strand a sellable voucher in 'reserved' forever.
+    if (reservedVoucher) {
+      await releaseVoucherReservation(getDb(), reservedVoucher.id, reservedVoucher.refNo);
+      reservedVoucher = null;
+    }
     next(err);
   }
 });

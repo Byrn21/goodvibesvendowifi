@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS vouchers (
     price           INTEGER, -- fixed price in centavos; NULL = use dynamic pricing
     down_kbps       INTEGER, -- per-voucher download cap in Kbps; NULL = tier/default caps
     up_kbps         INTEGER, -- per-voucher upload cap in Kbps; NULL = tier/default caps
-    state           VARCHAR(16) NOT NULL DEFAULT 'active', -- 'active' | 'claimed' | 'used' | 'expired'
+    state           VARCHAR(16) NOT NULL DEFAULT 'active', -- 'active' | 'reserved' | 'claimed' | 'used' | 'expired'
     assigned_ref_no VARCHAR(64), -- full payment ref_no this voucher was claimed for; NULL = unclaimed (see migrate_add_voucher_ref.js)
     used_by_mac     VARCHAR(32),
     used_at         TIMESTAMP,

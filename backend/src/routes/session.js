@@ -709,8 +709,11 @@ function maskVoucherCode(code) {
  *
  *   - active/paused session for the code   -> { active: true, remainingSeconds, expiresAt }
  *   - unused voucher with a known duration -> { active: true, remainingSeconds: duration*60 }
- *   - consumed voucher whose session ended -> { active: false, error: 'EXPIRED' }
- *   - code not in the vouchers table       -> 404 { active: false }
+ *   - consumed / expired / unknown code    -> 200 { active: false, state: 'unknown' }
+ *
+ * The last group is deliberately ONE shape (H-03): telling an unauthenticated
+ * caller apart "never existed" from "expired" from "already used" turns this
+ * endpoint into a voucher-space enumeration oracle.
  *
  * The only write is marking an already time-expired voucher row 'expired',
  * matching validateVoucher()'s lazy sweep.
@@ -732,15 +735,12 @@ async function handleVoucherStatus(req, res, voucher) {
     [code]
   );
 
-  // Unknown code — distinct from an expired one so the UI can say
-  // "not found" rather than "expired".
+  // H-03: an unknown code, an expired code and a fully-used one all answer
+  // with the SAME 200 body. Distinguishing them let an unauthenticated caller
+  // enumerate the code space: 404 meant "not in the table", EXPIRED meant
+  // "real but consumed", and an active body meant "redeemable now".
   if (!row) {
-    return res.status(404).json({
-      success: false,
-      active: false,
-      code: 'VOUCHER_NOT_FOUND',
-      error: 'Voucher code not found.',
-    });
+    return sendVoucherUnavailable(res);
   }
 
   const serverTime = Math.floor(Date.now() / 1000);
@@ -759,15 +759,7 @@ async function handleVoucherStatus(req, res, voucher) {
         await getDb().run(`UPDATE vouchers SET state = 'expired' WHERE id = ?`, [row.id]);
       } catch (_) { /* best-effort sweep — the response is unchanged */ }
     }
-    return res.json({
-      success: true,
-      active: false,
-      error: 'EXPIRED',
-      state: 'expired',
-      remainingSeconds: 0,
-      expiresAt: voucherExpiresAt,
-      voucherType: normalizeVoucherType(row.type),
-    });
+    return sendVoucherUnavailable(res);
   }
 
   // The session this code already created, if any. Resolved BEFORE the
@@ -863,16 +855,20 @@ async function handleVoucherStatus(req, res, voucher) {
   }
 
   // Used voucher with no live session left (or a session that has fully
-  // elapsed): fully consumed / expired.
-  return res.json({
-    success: true,
-    active: false,
-    error: 'EXPIRED',
-    state: (session && session.state) || 'expired',
-    remainingSeconds: 0,
-    expiresAt: (session && session.expiresAt) || voucherExpiresAt,
-    voucherType: normalizeVoucherType((session && session.voucherType) || row.type),
-  });
+  // elapsed). Same collapsed answer as an unknown code (H-03).
+  return sendVoucherUnavailable(res);
+}
+
+/**
+ * sendVoucherUnavailable — the ONE response for a code that is not currently
+ * redeemable/queryable in a distinguishable way. Deliberately carries no
+ * reason, duration, tier or expiry so "never existed" and "already used"
+ * cannot be told apart by an unauthenticated caller.
+ *
+ * @param {Object} res
+ */
+function sendVoucherUnavailable(res) {
+  return res.json({ success: true, active: false, state: 'unknown' });
 }
 
 function computeRemaining(session, serverTime) {
