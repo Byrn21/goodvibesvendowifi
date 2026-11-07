@@ -34,10 +34,29 @@ const { run: runClaimAttemptsMigration } = require('./db/migrate_add_claim_attem
 
 const app = express();
 
-// Trust the first proxy hop (a reverse proxy or tunnel, e.g. Nginx) so req.ip
-// resolves to the client's real IP from X-Forwarded-For — required for correct
-// per-IP limits.
-app.set('trust proxy', 1);
+// ── Proxy trust (H-02) ────────────────────────────────────────
+// Do NOT trust X-Forwarded-For unless the deployment explicitly says how many
+// reverse proxies are in front of us. On the documented LAN/Termux setup the
+// backend is reachable directly, so a client-supplied header would become
+// req.ip — and every per-IP rate limiter (login, API, claim, context) would
+// hand out a fresh bucket per request.
+//
+// TRUST_PROXY_HOPS unset / 0 / invalid  -> false (use the socket address)
+// TRUST_PROXY_HOPS=1                    -> one known proxy/tunnel hop
+function resolveTrustProxyHops(raw) {
+  const text = raw === undefined || raw === null ? '' : String(raw).trim();
+  if (!text) return false;
+  const hops = Number(text);
+  return Number.isInteger(hops) && hops > 0 ? hops : false;
+}
+
+const TRUST_PROXY_HOPS = resolveTrustProxyHops(process.env.TRUST_PROXY_HOPS);
+app.set('trust proxy', TRUST_PROXY_HOPS);
+if (TRUST_PROXY_HOPS === false) {
+  console.log('[network] proxy trust disabled — X-Forwarded-For will be ignored for req.ip');
+} else {
+  console.log('[network] trusting ' + TRUST_PROXY_HOPS + ' proxy hop(s) for X-Forwarded-For');
+}
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:8080';
@@ -227,10 +246,9 @@ const loginLimiter = rateLimit({
         retryAfterSeconds: retryAfterSecs,
       });
   },
-  // Disable X-Forwarded-For validation — a proxy's header format can trigger ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
-  validate: {
-    xForwardedForHeader: false,
-  },
+  // Keep express-rate-limit's X-Forwarded-For validation enabled (the default).
+  // It flags the exact misconfiguration this fix removes: an XFF header on a
+  // request whose req.ip is not proxy-derived.
 });
 
 // Generous limiter for the rest of the API (dashboard stats, voucher list,
@@ -242,15 +260,42 @@ const apiLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Too many requests. Please wait.', code: 'RATE_LIMITED' },
-  validate: {
-    xForwardedForHeader: false,
-  },
+});
+
+// Dedicated strict limiter for the voucher status oracle (H-03/H-02). A guest
+// checks one code at a time; enumerating the six-digit space must not be
+// possible by rotating X-Forwarded-For. Keyed on req.ip, which is the socket
+// address unless TRUST_PROXY_HOPS explicitly trusts a known proxy.
+const voucherStatusLimiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 min
+  max: parseInt(process.env.VOUCHER_STATUS_RATE_LIMIT_MAX || '10', 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Only the voucher lookup is an enumeration oracle; ordinary session polling
+  // must stay on the generous apiLimiter.
+  skip: (req) => !req.query || !req.query.voucher,
+  message: { success: false, error: 'Too many voucher checks. Please wait.', code: 'RATE_LIMITED' },
+});
+
+// Reauthorize performs controller logins + extPortal/auth calls and is
+// unauthenticated (the client is offline by definition). A reconnect needs a
+// handful of attempts, not an unlimited amplifier.
+const reauthorizeLimiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 min
+  max: parseInt(process.env.REAUTHORIZE_RATE_LIMIT_MAX || '10', 10),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Too many reconnect attempts. Please wait.', code: 'RATE_LIMITED' },
 });
 
 // Login endpoints get the strict limiter; everything else the generous one
 app.use('/api/admin/login', loginLimiter);
 app.use('/api/auth', loginLimiter);
 app.use('/api/', apiLimiter);
+
+// Endpoint-specific limiters run after the global one and before the routers.
+app.get('/api/session/status', voucherStatusLimiter);
+app.post('/api/session/reauthorize', reauthorizeLimiter);
 
 // ── Routes ───────────────────────────────────────────────────
 app.use('/api/auth',     authRoutes);

@@ -27,6 +27,9 @@ process.env.PORT = '0';
 process.env.OMADA_BASE_URL = ''; // mock Omada: no real controller call
 process.env.RATE_LIMIT_MAX_REQUESTS = '10000';
 process.env.LOGIN_RATE_LIMIT_MAX = '10000';
+// This suite exercises more voucher lookups/reconnects than a human would.
+process.env.VOUCHER_STATUS_RATE_LIMIT_MAX = '10000';
+process.env.REAUTHORIZE_RATE_LIMIT_MAX = '10000';
 process.env.PAUSE_ENABLED = 'true';
 
 const request = require('supertest');

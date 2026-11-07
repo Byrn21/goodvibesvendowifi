@@ -252,8 +252,8 @@ function readCookie(req, name) {
 /**
  * Is this request served over HTTPS (directly or through the tunnel)?
  *
- * `app.set('trust proxy', 1)` makes req.secure read X-Forwarded-Proto for the
- * hop in front of us. The LAN direct flow is plain HTTP on 192.168.0.x, where a
+ * When `TRUST_PROXY_HOPS` is set, Express reads X-Forwarded-Proto for that hop.
+ * The LAN direct flow is plain HTTP on 192.168.0.x, where a
  * `Secure` cookie would be silently DROPPED by the browser — so the flag has to
  * follow the actual scheme instead of being hard-coded.
  *

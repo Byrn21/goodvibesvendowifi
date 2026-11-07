@@ -29,6 +29,8 @@ process.env.PORT = '0';
 process.env.OMADA_BASE_URL = '';
 process.env.RATE_LIMIT_MAX_REQUESTS = '10000';
 process.env.LOGIN_RATE_LIMIT_MAX = '10000';
+// The request-address tests send X-Forwarded-For; trust that single hop.
+process.env.TRUST_PROXY_HOPS = '1';
 
 const request = require('supertest');
 const app = require('../src/server');

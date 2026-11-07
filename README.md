@@ -926,9 +926,10 @@ Run in watch mode with `npm run test:watch`.
   login/auth endpoints.
 - MAC addresses are normalized to uppercase colon-separated format before storage
   and lookup.
-- The server trusts one proxy hop (`trust proxy = 1`) so per-IP rate limits use
-  the real client IP when the portal is reached through a reverse proxy or
-  tunnel. Set it to `0` when guests connect to the Termux device directly.
+- The server does **not** trust `X-Forwarded-For` by default, so a client
+  cannot rotate its per-IP rate-limit bucket with a header. Set
+  `TRUST_PROXY_HOPS=1` only when one known reverse proxy or tunnel is the sole
+  ingress; leave it unset on a direct LAN/Termux deployment.
 - Never place secrets in `config/config.js` — it ships with the portal frontend.
 
 ---

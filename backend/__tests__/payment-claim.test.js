@@ -27,6 +27,9 @@ process.env.MACRODROID_WEBHOOK_SECRET = 'test-webhook-secret-abc123';
 process.env.MACRODROID_PESOS_PER_MINUTE = '10';
 process.env.RATE_LIMIT_MAX_REQUESTS = '10000';
 process.env.LOGIN_RATE_LIMIT_MAX = '10000';
+// This harness emulates a reverse proxy by sending X-Forwarded-For; trust the
+// single hop explicitly (production defaults to trusting none).
+process.env.TRUST_PROXY_HOPS = '1';
 // The claim route's own limiter caps at 30/15 min in production; this suite
 // exercises more claims than that (every branch plus the idempotent retries).
 process.env.CLAIM_RATE_LIMIT_MAX = '10000';
