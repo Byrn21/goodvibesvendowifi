@@ -327,23 +327,6 @@
       min-height: 0.34in;
     }
 
-    .voucher-card__logo {
-      display: block;
-      width: auto;
-      height: auto;
-      max-width: 0.95in;
-      max-height: 40px;
-      object-fit: contain;
-    }
-
-    .voucher-card__brand-text {
-      font-size: 7px;
-      font-weight: 700;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-      color: var(--primary);
-      line-height: 1.2;
-    }
 
     .voucher-card__type {
       padding: 1px 6px;
@@ -571,7 +554,6 @@
       'use strict';
 
       var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
-      var BRAND_NAME = (window.CONFIG && window.CONFIG.brandName) || 'WiFi Voucher';
       var ADMIN_TOKEN = localStorage.getItem('adminToken') || '';
       var PER_SHEET = 50;
 
@@ -674,10 +656,12 @@
       }
 
       function cardHtml(code) {
+        // Exactly one brand element is rendered: the imported logo when an
+        // object URL exists, otherwise the default text. Never both.
         var logo = state.logoUrl
-          ? '<img class="voucher-card__logo" src="' + escapeHtml(state.logoUrl) + '" alt="Voucher logo"' +
-            ' style="max-height: 40px; object-fit: contain;">'
-          : '<span class="voucher-card__brand-text">' + escapeHtml(BRAND_NAME) + '</span>';
+          ? '<img src="' + escapeHtml(state.logoUrl) + '" alt="Logo"' +
+            ' style="max-height: 40px; width: auto; object-fit: contain; display: block; margin: 0 auto;">'
+          : '<div class="voucher-title" style="font-weight: bold;">Voucher</div>';
         return '<article class="voucher-card voucher-card--' + state.type + '">' +
             '<span class="voucher-card__duration">' + escapeHtml(formatDuration(state.duration)) + '</span>' +
             '<div class="voucher-card__brand">' + logo + '</div>' +
@@ -689,6 +673,8 @@
       // One .print-page element per 50 vouchers. Each sheet is sized in inches
       // (A4 or 8.5x13) and becomes its own printed page.
       function renderPreview() {
+        // Resolve the file input and create/reuse its object URL before any
+        // card HTML is built, so every card receives a live blob URL.
         syncLogoUrl();
 
         if (!state.codes.length) {
