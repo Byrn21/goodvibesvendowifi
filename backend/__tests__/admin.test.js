@@ -1089,23 +1089,35 @@ describe('GET /api/admin/transactions/history + /export — Settled payments', (
 });
 
 describe('POST /api/admin/vouchers/bulk — Voucher Print Studio', () => {
-  test('creates the requested number of unique 6-digit codes', async () => {
-    const res = await request(app)
+  test('previews unique codes, then saves the same batch on confirm', async () => {
+    const preview = await request(app)
       .post('/api/admin/vouchers/bulk')
       .set('X-API-Key', VALID_KEY)
-      .send({ type: 'standard', quantity: 25 });
+      .send({ type: 'standard', quantity: 25, preview: true });
 
-    expect(res.status).toBe(201);
-    expect(res.body.success).toBe(true);
-    expect(res.body.type).toBe('standard');
-    expect(res.body.codes).toHaveLength(25);
-    expect(new Set(res.body.codes).size).toBe(25);
-    res.body.codes.forEach((code) => expect(code).toMatch(/^\d{6}$/));
+    expect(preview.status).toBe(200);
+    expect(preview.body.success).toBe(true);
+    expect(preview.body.codes).toHaveLength(25);
+    expect(new Set(preview.body.codes).size).toBe(25);
+    preview.body.codes.forEach((code) => expect(code).toMatch(/^\d{6}$/));
 
-    const placeholders = res.body.codes.map(() => '?').join(', ');
+    const placeholders = preview.body.codes.map(() => '?').join(', ');
+    const before = await getDb().query(
+      `SELECT code FROM vouchers WHERE code IN (${placeholders})`,
+      preview.body.codes
+    );
+    expect(before).toHaveLength(0);
+
+    const saved = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 25, preview: false, codes: preview.body.codes });
+    expect(saved.status).toBe(201);
+    expect(saved.body).toEqual({ success: true });
+
     const rows = await getDb().query(
       `SELECT code, type, duration_minutes, state FROM vouchers WHERE code IN (${placeholders})`,
-      res.body.codes
+      preview.body.codes
     );
     expect(rows).toHaveLength(25);
     expect(rows.every((row) =>
@@ -1116,62 +1128,102 @@ describe('POST /api/admin/vouchers/bulk — Voucher Print Studio', () => {
   });
 
   test('stores the premium tier, accepts 500, and rejects quantities outside 1–500', async () => {
+    const preview = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'premium', quantity: 2, preview: true });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.codes).toHaveLength(2);
+
     const ok = await request(app)
       .post('/api/admin/vouchers/bulk')
       .set('X-API-Key', VALID_KEY)
-      .send({ type: 'premium', quantity: 2 });
-
+      .send({ type: 'premium', quantity: 2, preview: false, codes: preview.body.codes });
     expect(ok.status).toBe(201);
-    expect(ok.body.type).toBe('premium');
+
     const rows = await getDb().query(
       'SELECT type FROM vouchers WHERE code IN (?, ?)',
-      ok.body.codes
+      preview.body.codes
     );
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.type === 'premium')).toBe(true);
 
-    const max = await request(app)
+    const maxPreview = await request(app)
       .post('/api/admin/vouchers/bulk')
       .set('X-API-Key', VALID_KEY)
-      .send({ type: 'standard', quantity: 500 });
-    expect(max.status).toBe(201);
-    expect(max.body.codes).toHaveLength(500);
+      .send({ type: 'standard', quantity: 500, preview: true });
+    expect(maxPreview.status).toBe(200);
+    expect(maxPreview.body.codes).toHaveLength(500);
+
+    const maxSave = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 500, preview: false, codes: maxPreview.body.codes });
+    expect(maxSave.status).toBe(201);
 
     for (const quantity of [0, 501, 1.5]) {
       const bad = await request(app)
         .post('/api/admin/vouchers/bulk')
         .set('X-API-Key', VALID_KEY)
-        .send({ type: 'standard', quantity });
+        .send({ type: 'standard', quantity, preview: true });
       expect(bad.status).toBe(400);
       expect(bad.body.success).toBe(false);
     }
   });
 
   test('stores a custom duration and a peso price in centavos', async () => {
+    const preview = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 3, duration: 1440, price: 75.5, preview: true });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.codes).toHaveLength(3);
+
     const res = await request(app)
       .post('/api/admin/vouchers/bulk')
       .set('X-API-Key', VALID_KEY)
-      .send({ type: 'standard', quantity: 3, duration: 1440, price: 75.5 });
-
+      .send({
+        type: 'standard',
+        quantity: 3,
+        duration: 1440,
+        price: 75.5,
+        preview: false,
+        codes: preview.body.codes,
+      });
     expect(res.status).toBe(201);
-    expect(res.body.codes).toHaveLength(3);
 
-    const placeholders = res.body.codes.map(() => '?').join(', ');
+    const placeholders = preview.body.codes.map(() => '?').join(', ');
     const rows = await getDb().query(
       `SELECT duration_minutes, price FROM vouchers WHERE code IN (${placeholders})`,
-      res.body.codes
+      preview.body.codes
     );
     expect(rows).toHaveLength(3);
     expect(rows.every((row) => row.duration_minutes === 1440 && row.price === 7550)).toBe(true);
 
+    const dynamicPreview = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 1, duration: 90, price: '', preview: true });
+    expect(dynamicPreview.status).toBe(200);
+    expect(dynamicPreview.body.codes).toHaveLength(1);
+
     const dynamic = await request(app)
       .post('/api/admin/vouchers/bulk')
       .set('X-API-Key', VALID_KEY)
-      .send({ type: 'standard', quantity: 1, duration: 90, price: '' });
+      .send({
+        type: 'standard',
+        quantity: 1,
+        duration: 90,
+        price: '',
+        preview: false,
+        codes: dynamicPreview.body.codes,
+      });
     expect(dynamic.status).toBe(201);
     const dynamicRow = await getDb().getOne(
       'SELECT duration_minutes, price FROM vouchers WHERE code = ?',
-      [dynamic.body.codes[0]]
+      [dynamicPreview.body.codes[0]]
     );
     expect(dynamicRow.duration_minutes).toBe(90);
     expect(dynamicRow.price).toBeNull();
@@ -1194,10 +1246,103 @@ describe('POST /api/admin/vouchers/bulk — Voucher Print Studio', () => {
     }
   });
 
+  test('preview generates collision-checked codes without saving them', async () => {
+    const res = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 10, preview: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.codes).toHaveLength(10);
+    expect(new Set(res.body.codes).size).toBe(10);
+    res.body.codes.forEach((code) => expect(code).toMatch(/^\d{6}$/));
+
+    const rows = await getDb().query(
+      'SELECT code FROM vouchers WHERE code IN (' + res.body.codes.map(() => '?').join(', ') + ')',
+      res.body.codes
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  test('confirm saves the exact previewed codes with the previewed settings', async () => {
+    const preview = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'premium', quantity: 3, duration: 1440, price: 75.5, preview: true });
+
+    expect(preview.status).toBe(200);
+    expect(preview.body.codes).toHaveLength(3);
+
+    const saved = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({
+        type: 'premium',
+        quantity: 3,
+        duration: 1440,
+        price: 75.5,
+        preview: false,
+        codes: preview.body.codes,
+      });
+
+    expect(saved.status).toBe(201);
+    expect(saved.body).toEqual({ success: true });
+
+    const placeholders = preview.body.codes.map(() => '?').join(', ');
+    const rows = await getDb().query(
+      `SELECT code, type, duration_minutes, price, state FROM vouchers WHERE code IN (${placeholders})`,
+      preview.body.codes
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.every((row) =>
+      row.type === 'premium' &&
+      row.duration_minutes === 1440 &&
+      row.price === 7550 &&
+      row.state === 'active'
+    )).toBe(true);
+
+    const duplicate = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({
+        type: 'premium',
+        quantity: 3,
+        duration: 1440,
+        price: 75.5,
+        preview: false,
+        codes: preview.body.codes,
+      });
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body.success).toBe(false);
+  });
+
+  test('confirm rejects malformed, duplicate, or wrong-length code batches', async () => {
+    const badBatches = [
+      ['123456', '123456'],
+      ['12345', '123457'],
+      [123456, 123457],
+      ['123456'],
+    ];
+
+    for (const codes of badBatches) {
+      const res = await request(app)
+        .post('/api/admin/vouchers/bulk')
+        .set('X-API-Key', VALID_KEY)
+        .send({ type: 'standard', quantity: 2, preview: false, codes });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    }
+
+    const rows = await getDb().query('SELECT code FROM vouchers WHERE code IN (?, ?)', ['123456', '123457']);
+    expect(rows).toHaveLength(0);
+  });
+
   test('requires authentication', async () => {
     const res = await request(app)
       .post('/api/admin/vouchers/bulk')
-      .send({ type: 'standard', quantity: 1 });
+      .send({ type: 'standard', quantity: 1, preview: true });
 
     expect(res.status).toBe(401);
   });

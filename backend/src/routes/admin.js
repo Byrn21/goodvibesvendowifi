@@ -263,11 +263,13 @@ router.post('/vouchers', async (req, res, next) => {
 
 // Bulk-create vouchers for the admin "Voucher Print Studio".
 //
-// Body: { type, quantity, duration?, price? }
+// Body: { type, quantity, duration?, price?, preview?, codes? }
 //   - quantity: whole number 1–500 (the studio prints 50 cards per sheet)
 //   - type: 'standard' | 'premium'
 //   - duration: positive whole minutes; defaults to 60
 //   - price: amount in PHP (50 or "50.00"); blank/null keeps dynamic pricing
+//   - preview: true generates and collision-checks codes WITHOUT inserting
+//   - codes: the previewed 6-digit codes to insert when preview is false
 //
 // Money crosses the API as pesos because that is what the studio's Price (PHP)
 // field collects. parsePriceToCentavos converts it exactly once, so the row
@@ -277,9 +279,26 @@ router.post('/vouchers', async (req, res, next) => {
 // printed sheet must not carry a guessed or duplicated code. Candidates are
 // checked against the vouchers table in batches, and the whole run is inserted
 // in ONE transaction, so a late collision rolls everything back instead of
-// leaving a half-printed batch in the database.
+// leaving a half-printed batch in the database. A preview only reads the
+// database; the insert waits for the admin to confirm the exact codes shown.
 const BULK_MAX_QUANTITY = 500;
 const BULK_MAX_ROUNDS = 20;
+const VOUCHER_CODE_RE = /^\d{6}$/;
+
+/** Return the provided codes when they are a clean batch, otherwise null. */
+function validateProvidedCodes(value, quantity) {
+  if (!Array.isArray(value) || value.length !== quantity) return null;
+
+  const seen = new Set();
+  for (const code of value) {
+    if (typeof code !== 'string' || !VOUCHER_CODE_RE.test(code) || seen.has(code)) {
+      return null;
+    }
+    seen.add(code);
+  }
+
+  return value;
+}
 
 /**
  * Generate `quantity` unique 6-digit codes not already present in vouchers.
@@ -361,12 +380,51 @@ router.post('/vouchers/bulk', async (req, res, next) => {
     }
 
     const db = getDb();
-    const codes = await generateUniqueVoucherCodes(db, quantity);
-    if (!codes) {
-      return res.status(503).json({
-        success: false,
-        error: 'Could not allocate unique voucher codes right now. Nothing was saved — please try again.',
-      });
+
+    // Step 1: preview. Generate and collision-check, but never insert.
+    if (body.preview === true) {
+      const previewCodes = await generateUniqueVoucherCodes(db, quantity);
+      if (!previewCodes) {
+        return res.status(503).json({
+          success: false,
+          error: 'Could not allocate unique voucher codes right now. Nothing was saved — please try again.',
+        });
+      }
+      return res.status(200).json({ success: true, codes: previewCodes });
+    }
+
+    // Step 2: confirm. Save the exact previewed codes after one final
+    // collision check. Callers that omit `codes` keep the old generate-and-save
+    // behaviour for compatibility with existing admin tooling.
+    let codes;
+    if (body.codes !== undefined) {
+      codes = validateProvidedCodes(body.codes, quantity);
+      if (!codes) {
+        return res.status(400).json({
+          success: false,
+          error: `codes must be an array of ${quantity} unique 6-digit strings`,
+        });
+      }
+
+      const placeholders = codes.map(() => '?').join(', ');
+      const takenRows = await db.query(
+        `SELECT code FROM vouchers WHERE code IN (${placeholders})`,
+        codes
+      );
+      if (takenRows.length) {
+        return res.status(409).json({
+          success: false,
+          error: 'One or more voucher codes were already saved. Nothing was saved — generate a new preview.',
+        });
+      }
+    } else {
+      codes = await generateUniqueVoucherCodes(db, quantity);
+      if (!codes) {
+        return res.status(503).json({
+          success: false,
+          error: 'Could not allocate unique voucher codes right now. Nothing was saved — please try again.',
+        });
+      }
     }
 
     await db.transaction(async (tx) => {
@@ -378,7 +436,7 @@ router.post('/vouchers/bulk', async (req, res, next) => {
       }
     });
 
-    res.status(201).json({ success: true, type: tier, quantity: codes.length, codes });
+    res.status(201).json({ success: true });
   } catch (err) {
     // A concurrent request can take a code between the SELECT and the INSERT.
     // The transaction has already rolled back, so nothing partial is stored.
