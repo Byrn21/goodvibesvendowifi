@@ -25,6 +25,7 @@
  */
 
 const express = require('express');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const router = express.Router();
 const { getDb } = require('../db/client');
@@ -256,6 +257,131 @@ router.post('/vouchers', async (req, res, next) => {
 
     res.status(201).json({ success: true, created });
   } catch (err) {
+    next(err);
+  }
+});
+
+// Bulk-create vouchers for the admin "Voucher Print Studio".
+//
+// Body: { type, quantity, durationMinutes?, price? }
+//   - quantity: whole number 1–100 (the studio prints 50 cards per sheet)
+//   - type: 'standard' | 'premium'
+//   - durationMinutes defaults to 60, price to NULL (dynamic pricing)
+//
+// Codes are generated here with crypto.randomInt, never in the browser: the
+// printed sheet must not carry a guessed or duplicated code. Candidates are
+// checked against the vouchers table in batches, and the whole run is inserted
+// in ONE transaction, so a late collision rolls everything back instead of
+// leaving a half-printed batch in the database.
+const BULK_MAX_QUANTITY = 100;
+const BULK_MAX_ROUNDS = 20;
+
+/**
+ * Generate `quantity` unique 6-digit codes not already present in vouchers.
+ * One SELECT per batch keeps this cheap against a remote (Supabase) database.
+ *
+ * @param {{query: Function}} db
+ * @param {number} quantity
+ * @returns {Promise<string[]|null>} null when uniqueness could not be met
+ */
+async function generateUniqueVoucherCodes(db, quantity) {
+  const codes = [];
+  const used = new Set();
+
+  for (let round = 0; round < BULK_MAX_ROUNDS; round++) {
+    const needed = quantity - codes.length;
+    if (needed === 0) break;
+
+    const candidates = [];
+    const batch = new Set();
+    while (candidates.length < needed) {
+      const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+      if (used.has(code) || batch.has(code)) continue;
+      batch.add(code);
+      candidates.push(code);
+    }
+
+    const placeholders = candidates.map(() => '?').join(', ');
+    const rows = await db.query(
+      `SELECT code FROM vouchers WHERE code IN (${placeholders})`,
+      candidates
+    );
+    const taken = new Set(rows.map((row) => row.code));
+
+    for (const code of candidates) {
+      if (!taken.has(code)) {
+        used.add(code);
+        codes.push(code);
+      }
+    }
+  }
+
+  return codes.length === quantity ? codes : null;
+}
+
+router.post('/vouchers/bulk', async (req, res, next) => {
+  try {
+    const body = req.body || {};
+
+    const tier = normalizeVoucherType(body.type);
+    if (tier !== 'standard' && tier !== 'premium') {
+      return res.status(400).json({ success: false, error: 'type must be "standard" or "premium"' });
+    }
+
+    const quantity = Number(body.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > BULK_MAX_QUANTITY) {
+      return res.status(400).json({
+        success: false,
+        error: `quantity must be a whole number between 1 and ${BULK_MAX_QUANTITY}`,
+      });
+    }
+
+    const durationMinutes = body.durationMinutes === undefined ? 60 : Number(body.durationMinutes);
+    if (!Number.isInteger(durationMinutes) || durationMinutes < 1) {
+      return res.status(400).json({ success: false, error: 'durationMinutes must be a positive whole number' });
+    }
+
+    const price = body.price === undefined ? null : body.price;
+    if (price !== null && (!Number.isInteger(price) || price < 0)) {
+      return res.status(400).json({
+        success: false,
+        error: 'price must be a non-negative integer number of centavos (50.00 pesos = 5000)',
+      });
+    }
+
+    const db = getDb();
+    const codes = await generateUniqueVoucherCodes(db, quantity);
+    if (!codes) {
+      return res.status(503).json({
+        success: false,
+        error: 'Could not allocate unique voucher codes right now. Nothing was saved — please try again.',
+      });
+    }
+
+    await db.transaction(async (tx) => {
+      for (const code of codes) {
+        await tx.run(
+          "INSERT INTO vouchers (code, type, duration_minutes, price, state) VALUES (?, ?, ?, ?, 'active')",
+          [code, tier, durationMinutes, price]
+        );
+      }
+    });
+
+    res.status(201).json({ success: true, type: tier, quantity: codes.length, codes });
+  } catch (err) {
+    // A concurrent request can take a code between the SELECT and the INSERT.
+    // The transaction has already rolled back, so nothing partial is stored.
+    const uniqueViolation = err && (
+      err.code === '23505' ||
+      err.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+      /UNIQUE constraint failed/i.test(err.message || '')
+    );
+    if (uniqueViolation) {
+      return res.status(409).json({
+        success: false,
+        error: 'A generated code was taken by another request. Nothing was saved — please try again.',
+      });
+    }
     next(err);
   }
 });

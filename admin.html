@@ -183,7 +183,10 @@
       <div class="admin-card content-section" id="section-vouchers">
         <div class="admin-card--header">
           <h2 class="admin-card--title">Vouchers</h2>
-          <button type="button" class="btn btn--danger" id="btn-delete-all" disabled>Delete All Vouchers</button>
+          <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+            <a class="btn btn--primary" href="voucher-generator.html">Voucher Print Studio</a>
+            <button type="button" class="btn btn--danger" id="btn-delete-all" disabled>Delete All Vouchers</button>
+          </div>
         </div>
         <div id="delete-all-msg"></div>
         <div id="tab-vouchers" aria-busy="true">

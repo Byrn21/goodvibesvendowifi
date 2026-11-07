@@ -1087,3 +1087,64 @@ describe('GET /api/admin/transactions/history + /export — Settled payments', (
     expect(lines[1].split(',')[1]).toBe('HISTREF002');
   });
 });
+
+describe('POST /api/admin/vouchers/bulk — Voucher Print Studio', () => {
+  test('creates the requested number of unique 6-digit codes', async () => {
+    const res = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 25 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.success).toBe(true);
+    expect(res.body.type).toBe('standard');
+    expect(res.body.codes).toHaveLength(25);
+    expect(new Set(res.body.codes).size).toBe(25);
+    res.body.codes.forEach((code) => expect(code).toMatch(/^\d{6}$/));
+
+    const placeholders = res.body.codes.map(() => '?').join(', ');
+    const rows = await getDb().query(
+      `SELECT code, type, duration_minutes, state FROM vouchers WHERE code IN (${placeholders})`,
+      res.body.codes
+    );
+    expect(rows).toHaveLength(25);
+    expect(rows.every((row) =>
+      row.type === 'standard' &&
+      row.duration_minutes === 60 &&
+      row.state === 'active'
+    )).toBe(true);
+  });
+
+  test('stores the premium tier and rejects quantities outside 1–100', async () => {
+    const ok = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'premium', quantity: 2 });
+
+    expect(ok.status).toBe(201);
+    expect(ok.body.type).toBe('premium');
+    const rows = await getDb().query(
+      'SELECT type FROM vouchers WHERE code IN (?, ?)',
+      ok.body.codes
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.type === 'premium')).toBe(true);
+
+    for (const quantity of [0, 101, 1.5]) {
+      const bad = await request(app)
+        .post('/api/admin/vouchers/bulk')
+        .set('X-API-Key', VALID_KEY)
+        .send({ type: 'standard', quantity });
+      expect(bad.status).toBe(400);
+      expect(bad.body.success).toBe(false);
+    }
+  });
+
+  test('requires authentication', async () => {
+    const res = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .send({ type: 'standard', quantity: 1 });
+
+    expect(res.status).toBe(401);
+  });
+});

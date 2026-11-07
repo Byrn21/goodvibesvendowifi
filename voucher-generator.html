@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voucher Print Studio — GoodVibesVendoWifi</title>
+  <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
+  <link rel="stylesheet" href="assets/style.css?v=12">
+  <style id="page-size-style">
+    @page { size: 8.5in 13in; margin: 0; }
+  </style>
+  <style>
+    html, body { margin: 0; }
+
+    .studio {
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
+      background: var(--surface-2);
+    }
+
+    /* ---- Header ---- */
+    .studio-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border-light);
+    }
+
+    .studio-header__title {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.3;
+    }
+
+    .studio-header__subtitle {
+      margin-top: 2px;
+      font-size: 0.8rem;
+      color: var(--text-2);
+    }
+
+    .studio-header__back {
+      flex-shrink: 0;
+      text-decoration: none;
+    }
+
+    /* ---- Layout: controls left, printable preview right ---- */
+    .studio-layout {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      align-items: start;
+    }
+
+    .studio-sidebar {
+      align-self: start;
+      position: sticky;
+      top: 0;
+      max-height: 100dvh;
+      overflow-y: auto;
+      padding: 24px;
+      background: var(--surface);
+      border-right: 1px solid var(--border-light);
+    }
+
+    .studio-form {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .studio-field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border: 0;
+      margin: 0;
+      padding: 0;
+    }
+
+    .studio-field > label,
+    .studio-field > legend {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .studio-field > legend { margin-bottom: 6px; }
+
+    .studio-input {
+      width: 100%;
+      padding: 10px 12px;
+      font-family: var(--font);
+      font-size: 0.95rem;
+      color: var(--text);
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .studio-input:focus {
+      outline: none;
+      border-color: var(--border-focus);
+      box-shadow: 0 0 0 3px rgba(93, 61, 17, 0.12);
+    }
+
+    .studio-hint {
+      font-size: 0.75rem;
+      color: var(--text-2);
+      line-height: 1.45;
+    }
+
+    .studio-radios {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .studio-radio {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      padding: 10px 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-2);
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    .studio-radio:has(input:checked) {
+      color: var(--success-text);
+      background: var(--success-bg);
+      border-color: var(--green);
+    }
+
+    .studio-radio input { accent-color: var(--green); }
+
+    .studio-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .studio-actions .btn {
+      width: 100%;
+      padding: 11px 16px;
+      font-size: 0.9rem;
+    }
+
+    .studio-message:empty { display: none; }
+
+    .studio-message .success-msg,
+    .studio-message .error-msg {
+      margin: 0;
+      padding: 8px 10px;
+      font-size: 0.8rem;
+      border-radius: 8px;
+    }
+
+    .studio-message .success-msg {
+      color: var(--success-text);
+      background: var(--success-bg);
+      border: 1px solid var(--success-border);
+    }
+
+    .studio-message .error-msg {
+      color: var(--error-text);
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+    }
+
+    /* ---- Preview pane ---- */
+    .studio-main {
+      min-width: 0;
+      padding: 20px 24px 40px;
+    }
+
+    .studio-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      max-width: 900px;
+      margin: 0 auto 14px;
+      font-size: 0.8rem;
+      color: var(--text-2);
+    }
+
+    .studio-toolbar__hint {
+      flex-shrink: 0;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--surface);
+      border: 1px solid var(--border-light);
+      font-weight: 600;
+    }
+
+    .preview-scroll {
+      display: flex;
+      justify-content: center;
+      overflow: auto;
+      padding: 4px 4px 24px;
+    }
+
+    .preview-pages {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .studio-empty {
+      max-width: 420px;
+      margin: 40px auto;
+      padding: 36px 24px;
+      text-align: center;
+      color: var(--text-2);
+      background: var(--surface);
+      border: 2px dashed var(--border);
+      border-radius: var(--radius-md);
+    }
+
+    .studio-empty__icon {
+      display: block;
+      margin: 0 auto 10px;
+      color: var(--border);
+    }
+
+    .studio-empty p { font-size: 0.9rem; }
+
+    /* ---- Printable sheet: 5 columns x 10 rows ---- */
+    .print-page {
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      width: 8.5in;
+      height: 13in;
+      padding: 0.3in;
+      background: #fff;
+      border-radius: 2px;
+      box-shadow: 0 2px 14px rgba(44, 24, 16, 0.2);
+      zoom: 0.82;
+      page-break-after: always;
+    }
+
+    body.paper-a4 .print-page {
+      width: 8.27in;
+      height: 11.69in;
+    }
+
+    .print-page__grid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      grid-template-rows: repeat(10, minmax(0, 1fr));
+      gap: 0.08in;
+    }
+
+    .voucher-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      gap: 2px;
+      padding: 0.05in 0.04in;
+      text-align: center;
+      overflow: hidden;
+      background: #fff;
+      border: 1px dashed #b9a88e;
+      border-radius: 3px;
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+
+    .voucher-card__brand {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 0.34in;
+    }
+
+    .voucher-card__logo {
+      max-width: 0.95in;
+      max-height: 0.34in;
+      object-fit: contain;
+    }
+
+    .voucher-card__brand-text {
+      font-size: 7px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--primary);
+      line-height: 1.2;
+    }
+
+    .voucher-card__type {
+      padding: 1px 6px;
+      font-size: 7px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #1d4ed8;
+      background: #dbeafe;
+      border-radius: 999px;
+    }
+
+    .voucher-card--premium .voucher-card__type {
+      color: #6d28d9;
+      background: #ede9fe;
+    }
+
+    .voucher-card__code {
+      font-family: var(--mono);
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      line-height: 1.1;
+      color: var(--text);
+    }
+
+    @media (max-width: 1000px) {
+      .studio-layout { grid-template-columns: 280px minmax(0, 1fr); }
+      .print-page { zoom: 0.68; }
+    }
+
+    @media (max-width: 820px) {
+      .studio-layout { grid-template-columns: 1fr; }
+      .studio-sidebar {
+        position: static;
+        max-height: none;
+        border-right: 0;
+        border-bottom: 1px solid var(--border-light);
+      }
+      .studio-main { padding: 16px 12px 32px; }
+      .preview-scroll { justify-content: flex-start; }
+      .print-page { zoom: 0.75; }
+    }
+
+    /* ---- Print: only the sheets leave the printer ---- */
+    @media print {
+      html, body {
+        background: #fff !important;
+        min-height: 0;
+      }
+
+      .studio-header,
+      .studio-sidebar,
+      .studio-toolbar,
+      .studio-empty {
+        display: none !important;
+      }
+
+      .studio,
+      .studio-layout,
+      .studio-main {
+        display: block;
+        min-height: 0;
+        padding: 0;
+        margin: 0;
+        background: #fff;
+      }
+
+      .preview-scroll {
+        display: block;
+        overflow: visible;
+        padding: 0;
+      }
+
+      .preview-pages {
+        display: block;
+        gap: 0;
+      }
+
+      .print-page {
+        zoom: 1;
+        width: 8.5in;
+        height: 13in;
+        margin: 0;
+        padding: 0.3in;
+        border-radius: 0;
+        box-shadow: none;
+        page-break-after: always;
+        break-after: page;
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+
+      body.paper-a4 .print-page {
+        width: 8.27in;
+        height: 11.69in;
+      }
+
+      .print-page:last-child {
+        page-break-after: auto;
+        break-after: auto;
+      }
+
+      .voucher-card {
+        page-break-inside: avoid;
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="studio">
+    <header class="studio-header">
+      <div>
+        <div class="studio-header__title">Voucher Print Studio</div>
+        <p class="studio-header__subtitle">Generate codes, add your logo, and print cut-ready voucher sheets.</p>
+      </div>
+      <a class="btn btn--secondary studio-header__back" href="admin.html">Back to Admin</a>
+    </header>
+
+    <div class="studio-layout">
+      <aside class="studio-sidebar">
+        <form class="studio-form" id="studio-form">
+          <div class="studio-field">
+            <label for="quantity">Quantity to Generate</label>
+            <input class="studio-input" type="number" id="quantity" name="quantity"
+                   min="1" max="100" step="1" value="50" inputmode="numeric" required>
+            <p class="studio-hint">1 to 100 vouchers. Each sheet holds 50.</p>
+          </div>
+
+          <div class="studio-field">
+            <label for="logo-file">Import Local Logo</label>
+            <input class="studio-input" type="file" id="logo-file" accept="image/*">
+            <p class="studio-hint">Shown on the vouchers from this browser only — the image is never uploaded.</p>
+          </div>
+
+          <fieldset class="studio-field">
+            <legend>Voucher Type</legend>
+            <div class="studio-radios">
+              <label class="studio-radio">
+                <input type="radio" name="voucher-type" value="standard" checked>
+                <span>Standard</span>
+              </label>
+              <label class="studio-radio">
+                <input type="radio" name="voucher-type" value="premium">
+                <span>Premium</span>
+              </label>
+            </div>
+          </fieldset>
+
+          <div class="studio-field">
+            <label for="paper-size">Paper Size</label>
+            <select class="studio-input" id="paper-size">
+              <option value="letter" selected>8.5 &times; 13 in (Long)</option>
+              <option value="a4">A4 (210 &times; 297 mm)</option>
+            </select>
+          </div>
+
+          <div class="studio-message" id="studio-message" role="status" aria-live="polite"></div>
+
+          <div class="studio-actions">
+            <button type="submit" class="btn btn--primary" id="generate-btn">Generate &amp; Preview</button>
+            <button type="button" class="btn btn--secondary" id="print-btn" disabled>Print Vouchers</button>
+          </div>
+          <p class="studio-hint">Print at 100% scale and cut along the dashed borders.</p>
+        </form>
+      </aside>
+
+      <main class="studio-main">
+        <div class="studio-toolbar">
+          <span id="preview-status">No vouchers generated yet.</span>
+          <span class="studio-toolbar__hint">5 &times; 10 per sheet</span>
+        </div>
+
+        <div class="preview-scroll" id="preview">
+          <div class="studio-empty">
+            <svg class="studio-empty__icon" width="48" height="48" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" focusable="false">
+              <path d="M2 9a3 3 0 0 1 0 6v2a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-2a3 3 0 0 1 0-6V7a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/>
+              <path d="M13 5v2"/><path d="M13 11v2"/><path d="M13 17v2"/>
+            </svg>
+            <p>Choose a quantity and voucher type, then select <strong>Generate &amp; Preview</strong>.</p>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <script src="config/config.js?v=20261024"></script>
+  <script>
+    (function () {
+      'use strict';
+
+      var API_BASE = (window.CONFIG && window.CONFIG.apiBaseUrl) || '';
+      var BRAND_NAME = (window.CONFIG && window.CONFIG.brandName) || 'WiFi Voucher';
+      var ADMIN_TOKEN = localStorage.getItem('adminToken') || '';
+      var PER_SHEET = 50;
+
+      var els = {
+        form: document.getElementById('studio-form'),
+        quantity: document.getElementById('quantity'),
+        logoFile: document.getElementById('logo-file'),
+        paperSize: document.getElementById('paper-size'),
+        pageStyle: document.getElementById('page-size-style'),
+        message: document.getElementById('studio-message'),
+        generateBtn: document.getElementById('generate-btn'),
+        printBtn: document.getElementById('print-btn'),
+        preview: document.getElementById('preview'),
+        previewStatus: document.getElementById('preview-status')
+      };
+
+      var state = {
+        codes: [],
+        type: 'standard',
+        logoUrl: ''
+      };
+
+      if (!ADMIN_TOKEN) {
+        window.location.href = 'login.html';
+      }
+
+      function handleUnauthorized() {
+        localStorage.removeItem('adminToken');
+        localStorage.removeItem('adminUsername');
+        window.location.href = 'login.html';
+      }
+
+      function api(path, opts) {
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
+        return fetch(API_BASE + path, opts).then(function (r) {
+          if (r.status === 401) {
+            handleUnauthorized();
+            return new Promise(function () {});
+          }
+          return r.json().catch(function () { return {}; }).then(function (data) {
+            return { ok: r.ok, status: r.status, data: data };
+          });
+        });
+      }
+
+      function escapeHtml(value) {
+        var map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+        return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return map[c]; });
+      }
+
+      function setMessage(text, isError) {
+        els.message.innerHTML = text
+          ? '<p class="' + (isError ? 'error-msg' : 'success-msg') + '">' + escapeHtml(text) + '</p>'
+          : '';
+      }
+
+      function selectedType() {
+        var checked = document.querySelector('input[name="voucher-type"]:checked');
+        return checked ? checked.value : 'standard';
+      }
+
+      function typeLabel(type) {
+        return type === 'premium' ? 'Premium' : 'Standard';
+      }
+
+      function cardHtml(code) {
+        var logo = state.logoUrl
+          ? '<img class="voucher-card__logo" src="' + escapeHtml(state.logoUrl) + '" alt="Voucher logo">'
+          : '<span class="voucher-card__brand-text">' + escapeHtml(BRAND_NAME) + '</span>';
+        return '<article class="voucher-card voucher-card--' + state.type + '">' +
+            '<div class="voucher-card__brand">' + logo + '</div>' +
+            '<span class="voucher-card__type">' + typeLabel(state.type) + '</span>' +
+            '<div class="voucher-card__code">' + escapeHtml(code) + '</div>' +
+          '</article>';
+      }
+
+      // One .print-page element per 50 vouchers. Each sheet is sized in inches
+      // (A4 or 8.5x13) and becomes its own printed page.
+      function renderPreview() {
+        if (!state.codes.length) {
+          els.preview.innerHTML =
+            '<div class="studio-empty"><p>No vouchers on the sheet yet. Generate a batch to preview it here.</p></div>';
+          els.printBtn.disabled = true;
+          els.previewStatus.textContent = 'No vouchers generated yet.';
+          return;
+        }
+
+        var pages = [];
+        for (var i = 0; i < state.codes.length; i += PER_SHEET) {
+          var chunk = state.codes.slice(i, i + PER_SHEET);
+          var cards = chunk.map(cardHtml).join('');
+          pages.push(
+            '<section class="print-page" aria-label="Voucher sheet ' + (pages.length + 1) + '">' +
+              '<div class="print-page__grid">' + cards + '</div>' +
+            '</section>'
+          );
+        }
+
+        els.preview.innerHTML = '<div class="preview-pages">' + pages.join('') + '</div>';
+        els.printBtn.disabled = false;
+        els.previewStatus.textContent = state.codes.length + ' ' + typeLabel(state.type) +
+          ' voucher' + (state.codes.length === 1 ? '' : 's') + ' \u00b7 ' +
+          pages.length + ' sheet' + (pages.length === 1 ? '' : 's');
+      }
+
+      function setGenerating(isGenerating) {
+        els.generateBtn.disabled = isGenerating;
+        els.generateBtn.textContent = isGenerating ? 'Generating\u2026' : 'Generate & Preview';
+      }
+
+      function generate(event) {
+        event.preventDefault();
+        var quantity = parseInt(els.quantity.value, 10);
+        if (!isFinite(quantity) || quantity < 1 || quantity > 100) {
+          setMessage('Quantity must be a whole number between 1 and 100.', true);
+          els.quantity.focus();
+          return;
+        }
+
+        state.type = selectedType();
+        setMessage('', false);
+        setGenerating(true);
+
+        api('/api/admin/vouchers/bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: state.type, quantity: quantity })
+        }).then(function (res) {
+          if (!res.ok) {
+            throw new Error((res.data && res.data.error) || 'Could not generate vouchers.');
+          }
+          var codes = res.data && res.data.codes;
+          if (!Array.isArray(codes) || !codes.length) {
+            throw new Error('The server did not return any voucher codes.');
+          }
+          state.codes = codes;
+          state.type = (res.data && res.data.type) || state.type;
+          renderPreview();
+          setMessage('Generated and saved ' + codes.length + ' ' + typeLabel(state.type) +
+            ' voucher' + (codes.length === 1 ? '' : 's') + '.', false);
+        }).catch(function (err) {
+          setMessage(err.message, true);
+        }).finally(function () {
+          setGenerating(false);
+        });
+      }
+
+      function handleLogoChange() {
+        var file = els.logoFile.files && els.logoFile.files[0];
+        if (!file) return;
+        if (!/^image\//.test(file.type)) {
+          setMessage('Please choose an image file for the logo.', true);
+          els.logoFile.value = '';
+          return;
+        }
+
+        if (state.logoUrl) URL.revokeObjectURL(state.logoUrl);
+        state.logoUrl = URL.createObjectURL(file);
+        if (state.codes.length) renderPreview();
+        setMessage('Logo added. It appears on the preview and the printed vouchers.', false);
+      }
+
+      function handleTypeChange() {
+        state.type = selectedType();
+        // The batch already exists in the backend with the previous type, so a
+        // relabel would print cards that do not match their stored tier.
+        if (state.codes.length) {
+          state.codes = [];
+          renderPreview();
+          setMessage('Voucher type changed. Generate again to create matching codes.', false);
+        }
+      }
+
+      function applyPaperSize() {
+        var isA4 = els.paperSize.value === 'a4';
+        document.body.classList.toggle('paper-a4', isA4);
+        els.pageStyle.textContent = '@page { size: ' + (isA4 ? 'A4 portrait' : '8.5in 13in') + '; margin: 0; }';
+      }
+
+      els.form.addEventListener('submit', generate);
+      els.logoFile.addEventListener('change', handleLogoChange);
+      els.paperSize.addEventListener('change', applyPaperSize);
+      els.printBtn.addEventListener('click', function () {
+        if (state.codes.length) window.print();
+      });
+      document.querySelectorAll('input[name="voucher-type"]').forEach(function (input) {
+        input.addEventListener('change', handleTypeChange);
+      });
+      window.addEventListener('beforeunload', function () {
+        if (state.logoUrl) URL.revokeObjectURL(state.logoUrl);
+      });
+
+      applyPaperSize();
+    })();
+  </script>
+</body>
+</html>
