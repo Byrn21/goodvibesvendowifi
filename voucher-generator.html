@@ -265,6 +265,7 @@
     }
 
     .voucher-card {
+      position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -317,6 +318,20 @@
     .voucher-card--premium .voucher-card__type {
       color: #6d28d9;
       background: #ede9fe;
+    }
+
+    .voucher-card__duration {
+      position: absolute;
+      top: 0.03in;
+      right: 0.04in;
+      padding: 1px 4px;
+      font-size: 6px;
+      font-weight: 700;
+      color: #92400e;
+      background: #fef3c7;
+      border-radius: 999px;
+      line-height: 1.4;
+      white-space: nowrap;
     }
 
     .voucher-card__code {
@@ -433,6 +448,20 @@
           </div>
 
           <div class="studio-field">
+            <label for="duration">Duration (minutes)</label>
+            <input class="studio-input" type="number" id="duration" name="duration"
+                   min="1" step="1" value="60" inputmode="numeric" required>
+            <p class="studio-hint">Printed on each voucher as hours when it divides evenly, e.g. 60 &rarr; 1 hr.</p>
+          </div>
+
+          <div class="studio-field">
+            <label for="price">Price (PHP)</label>
+            <input class="studio-input" type="number" id="price" name="price"
+                   min="0" step="0.01" inputmode="decimal" placeholder="Leave blank for dynamic">
+            <p class="studio-hint">Optional. Leave blank to use dynamic pricing.</p>
+          </div>
+
+          <div class="studio-field">
             <label for="logo-file">Import Local Logo</label>
             <input class="studio-input" type="file" id="logo-file" accept="image/*">
             <p class="studio-hint">Shown on the vouchers from this browser only — the image is never uploaded.</p>
@@ -504,6 +533,8 @@
       var els = {
         form: document.getElementById('studio-form'),
         quantity: document.getElementById('quantity'),
+        duration: document.getElementById('duration'),
+        price: document.getElementById('price'),
         logoFile: document.getElementById('logo-file'),
         paperSize: document.getElementById('paper-size'),
         pageStyle: document.getElementById('page-size-style'),
@@ -517,6 +548,7 @@
       var state = {
         codes: [],
         type: 'standard',
+        duration: 60,
         logoUrl: ''
       };
 
@@ -565,11 +597,21 @@
         return type === 'premium' ? 'Premium' : 'Standard';
       }
 
+      function formatDuration(minutes) {
+        var value = Number(minutes) || 0;
+        if (value > 0 && value % 60 === 0) {
+          var hours = value / 60;
+          return hours + ' hr' + (hours === 1 ? '' : 's');
+        }
+        return value + ' min';
+      }
+
       function cardHtml(code) {
         var logo = state.logoUrl
           ? '<img class="voucher-card__logo" src="' + escapeHtml(state.logoUrl) + '" alt="Voucher logo">'
           : '<span class="voucher-card__brand-text">' + escapeHtml(BRAND_NAME) + '</span>';
         return '<article class="voucher-card voucher-card--' + state.type + '">' +
+            '<span class="voucher-card__duration">' + escapeHtml(formatDuration(state.duration)) + '</span>' +
             '<div class="voucher-card__brand">' + logo + '</div>' +
             '<span class="voucher-card__type">' + typeLabel(state.type) + '</span>' +
             '<div class="voucher-card__code">' + escapeHtml(code) + '</div>' +
@@ -602,6 +644,7 @@
         els.printBtn.disabled = false;
         els.previewStatus.textContent = state.codes.length + ' ' + typeLabel(state.type) +
           ' voucher' + (state.codes.length === 1 ? '' : 's') + ' \u00b7 ' +
+          formatDuration(state.duration) + ' \u00b7 ' +
           pages.length + ' sheet' + (pages.length === 1 ? '' : 's');
       }
 
@@ -619,6 +662,24 @@
           return;
         }
 
+        var duration = parseInt(els.duration.value, 10);
+        if (!isFinite(duration) || duration < 1) {
+          setMessage('Duration must be a positive whole number of minutes.', true);
+          els.duration.focus();
+          return;
+        }
+
+        var priceText = els.price.value.trim();
+        var price = null;
+        if (priceText !== '') {
+          price = Number(priceText);
+          if (!isFinite(price) || price < 0) {
+            setMessage('Price must be a non-negative amount in PHP, or left blank for dynamic pricing.', true);
+            els.price.focus();
+            return;
+          }
+        }
+
         state.type = selectedType();
         setMessage('', false);
         setGenerating(true);
@@ -626,7 +687,7 @@
         api('/api/admin/vouchers/bulk', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type: state.type, quantity: quantity })
+          body: JSON.stringify({ type: state.type, quantity: quantity, duration: duration, price: price })
         }).then(function (res) {
           if (!res.ok) {
             throw new Error((res.data && res.data.error) || 'Could not generate vouchers.');
@@ -637,6 +698,7 @@
           }
           state.codes = codes;
           state.type = (res.data && res.data.type) || state.type;
+          state.duration = duration;
           renderPreview();
           setMessage('Generated and saved ' + codes.length + ' ' + typeLabel(state.type) +
             ' voucher' + (codes.length === 1 ? '' : 's') + '.', false);

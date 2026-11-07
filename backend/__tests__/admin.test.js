@@ -1140,6 +1140,53 @@ describe('POST /api/admin/vouchers/bulk — Voucher Print Studio', () => {
     }
   });
 
+  test('stores a custom duration and a peso price in centavos', async () => {
+    const res = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 3, duration: 1440, price: 75.5 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.codes).toHaveLength(3);
+
+    const placeholders = res.body.codes.map(() => '?').join(', ');
+    const rows = await getDb().query(
+      `SELECT duration_minutes, price FROM vouchers WHERE code IN (${placeholders})`,
+      res.body.codes
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.every((row) => row.duration_minutes === 1440 && row.price === 7550)).toBe(true);
+
+    const dynamic = await request(app)
+      .post('/api/admin/vouchers/bulk')
+      .set('X-API-Key', VALID_KEY)
+      .send({ type: 'standard', quantity: 1, duration: 90, price: '' });
+    expect(dynamic.status).toBe(201);
+    const dynamicRow = await getDb().getOne(
+      'SELECT duration_minutes, price FROM vouchers WHERE code = ?',
+      [dynamic.body.codes[0]]
+    );
+    expect(dynamicRow.duration_minutes).toBe(90);
+    expect(dynamicRow.price).toBeNull();
+  });
+
+  test('rejects invalid duration and price values', async () => {
+    for (const payload of [
+      { type: 'standard', quantity: 1, duration: 0 },
+      { type: 'standard', quantity: 1, duration: 1.5 },
+      { type: 'standard', quantity: 1, duration: 'sixty' },
+      { type: 'standard', quantity: 1, price: -1 },
+      { type: 'standard', quantity: 1, price: 'not-a-price' },
+    ]) {
+      const res = await request(app)
+        .post('/api/admin/vouchers/bulk')
+        .set('X-API-Key', VALID_KEY)
+        .send(payload);
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    }
+  });
+
   test('requires authentication', async () => {
     const res = await request(app)
       .post('/api/admin/vouchers/bulk')

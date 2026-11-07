@@ -263,11 +263,16 @@ router.post('/vouchers', async (req, res, next) => {
 
 // Bulk-create vouchers for the admin "Voucher Print Studio".
 //
-// Body: { type, quantity, durationMinutes?, price? }
+// Body: { type, quantity, duration?, price? }
 //   - quantity: whole number 1–100 (the studio prints 50 cards per sheet)
 //   - type: 'standard' | 'premium'
-//   - durationMinutes defaults to 60, price to NULL (dynamic pricing)
+//   - duration: positive whole minutes; defaults to 60
+//   - price: amount in PHP (50 or "50.00"); blank/null keeps dynamic pricing
 //
+// Money crosses the API as pesos because that is what the studio's Price (PHP)
+// field collects. parsePriceToCentavos converts it exactly once, so the row
+// lands in the database as integer centavos like every other voucher.
+
 // Codes are generated here with crypto.randomInt, never in the browser: the
 // printed sheet must not carry a guessed or duplicated code. Candidates are
 // checked against the vouchers table in batches, and the whole run is inserted
@@ -336,17 +341,23 @@ router.post('/vouchers/bulk', async (req, res, next) => {
       });
     }
 
-    const durationMinutes = body.durationMinutes === undefined ? 60 : Number(body.durationMinutes);
-    if (!Number.isInteger(durationMinutes) || durationMinutes < 1) {
-      return res.status(400).json({ success: false, error: 'durationMinutes must be a positive whole number' });
+    const duration = body.duration === undefined ? 60 : Number(body.duration);
+    if (!Number.isInteger(duration) || duration < 1) {
+      return res.status(400).json({ success: false, error: 'duration must be a positive whole number of minutes' });
     }
 
-    const price = body.price === undefined ? null : body.price;
-    if (price !== null && (!Number.isInteger(price) || price < 0)) {
-      return res.status(400).json({
-        success: false,
-        error: 'price must be a non-negative integer number of centavos (50.00 pesos = 5000)',
-      });
+    // A blank price means dynamic pricing (NULL). Any other value is a
+    // human-entered peso amount and is stored as integer centavos.
+    let price = null;
+    if (body.price !== undefined && body.price !== null && String(body.price).trim() !== '') {
+      const parsedPrice = parsePriceToCentavos(body.price);
+      if (!parsedPrice.ok) {
+        return res.status(400).json({
+          success: false,
+          error: 'price must be a non-negative amount in PHP (e.g. 50 or 50.00)',
+        });
+      }
+      price = parsedPrice.centavos;
     }
 
     const db = getDb();
@@ -362,7 +373,7 @@ router.post('/vouchers/bulk', async (req, res, next) => {
       for (const code of codes) {
         await tx.run(
           "INSERT INTO vouchers (code, type, duration_minutes, price, state) VALUES (?, ?, ?, ?, 'active')",
-          [code, tier, durationMinutes, price]
+          [code, tier, duration, price]
         );
       }
     });
