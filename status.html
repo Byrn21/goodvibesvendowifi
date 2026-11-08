@@ -704,6 +704,11 @@
       // painted first — the freeze this page used to show on the first tap.
       var isActionPending = false;
 
+      // The last Pause/Resume failure. A render from the follow-up status read
+      // must not wipe it: the guest needs to read why the action failed. A new
+      // action tap clears it.
+      var actionErrorMessage = '';
+
       // Pause/Resume get their own deadline: fetch can stay pending forever on
       // a link that slept with the device, so give up and say so instead of
       // leaving the button on "Processing…". The Omada controller often takes
@@ -1252,6 +1257,12 @@
         if (err && err.name === 'AbortError') {
           return 'Network timeout. Please try again.';
         }
+        // A 5xx means the controller/proxy failed, not that a business rule
+        // rejected the action. The generic server wording (or the fallback)
+        // hides that distinction, so name the controller explicitly.
+        if (err && typeof err.status === 'number' && err.status >= 500) {
+          return 'Network controller busy. Please try again.';
+        }
         if (err && err.body && err.body.error) return err.body.error;
         return fallback;
       }
@@ -1269,8 +1280,11 @@
 
         // Finding a real session proves this page is live again: clear any
         // failure line left by an earlier tap (the controls below are re-armed
-        // from this same render).
-        if (els.pollingStatus && !pausePending) els.pollingStatus.textContent = '';
+        // from this same render). Keep an action failure until the guest tries
+        // again, though — the resync that follows a 5xx must not erase it.
+        if (els.pollingStatus && !pausePending && !actionErrorMessage) {
+          els.pollingStatus.textContent = '';
+        }
 
         var state = data.state || 'unknown';
         SESSION_ID = data.sessionId;
@@ -1367,6 +1381,7 @@
       // ---- Event handlers ----
       if (els.btnPause) {
         els.btnPause.addEventListener('click', function () {
+          actionErrorMessage = '';
           if (els.pollingStatus) els.pollingStatus.textContent = '';
           // Nothing pauses until the guest confirms, but the VISIBLE timer must
           // stop on this first tap: leaving it ticking under the dialog is what
@@ -1391,6 +1406,7 @@
 
       if (els.btnPauseConfirm) {
         els.btnPauseConfirm.addEventListener('click', function () {
+          actionErrorMessage = '';
           if (els.pollingStatus) els.pollingStatus.textContent = '';
           // Disable both dialog buttons first, so a double-tap cannot send the
           // pause twice, and make sure no ticker survived a poll repaint.
@@ -1404,22 +1420,13 @@
           statusRequestSeq += 1;
           stopCountdown();
           if (els.pollingStatus) els.pollingStatus.textContent = 'Pausing session…';
+          var pauseNeedsResync = false;
           doPause()
             .then(function (body) {
-              // Release the lock before any follow-up read: fetchStatus() is a
-              // no-op while it is held.
-              isActionPending = false;
-              els.btnPauseConfirm.textContent = 'Yes, pause';
-              if (els.pollingStatus) els.pollingStatus.textContent = '';
-              if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
-              // Leave the dialog usable for the next pause (Premium guests may
-              // pause/resume repeatedly).
-              if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
-              if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
-              pausePending = false;
               // Anything still in flight describes the pre-pause moment: drop
               // it, or it repaints the running card when it lands.
               statusRequestSeq += 1;
+              if (els.pollingStatus) els.pollingStatus.textContent = '';
               // The pause response carries the authoritative frozen time, so
               // paint it directly instead of re-reading the status endpoint
               // (that extra read is the race that snapped the time back).
@@ -1427,25 +1434,35 @@
                 applyPausedState(body.remainingSeconds);
                 schedulePoll();
               } else {
-                // No frozen time in the response — fall back to the status read.
-                fetchStatus();
+                // No frozen time in the response — read again after the lock
+                // is released in finally.
+                pauseNeedsResync = true;
               }
-              if (els.btnPause) els.btnPause.disabled = false;
-            }, function (err) {
+            })
+            .catch(function (err) {
+              actionErrorMessage = actionFailureMessage(
+                err,
+                'Failed to pause. Please try again.'
+              );
+              if (els.pollingStatus) els.pollingStatus.textContent = actionErrorMessage;
+              if (els.controls) els.controls.classList.remove('hidden');
+              // The local ticker was stopped when the dialog opened, so a
+              // failed pause still needs an authoritative state read.
+              pauseNeedsResync = true;
+            })
+            .finally(function () {
+              // Release the action lock and every control here, whether the
+              // request succeeded, timed out, or the controller returned 5xx.
               isActionPending = false;
+              pausePending = false;
               els.btnPauseConfirm.textContent = 'Yes, pause';
-              var msg = actionFailureMessage(err, 'Failed to pause. Please try again.');
-              if (els.pollingStatus) els.pollingStatus.textContent = msg;
               if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
               if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
               if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
-              if (els.controls) els.controls.classList.remove('hidden');
-              pausePending = false;
               if (els.btnPause) els.btnPause.disabled = false;
-              // The pause did not happen: resync from the server and restart
-              // the ticker, rather than leaving the frozen local guess on
-              // screen.
-              fetchStatus();
+              // fetchStatus() is a no-op while the lock is held, so the resync
+              // has to come after isActionPending is cleared above.
+              if (pauseNeedsResync) fetchStatus();
             });
         });
       }
@@ -1466,6 +1483,7 @@
 
       if (els.btnResume) {
         els.btnResume.addEventListener('click', function () {
+          actionErrorMessage = '';
           if (els.pollingStatus) els.pollingStatus.textContent = '';
           // Optimistic UI: this tap owns the screen until it settles. Disable
           // the button so a double-tap cannot send a second resume, halt the
@@ -1479,13 +1497,9 @@
           pollTimer = null;
           statusRequestSeq += 1;
           if (els.pollingStatus) els.pollingStatus.textContent = 'Resuming session…';
+          var resumeNeedsResync = false;
           doResume()
             .then(function (body) {
-              // Release the lock before rendering: the running card re-arms
-              // polling, which is a no-op while an action is pending.
-              isActionPending = false;
-              els.btnResume.disabled = false;
-              if (els.resumeLabel) els.resumeLabel.textContent = 'Resume Session';
               if (els.pollingStatus) els.pollingStatus.textContent = '';
               // Resume is committed before it answers, so paint the running
               // card now from the server's own remaining time rather than
@@ -1505,16 +1519,24 @@
               // Also restarts the countdown from that fresh server time and
               // re-arms polling.
               renderStatus(resumed);
-            }, function (err) {
+            })
+            .catch(function (err) {
+              actionErrorMessage = actionFailureMessage(
+                err,
+                'Failed to resume. Please try again.'
+              );
+              if (els.pollingStatus) els.pollingStatus.textContent = actionErrorMessage;
+              // The resume did not happen: go back to the authoritative paused
+              // state (and re-arm polling) after the lock is released.
+              resumeNeedsResync = true;
+            })
+            .finally(function () {
+              // Release the lock and the button here, whether the request
+              // succeeded, timed out, or the controller returned 5xx.
               isActionPending = false;
               els.btnResume.disabled = false;
               if (els.resumeLabel) els.resumeLabel.textContent = 'Resume Session';
-              var msg = actionFailureMessage(err, 'Failed to resume. Please try again.');
-              if (els.pollingStatus) els.pollingStatus.textContent = msg;
-              // The resume did not happen: go back to the authoritative paused
-              // state (and re-arm polling) instead of trusting the optimistic
-              // transition.
-              fetchStatus();
+              if (resumeNeedsResync) fetchStatus();
             });
         });
       }

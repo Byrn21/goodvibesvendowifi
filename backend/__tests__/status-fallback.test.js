@@ -1040,4 +1040,55 @@ describe('status.html — action lock and request timeout', () => {
       'Network timeout. Please try again.'
     );
   });
+
+  test('a 5xx pause error releases the lock and names the controller', async () => {
+    let pauseCalls = 0;
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      respond: (url) => {
+        if (/\/api\/session\/pause$/.test(url)) {
+          pauseCalls += 1;
+          return {
+            status: 500,
+            body: {
+              success: false,
+              code: 'SERVER_ERROR',
+              error: 'An internal error occurred.',
+            },
+          };
+        }
+        return { status: 200, body: premiumActive };
+      },
+    });
+
+    const settle = async () => {
+      for (let i = 0; i < 8; i += 1) await status.flush();
+    };
+    await settle();
+    const statusCalls = () =>
+      status.fetchCalls.filter((url) => /\/api\/session\/status/.test(url)).length;
+    const before = statusCalls();
+
+    status.click('btn-pause');
+    status.click('btn-pause-confirm');
+    await settle();
+
+    expect(pauseCalls).toBe(1);
+    // A 5xx is a controller failure, not a business rejection, and the text
+    // survives the follow-up status render instead of flashing away.
+    expect(status.getEl('polling-status').textContent).toBe(
+      'Network controller busy. Please try again.'
+    );
+    // finally released the lock, so the resync was allowed to run...
+    expect(statusCalls()).toBe(before + 1);
+    // ...and every control is usable again.
+    expect(status.getEl('btn-pause-confirm').disabled).toBe(false);
+    expect(status.getEl('btn-pause').disabled).toBe(false);
+
+    // A second Pause must open a live dialog, not stay locked.
+    status.click('btn-pause');
+    expect(status.getEl('pause-confirm').classList.contains('hidden')).toBe(false);
+    expect(status.getEl('btn-pause-confirm').disabled).toBe(false);
+  });
 });

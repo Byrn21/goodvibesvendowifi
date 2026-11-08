@@ -2816,6 +2816,11 @@
   function attemptAutoReconnect() {
     if (CONFIG.mockMode || CONFIG.mode !== 'backend') return;
 
+    // Auto-login belongs to Omada's captive intercept only. A guest who opened
+    // the portal by typing its address in a normal tab must get the form, even
+    // when the URL still carries controller context from an earlier visit.
+    if (!isCaptivePortalFlow()) return;
+
     var clientMac = queryParams.clientMac;
     if (!clientMac) return;
 
@@ -2867,6 +2872,9 @@
       if (data.voucherType) params.set('voucherType', data.voucherType);
       if (data.statusToken) params.set('token', data.statusToken);
       params.set('countdown', '3');
+      // This hand-off is captive by construction (the guard above), so tell
+      // success.html it may perform the external exit.
+      params.set('flow', 'captive');
       var target = (CONFIG.successPage || 'success.html') + '?' + params.toString();
 
       // Reuse the post-auth settling delay so Omada's asynchronous firewall
@@ -2886,9 +2894,9 @@
     // device identifiable for the backend's later authorization call.
     captureOmadaContext();
 
-    // Silent reconnection: if the controller gave us a clientMac and an active
-    // session still exists for it, re-open the firewall and hand off to
-    // success.html without asking for a voucher again.
+    // Silent reconnection: only a captive-portal load with controller context
+    // may re-authorize without asking for a voucher. A manual visit keeps the
+    // voucher/status form interactive.
     attemptAutoReconnect();
 
     // Fire-and-forget context capture: on portal LANDING, beacon the
