@@ -311,7 +311,7 @@
           <svg class="btn-icon btn-icon--left" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <polygon points="5 3 19 12 5 21 5 3"/>
           </svg>
-          Resume Session
+          <span id="resume-label">Resume Session</span>
         </button>
       </section>
 
@@ -660,6 +660,7 @@
         btnPauseConfirm: $('btn-pause-confirm'),
         btnPauseCancel:  $('btn-pause-cancel'),
         btnResume:    $('btn-resume'),
+        resumeLabel:  $('resume-label'),
         controls:     $('controls-section'),
         lastUpdated:  $('last-updated'),
         pollingStatus: $('polling-status'),
@@ -696,6 +697,17 @@
       // While it is set the active card must not be re-ticked or re-enabled by
       // a poll that lands mid-confirmation.
       var pausePending = false;
+
+      // True from the moment Pause/Resume is tapped until its request settles.
+      // While it is set fetchStatus() refuses to start: on a link that just
+      // woke, a poll would queue behind the action and its stale answer could be
+      // painted first — the freeze this page used to show on the first tap.
+      var isActionPending = false;
+
+      // Pause/Resume get their own deadline: fetch can stay pending forever on
+      // a link that slept with the device, so give up and say so instead of
+      // leaving the button on "Processing…".
+      var ACTION_TIMEOUT_MS = 5000;
 
       // Ticket handed to every status request. A response is only painted when
       // it is still the newest one, so a slow poll sent before a pause cannot
@@ -1030,6 +1042,10 @@
         // the mobile-data warning. Only an explicit Refresh may ask the API
         // again (it clears pollingHalted before calling this).
         if (pollingHalted) return;
+        // An action owns the connection while it is in flight. A poll that
+        // started now would only answer about the pre-action state — and on a
+        // slow link it would sit in the browser's queue ahead of the action.
+        if (isActionPending) return;
 
         var queries = statusQueries();
         var at;
@@ -1175,11 +1191,24 @@
         var voucherCode = currentVoucherCode();
         if (voucherCode) payload.voucherCode = voucherCode;
 
-        return fetch(url, {
+        // A slow link — or one that was asleep when the tab woke — can leave
+        // fetch pending with no deadline at all. Five seconds is long enough
+        // for a controller round trip and short enough that the guest gets an
+        // answer instead of a frozen "Processing…" button.
+        var controller = typeof AbortController === 'function'
+          ? new AbortController() : null;
+        var timeoutId = controller
+          ? setTimeout(function () {
+              try { controller.abort(); } catch (e) { /* already settled */ }
+            }, ACTION_TIMEOUT_MS)
+          : null;
+
+        var request = fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
           body: JSON.stringify(payload),
+          signal: controller ? controller.signal : undefined,
         }).then(function (r) {
           // A 2xx is a COMMITTED action and must never reach the failure UI.
           // Only a non-2xx carries an error; a body that is missing or is not
@@ -1197,10 +1226,33 @@
           }
           return r.json().catch(function () { return {}; });
         });
+
+        // Clear the deadline whichever way the request settled: only a still
+        // pending request should be aborted.
+        return request.then(
+          function (body) {
+            if (timeoutId !== null) clearTimeout(timeoutId);
+            return body;
+          },
+          function (err) {
+            if (timeoutId !== null) clearTimeout(timeoutId);
+            throw err;
+          }
+        );
       }
 
       function doPause()  { return postSessionAction('pause'); }
       function doResume() { return postSessionAction('resume'); }
+
+      // One message source for both action handlers: a request the browser
+      // aborted at ACTION_TIMEOUT_MS is a timeout, not a generic failure.
+      function actionFailureMessage(err, fallback) {
+        if (err && err.name === 'AbortError') {
+          return 'Network timeout. Please try again.';
+        }
+        if (err && err.body && err.body.error) return err.body.error;
+        return fallback;
+      }
 
       // ---- Render ----
       function renderStatus(data) {
@@ -1318,6 +1370,10 @@
           // stop on this first tap: leaving it ticking under the dialog is what
           // made the button look dead. Cancel or a failed request resyncs it.
           pausePending = true;
+          // Own the connection while the dialog is open: a poll that fires now
+          // would only repaint the pre-pause card, and on a slow link it would
+          // queue ahead of the action itself.
+          isActionPending = true;
           stopCountdown();
           // One confirmation at a time — a second tap must not stack dialogs.
           els.btnPause.disabled = true;
@@ -1338,10 +1394,20 @@
           // pause twice, and make sure no ticker survived a poll repaint.
           els.btnPauseConfirm.disabled = true;
           els.btnPauseCancel.disabled = true;
+          els.btnPauseConfirm.textContent = 'Processing…';
+          // The action owns the connection until it answers. Drop any status
+          // response already in flight too, so it cannot repaint the running
+          // card after the pause commits.
+          isActionPending = true;
+          statusRequestSeq += 1;
           stopCountdown();
           if (els.pollingStatus) els.pollingStatus.textContent = 'Pausing session…';
           doPause()
             .then(function (body) {
+              // Release the lock before any follow-up read: fetchStatus() is a
+              // no-op while it is held.
+              isActionPending = false;
+              els.btnPauseConfirm.textContent = 'Yes, pause';
               if (els.pollingStatus) els.pollingStatus.textContent = '';
               if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
               // Leave the dialog usable for the next pause (Premium guests may
@@ -1364,9 +1430,9 @@
               }
               if (els.btnPause) els.btnPause.disabled = false;
             }, function (err) {
-              var msg = (err && err.body && err.body.error)
-                ? err.body.error
-                : 'Failed to pause. Please try again.';
+              isActionPending = false;
+              els.btnPauseConfirm.textContent = 'Yes, pause';
+              var msg = actionFailureMessage(err, 'Failed to pause. Please try again.');
               if (els.pollingStatus) els.pollingStatus.textContent = msg;
               if (els.btnPauseConfirm) els.btnPauseConfirm.disabled = false;
               if (els.btnPauseCancel) els.btnPauseCancel.disabled = false;
@@ -1387,6 +1453,8 @@
           if (els.pauseConfirm) els.pauseConfirm.classList.add('hidden');
           if (els.controls) els.controls.classList.remove('hidden');
           pausePending = false;
+          // Cancelling releases the connection the Pause tap reserved.
+          isActionPending = false;
           if (els.btnPause) els.btnPause.disabled = false;
           // The ticker was stopped by the Pause tap: re-read the session so it
           // restarts from the backend's clock, not from the frozen value.
@@ -1402,13 +1470,20 @@
           // poll loop so no scheduled request fires mid-transition, and drop
           // anything already in flight — a paused-state answer landing after
           // the resume would snap the card back to "Paused".
+          isActionPending = true;
           els.btnResume.disabled = true;
+          if (els.resumeLabel) els.resumeLabel.textContent = 'Processing…';
           clearTimeout(pollTimer);
           pollTimer = null;
           statusRequestSeq += 1;
           if (els.pollingStatus) els.pollingStatus.textContent = 'Resuming session…';
           doResume()
             .then(function (body) {
+              // Release the lock before rendering: the running card re-arms
+              // polling, which is a no-op while an action is pending.
+              isActionPending = false;
+              els.btnResume.disabled = false;
+              if (els.resumeLabel) els.resumeLabel.textContent = 'Resume Session';
               if (els.pollingStatus) els.pollingStatus.textContent = '';
               // Resume is committed before it answers, so paint the running
               // card now from the server's own remaining time rather than
@@ -1425,16 +1500,15 @@
               if (body && body.expiresAt) resumed.expiresAt = body.expiresAt;
               if (body && body.voucherType) resumed.voucherType = body.voucherType;
               if (body && body.statusToken) resumed.statusToken = body.statusToken;
-              els.btnResume.disabled = false;
               // Also restarts the countdown from that fresh server time and
               // re-arms polling.
               renderStatus(resumed);
             }, function (err) {
-              var msg = (err && err.body && err.body.error)
-                ? err.body.error
-                : 'Failed to resume. Please try again.';
-              if (els.pollingStatus) els.pollingStatus.textContent = msg;
+              isActionPending = false;
               els.btnResume.disabled = false;
+              if (els.resumeLabel) els.resumeLabel.textContent = 'Resume Session';
+              var msg = actionFailureMessage(err, 'Failed to resume. Please try again.');
+              if (els.pollingStatus) els.pollingStatus.textContent = msg;
               // The resume did not happen: go back to the authoritative paused
               // state (and re-arm polling) instead of trusting the optimistic
               // transition.

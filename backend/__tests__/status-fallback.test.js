@@ -130,6 +130,20 @@ function loadStatus(opts) {
       ? opts.respond(url, callIndex)
       : (opts.responses || []).find((r) => r.test.test(url));
     if (!rule) throw new Error('unexpected status request: ' + url);
+    // Simulate a request that is still in flight. It settles only when the
+    // caller's AbortController fires — or never, when no signal was passed.
+    if (rule.pending) {
+      return new Promise((resolve, reject) => {
+        const signal = fetchOpts && fetchOpts.signal;
+        if (!signal) return;
+        const abort = () => reject(Object.assign(
+          new Error('The operation was aborted'),
+          { name: 'AbortError' }
+        ));
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+      });
+    }
     // Simulate a request that never reaches the server (network failure).
     if (rule.reject) return Promise.reject(new Error(rule.message || 'network down'));
     return Promise.resolve({
@@ -160,6 +174,7 @@ function loadStatus(opts) {
   // really cleared the ticker (and drive it if it did not).
   const intervals = new Map();
   let intervalSeq = 0;
+  let timeoutSeq = 0;
   const sandbox = {
     window: windowStub,
     document: documentStub,
@@ -167,12 +182,22 @@ function loadStatus(opts) {
     sessionStorage: sessionStorageStub,
     URLSearchParams,
     URL,
+    AbortController: globalThis.AbortController,
     fetch: fetchStub,
     console: { log() {}, warn() {}, error() {} },
     // Polling / countdown timers are recorded, never scheduled: the tests
-    // assert on the request order and drive a poll by hand.
-    setTimeout: (fn, ms) => { timeouts.push({ fn, ms }); return timeouts.length; },
-    clearTimeout() {},
+    // assert on the request order and drive a poll by hand. Ids make
+    // clearTimeout real, so a settled action's abort deadline cannot be
+    // mistaken for the next poll.
+    setTimeout: (fn, ms) => {
+      timeoutSeq += 1;
+      timeouts.push({ id: timeoutSeq, fn, ms });
+      return timeoutSeq;
+    },
+    clearTimeout: (id) => {
+      const at = timeouts.findIndex((t) => t && t.id === id);
+      if (at !== -1) timeouts.splice(at, 1);
+    },
     setInterval: (fn, ms) => {
       intervalSeq += 1;
       intervals.set(intervalSeq, { fn, ms });
@@ -911,5 +936,108 @@ describe('status.html — Pause success never flashes the failure line', () => {
 
     expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
     expect(status.getEl('polling-status').textContent).toBe('');
+  });
+});
+
+describe('status.html — action lock and request timeout', () => {
+  const premiumActive = {
+    ...ACTIVE_SESSION.body,
+    voucherType: 'premium',
+    canPause: true,
+  };
+
+  test('a pause in flight blocks background polls and times out after 5 s', async () => {
+    let pauseSent = false;
+
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      respond: (url) => {
+        if (/\/api\/session\/pause$/.test(url)) {
+          pauseSent = true;
+          return { pending: true };
+        }
+        // After the pause is sent, leave the resync read pending too, so the
+        // timeout message is still on screen for the assertions below.
+        if (pauseSent) return { pending: true };
+        return { status: 200, body: premiumActive };
+      },
+    });
+
+    for (let i = 0; i < 6; i += 1) await status.flush();
+    const statusCalls = () =>
+      status.fetchCalls.filter((url) => /\/api\/session\/status/.test(url)).length;
+    const before = statusCalls();
+
+    status.click('btn-pause');
+    status.click('btn-pause-confirm');
+    await status.flush();
+
+    // The action is visibly owned by the button until it settles.
+    expect(status.getEl('btn-pause-confirm').textContent).toBe('Processing…');
+    expect(status.getEl('btn-pause-confirm').disabled).toBe(true);
+    expect(statusCalls()).toBe(before);
+
+    // The scheduled poll fires while the pause is still pending: it must not
+    // send, or it would queue behind the action on a slow link.
+    status.runTimer(30000);
+    await status.flush();
+    expect(statusCalls()).toBe(before);
+
+    // The request's own 5 s deadline aborts the hung fetch and frees the UI.
+    status.runTimer(5000);
+    await status.flush();
+
+    expect(status.getEl('polling-status').textContent).toBe(
+      'Network timeout. Please try again.'
+    );
+    expect(status.getEl('btn-pause-confirm').textContent).toBe('Yes, pause');
+    expect(status.getEl('btn-pause-confirm').disabled).toBe(false);
+    // The resync read is issued only after the action lock was released.
+    expect(statusCalls()).toBe(before + 1);
+  });
+
+  test('a resume in flight shows Processing… and recovers on timeout', async () => {
+    let resumeSent = false;
+    const premiumPaused = {
+      ...ACTIVE_SESSION.body,
+      voucherType: 'premium',
+      state: 'paused',
+      remainingSeconds: 540,
+      expiresAt: null,
+      canPause: false,
+      canResume: true,
+    };
+
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      respond: (url) => {
+        if (/\/api\/session\/resume$/.test(url)) {
+          resumeSent = true;
+          return { pending: true };
+        }
+        if (resumeSent) return { pending: true };
+        return { status: 200, body: premiumPaused };
+      },
+    });
+
+    for (let i = 0; i < 6; i += 1) await status.flush();
+    expect(status.getEl('btn-resume').disabled).toBe(false);
+
+    status.click('btn-resume');
+    await status.flush();
+
+    expect(status.getEl('btn-resume').disabled).toBe(true);
+    expect(status.getEl('resume-label').textContent).toBe('Processing…');
+
+    status.runTimer(5000);
+    await status.flush();
+
+    expect(status.getEl('resume-label').textContent).toBe('Resume Session');
+    expect(status.getEl('btn-resume').disabled).toBe(false);
+    expect(status.getEl('polling-status').textContent).toBe(
+      'Network timeout. Please try again.'
+    );
   });
 });
