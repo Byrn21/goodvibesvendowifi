@@ -403,6 +403,29 @@
     return CONFIG.defaultRedirectUrl;
   }
 
+  /**
+   * isCaptivePortalFlow — did this page load arrive through Omada's captive
+   * intercept?
+   *
+   * The controller appends its device context (clientMac, apMac or gatewayMac)
+   * only to the interception URL. Those parameters are therefore the reliable
+   * difference between a guest signing in from the captive sheet and a guest
+   * who opened the portal manually in a normal browser tab. Persisted context
+   * is deliberately NOT consulted here: it survives refreshes, so using it
+   * would make every later manual visit look like a captive one.
+   *
+   * @returns {boolean}
+   */
+  function isCaptivePortalFlow() {
+    var params = new URLSearchParams(window.location.search);
+    var keys = ['clientMac', 'apMac', 'gatewayMac'];
+    for (var i = 0; i < keys.length; i += 1) {
+      var value = params.get(keys[i]);
+      if (value && String(value).trim() !== '') return true;
+    }
+    return false;
+  }
+
   function isAllowedRedirect(url) {
     if (!url) return false;
     try {
@@ -884,6 +907,15 @@
 
     var statusToken = rememberStatusToken(result.statusToken);
 
+    // A manual visit stays on the portal: the success banner below confirms the
+    // login, and the Check Voucher / status UI remains available. Only the
+    // captive intercept is handed to success.html for the external exit.
+    var captiveFlow = isCaptivePortalFlow();
+    if (!captiveFlow && !result.resumed) {
+      setBanner('Authentication successful \u2014 you are now connected.', 'success');
+      return Promise.resolve();
+    }
+
     // Build the post-login destination.
     var target;
     if (result.resumed && result.sessionId) {
@@ -925,6 +957,10 @@
       // across an origin boundary (tunnel host vs LAN address) and to the SMS.
       if (statusToken) params.set('token', statusToken);
       params.set('countdown', '3');
+      // success.html must know this is a captive hand-off: only that flow may
+      // auto-redirect to the requested website. A manually opened success URL
+      // must leave the guest on the portal.
+      params.set('flow', 'captive');
 
       // Carry Omada's originUrl (the URL the guest first tried to open) through
       // to success.html so it can nudge the OS with a real internet request.

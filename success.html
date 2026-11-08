@@ -469,15 +469,13 @@
     </div>
   </div>
 
-  <!-- Redirect logic: reads URL params for destination and session ID, wires
-       the "Continue to website" button, tries to close the captive sheet
-       (window.close()), and after a short settling delay performs one
-       connectivity probe so the captive mini-browser can close.
-       Both the button and the probe exit to a NON-whitelisted external host
-       (never the local portal URL), because the OS only detects that the
+  <!-- Redirect logic: reads URL params for destination and session ID, and
+       wires the "Continue to website" button. Only a captive-portal hand-off
+       (?flow=captive) auto-exits after the success message; a manual tab stays
+       on this portal page. The captive exit goes to a NON-whitelisted external
+       host (never the local portal URL), because the OS only detects that the
        firewall opened when a request reaches a host outside Omada's
-       Pre-Authentication Access list. The probe is delayed on purpose: Omada
-       reprograms its firewall rules asynchronously after auth. -->
+       Pre-Authentication Access list. -->
   <script>
     (function () {
       'use strict';
@@ -518,16 +516,16 @@
       // the guest back to (or off) the local Termux server produces no
       // network-state change and the captive mini-browser never closes.
       //
-      // The fallback is a high-availability HTTPS host: once the firewall is
-      // open, a TLS handshake to a well-known site is the clearest "the network
-      // is really online" signal the OS can get. (The redirect only fires after
-      // PROBE_DELAY_MS below — Omada has finished reprogramming by then, so it
-      // will not surface as net::ERR_CONNECTION_CLOSED.)
+      // The fallback is a high-availability host: once the firewall is open, a
+      // request to a well-known site is the clearest "the network is really
+      // online" signal the OS can get. (The redirect only fires after
+      // CAPTIVE_REDIRECT_MS below, so a just-committed authorization has a
+      // short settling window before the browser leaves the portal.)
       //   Alternative OS-probe endpoint:
       //     'http://connectivitycheck.gstatic.com/generate_204'
       //   Alternative high-availability host:
       //     'https://1.1.1.1/'
-      var EXTERNAL_FALLBACK = 'https://www.google.com/';
+      var EXTERNAL_FALLBACK = 'http://google.com';
 
       // Hosts that must NEVER be used as the exit destination. Reaching one of
       // these produces no network-state change (they are pre-auth whitelisted
@@ -590,83 +588,85 @@
       var redirectBtn = document.getElementById('redirect-btn');
       if (redirectBtn) redirectBtn.href = exitUrl;
 
-      // ---- Connectivity probe (graceful captive-browser close) ------------
-      // Omada has authorized this client, but the phone's OS only learns that
-      // when it next checks internet access. Hitting the non-whitelisted exit
-      // computed above prompts that check, so the OS marks the network as
-      // connected and dismisses the captive mini-browser instead of asking the
-      // user to sign in again.
-      //
-      // 6-8s: give Omada's hardware time to finish opening the network before
-      // the phone (or the captive mini-browser) attempts a real connection.
-      var PROBE_DELAY_MS = 7000;
+      // ---- External exit: captive flow only -------------------------------
+      // A guest who arrived through Omada's captive intercept should be taken
+      // to the network's requested destination. A manual browser tab must stay
+      // on the portal, where the session box and status controls live, so no
+      // automatic navigation is scheduled for it at all.
+      var isCaptiveFlow = params.get('flow') === 'captive';
+      var CAPTIVE_REDIRECT_MS = 2000;
 
-      // Last-resort hand-off: if anything below throws before the probe timer
-      // is armed, the guest must still leave this page. Without it a later JS
-      // error strands them on a dead page and the OS falls back on its own.
-      var probeScheduled = false;
-      window.setTimeout(function () {
-        if (probeScheduled) return;
-        try { window.location.replace(exitUrl); } catch (e) { /* nothing left to try */ }
-      }, PROBE_DELAY_MS + 3000);
+      if (!isCaptiveFlow) {
+        var redirectNotice = document.getElementById('redirect-notice');
+        if (redirectNotice) redirectNotice.classList.add('hidden');
+      } else {
+        // Omada has authorized this client, but the phone's OS only learns that
+        // when it next checks internet access. Hitting the non-whitelisted exit
+        // computed above prompts that check, so the OS marks the network as
+        // connected and dismisses the captive mini-browser instead of asking
+        // the user to sign in again.
+        var notice = document.getElementById('connect-notice');
+        if (notice) notice.textContent = 'Finalizing your connection\u2026';
 
-      // ---- Closing the captive sheet --------------------------------------
-      // An iOS/Android captive sheet is dismissed by the OS, never by this
-      // page, so the page can only nudge it twice:
-      //
-      //   1. window.close(). A script may only close windows that IT opened, so
-      //      iOS (Captive Network Assistant) and most Android sign-in views
-      //      ignore the call — but some builds honour it, and a closed window is
-      //      the cleanest exit. Retried a few times because some webviews drop
-      //      the first call while the page is still settling.
-      //   2. The navigation scheduled below, to a host that is NOT on Omada's
-      //      Pre-Authentication Access list. That request makes the OS re-run
-      //      its connectivity check, which sees the network is genuinely open
-      //      and auto-dismisses the sheet.
-      //
-      // Attempting close() first is also what makes the plain-browser case
-      // pleasant: a tab cannot close itself, so nothing happens and the guest
-      // keeps the confirmation page (the redirect still fires afterwards — the
-      // button cancels it).
-      var CNA_CLOSE_RETRY_MS = 600;
-      var CNA_CLOSE_ATTEMPTS = 3;
+        // Last-resort hand-off: if anything below throws before the redirect
+        // timer is armed, the guest must still leave this page. Without it a
+        // later JS error strands them on a dead page and the OS falls back on
+        // its own.
+        var probeScheduled = false;
+        window.setTimeout(function () {
+          if (probeScheduled) return;
+          try { window.location.replace(exitUrl); } catch (e) { /* nothing left to try */ }
+        }, CAPTIVE_REDIRECT_MS + 3000);
 
-      function closeCaptiveBrowser(attempt) {
-        try {
-          window.close();
-        } catch (e) {
-          // Some embedded browsers throw when close() is blocked. Harmless:
-          // the external redirect below is the fallback that always exists.
+        // ---- Closing the captive sheet -----------------------------------
+        // An iOS/Android captive sheet is dismissed by the OS, never by this
+        // page, so the page can only nudge it:
+        //
+        //   1. window.close(). A script may only close windows that IT opened, so
+        //      iOS (Captive Network Assistant) and most Android sign-in views
+        //      ignore the call — but some builds honour it, and a closed window
+        //      is the cleanest exit. Retried a few times because some webviews
+        //      drop the first call while the page is still settling.
+        //   2. The navigation scheduled below, to a host that is NOT on Omada's
+        //      Pre-Authentication Access list. That request makes the OS re-run
+        //      its connectivity check, which sees the network is genuinely open
+        //      and auto-dismisses the sheet.
+        var CNA_CLOSE_RETRY_MS = 600;
+        var CNA_CLOSE_ATTEMPTS = 3;
+
+        function closeCaptiveBrowser(attempt) {
+          try {
+            window.close();
+          } catch (e) {
+            // Some embedded browsers throw when close() is blocked. Harmless:
+            // the external redirect below is the fallback that always exists.
+          }
+          if (attempt + 1 < CNA_CLOSE_ATTEMPTS) {
+            window.setTimeout(function () {
+              closeCaptiveBrowser(attempt + 1);
+            }, CNA_CLOSE_RETRY_MS);
+          }
         }
-        if (attempt + 1 < CNA_CLOSE_ATTEMPTS) {
-          window.setTimeout(function () {
-            closeCaptiveBrowser(attempt + 1);
-          }, CNA_CLOSE_RETRY_MS);
+
+        // Ask the captive sheet to go away only after the success card has had
+        // time to be read. Closing synchronously would beat the first paint in
+        // a script-opened window; closing at 250 ms beat the message itself.
+        window.setTimeout(function () {
+          closeCaptiveBrowser(0);
+        }, CAPTIVE_REDIRECT_MS);
+
+        probeScheduled = true;
+        var probeTimer = window.setTimeout(function () {
+          window.location.href = exitUrl;
+        }, CAPTIVE_REDIRECT_MS);
+
+        // If the user taps the destination button first, cancel the automatic
+        // redirect so we never fight their navigation.
+        if (redirectBtn) {
+          redirectBtn.addEventListener('click', function () {
+            window.clearTimeout(probeTimer);
+          });
         }
-      }
-
-      var notice = document.getElementById('connect-notice');
-      if (notice) notice.textContent = 'Finalizing your connection\u2026';
-
-      // Ask the captive sheet to go away as soon as the success card has
-      // actually painted (250 ms is enough for one frame, and short enough that
-      // the guest never notices the wait). Closing synchronously here would
-      // sometimes beat the first paint in a script-opened window.
-      window.setTimeout(function () {
-        closeCaptiveBrowser(0);
-      }, 250);
-
-      probeScheduled = true;
-      var probeTimer = window.setTimeout(function () {
-        window.location.href = exitUrl;
-      }, PROBE_DELAY_MS);
-
-      // If the user taps the destination button first, cancel the automatic
-      // probe so we never fight their navigation.
-      if (redirectBtn) {
-        redirectBtn.addEventListener('click', function () {
-          window.clearTimeout(probeTimer);
-        });
       }
 
       // ---- Session box: session ID, live countdown and state ----------------

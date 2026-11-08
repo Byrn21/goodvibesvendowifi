@@ -706,8 +706,10 @@
 
       // Pause/Resume get their own deadline: fetch can stay pending forever on
       // a link that slept with the device, so give up and say so instead of
-      // leaving the button on "Processing…".
-      var ACTION_TIMEOUT_MS = 5000;
+      // leaving the button on "Processing…". The Omada controller often takes
+      // 6–10 s to finish programming a client authorization change, so 15 s is
+      // long enough to let a real commit land while still bounding the wait.
+      var ACTION_TIMEOUT_MS = 15000;
 
       // Ticket handed to every status request. A response is only painted when
       // it is still the newest one, so a slow poll sent before a pause cannot

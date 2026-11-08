@@ -946,7 +946,7 @@ describe('status.html — action lock and request timeout', () => {
     canPause: true,
   };
 
-  test('a pause in flight blocks background polls and times out after 5 s', async () => {
+  test('a pause in flight blocks background polls and times out after 15 s', async () => {
     let pauseSent = false;
 
     const status = loadStatus({
@@ -984,8 +984,8 @@ describe('status.html — action lock and request timeout', () => {
     await status.flush();
     expect(statusCalls()).toBe(before);
 
-    // The request's own 5 s deadline aborts the hung fetch and frees the UI.
-    status.runTimer(5000);
+    // The request's own 15 s deadline aborts the hung fetch and frees the UI.
+    status.runTimer(15000);
     await status.flush();
 
     expect(status.getEl('polling-status').textContent).toBe(
@@ -1031,7 +1031,7 @@ describe('status.html — action lock and request timeout', () => {
     expect(status.getEl('btn-resume').disabled).toBe(true);
     expect(status.getEl('resume-label').textContent).toBe('Processing…');
 
-    status.runTimer(5000);
+    status.runTimer(15000);
     await status.flush();
 
     expect(status.getEl('resume-label').textContent).toBe('Resume Session');
