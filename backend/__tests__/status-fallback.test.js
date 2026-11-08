@@ -841,3 +841,75 @@ describe('status.html — signed session token', () => {
     expect(status.storage.get('portalStatusToken')).toBe('tok_new');
   });
 });
+
+describe('status.html — a fresh voucher hand-off clears the stale cache', () => {
+  test('?voucher= drops the previous session id, token and code before polling', async () => {
+    const status = loadStatus({
+      search: '?voucher=123456',
+      storage: new Map([
+        ['portalStatusToken', 'tok_old'],
+        ['portalSessionId', 'sess_old'],
+        ['portalVoucherCode', '000000'],
+        ['device_mac', MAC],
+      ]),
+      responses: [ACTIVE_SESSION],
+    });
+
+    await status.flush();
+    await status.flush();
+
+    // The previous connection's identifiers are never asked about...
+    expect(status.fetchCalls[0]).not.toContain('tok_old');
+    expect(status.fetchCalls[0]).not.toContain('sess_old');
+    // ...and the fresh code replaces the old one on this origin.
+    expect(status.storage.get('portalVoucherCode')).toBe('123456');
+    expect(status.storage.has('portalStatusToken')).toBe(false);
+    // The newly resolved session (not the stale id) is what gets saved.
+    expect(status.storage.get('portalSessionId')).toBe(SESSION_ID);
+    expect(status.getEl('session-active').classList.contains('hidden')).toBe(false);
+  });
+});
+
+describe('status.html — Pause success never flashes the failure line', () => {
+  test('a 200 pause response paints paused and leaves the error line empty', async () => {
+    let paused = false;
+    const status = loadStatus({
+      search: '',
+      storage: new Map([['device_mac', MAC]]),
+      respond: (url) => {
+        if (/\/api\/session\/pause$/.test(url)) {
+          paused = true;
+          // No remainingSeconds: the handler must fall back to the status read
+          // without treating that as a failed pause.
+          return { status: 200, body: { success: true, state: 'paused' } };
+        }
+        return {
+          status: 200,
+          body: paused
+            ? {
+                ...ACTIVE_SESSION.body,
+                voucherType: 'premium',
+                state: 'paused',
+                remainingSeconds: 540,
+                expiresAt: null,
+              }
+            : { ...ACTIVE_SESSION.body, voucherType: 'premium' },
+        };
+      },
+    });
+
+    const settle = async () => {
+      for (let i = 0; i < 8; i += 1) {
+        await status.flush();
+      }
+    };
+
+    await settle();
+    status.click('btn-pause');
+    status.click('btn-pause-confirm');
+    await settle();
+
+    expect(status.getEl('session-paused').classList.contains('hidden')).toBe(false);
+    expect(status.getEl('polling-status').textContent).toBe('');
+  });
+});

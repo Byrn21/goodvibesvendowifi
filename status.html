@@ -559,6 +559,26 @@
       }
 
       /**
+       * purgeStaleSessionCache — forget the previous connection's identity.
+       *
+       * A 6-digit code handed over in the URL belongs to a NEW session. The
+       * signed token, session id and code this origin saved for an earlier one
+       * would otherwise outrank the fresh code in statusQueries(), so the page
+       * could keep polling — and Pause could keep authorizing against — the old
+       * session. Runs before the new values are read or stored.
+       */
+      function purgeStaleSessionCache() {
+        var keys = ['portalSessionId', SAVED_TOKEN_KEY, SAVED_VOUCHER_KEY];
+        for (var i = 0; i < keys.length; i += 1) {
+          try { window.localStorage.removeItem(keys[i]); } catch (e) { /* storage unavailable */ }
+          try { window.sessionStorage.removeItem(keys[i]); } catch (e) { /* storage unavailable */ }
+        }
+        VOUCHER_CODE = '';
+        SESSION_ID = '';
+        SESSION_ID_FROM_URL = false;
+      }
+
+      /**
        * currentMac — the device MAC to put on status requests, re-read every
        * time a request is built.
        *
@@ -1161,17 +1181,21 @@
           credentials: 'include',
           body: JSON.stringify(payload),
         }).then(function (r) {
-          return r.json()
-            .catch(function () { return {}; })
-            .then(function (body) {
-              if (!r.ok) {
-                var err = new Error(body.error || ('HTTP ' + r.status));
+          // A 2xx is a COMMITTED action and must never reach the failure UI.
+          // Only a non-2xx carries an error; a body that is missing or is not
+          // JSON (an empty 204, an HTML interstitial) is still success. The
+          // old shape parsed first and could reject a perfectly good pause.
+          if (!r.ok) {
+            return r.json()
+              .catch(function () { return {}; })
+              .then(function (body) {
+                var err = new Error((body && body.error) || ('HTTP ' + r.status));
                 err.body = body;
                 err.status = r.status;
                 throw err;
-              }
-              return body;
-            });
+              });
+          }
+          return r.json().catch(function () { return {}; });
         });
       }
 
@@ -1188,6 +1212,11 @@
           showUnknown();
           return;
         }
+
+        // Finding a real session proves this page is live again: clear any
+        // failure line left by an earlier tap (the controls below are re-armed
+        // from this same render).
+        if (els.pollingStatus && !pausePending) els.pollingStatus.textContent = '';
 
         var state = data.state || 'unknown';
         SESSION_ID = data.sessionId;
@@ -1284,6 +1313,7 @@
       // ---- Event handlers ----
       if (els.btnPause) {
         els.btnPause.addEventListener('click', function () {
+          if (els.pollingStatus) els.pollingStatus.textContent = '';
           // Nothing pauses until the guest confirms, but the VISIBLE timer must
           // stop on this first tap: leaving it ticking under the dialog is what
           // made the button look dead. Cancel or a failed request resyncs it.
@@ -1303,6 +1333,7 @@
 
       if (els.btnPauseConfirm) {
         els.btnPauseConfirm.addEventListener('click', function () {
+          if (els.pollingStatus) els.pollingStatus.textContent = '';
           // Disable both dialog buttons first, so a double-tap cannot send the
           // pause twice, and make sure no ticker survived a poll repaint.
           els.btnPauseConfirm.disabled = true;
@@ -1332,8 +1363,7 @@
                 fetchStatus();
               }
               if (els.btnPause) els.btnPause.disabled = false;
-            })
-            .catch(function (err) {
+            }, function (err) {
               var msg = (err && err.body && err.body.error)
                 ? err.body.error
                 : 'Failed to pause. Please try again.';
@@ -1366,6 +1396,7 @@
 
       if (els.btnResume) {
         els.btnResume.addEventListener('click', function () {
+          if (els.pollingStatus) els.pollingStatus.textContent = '';
           // Optimistic UI: this tap owns the screen until it settles. Disable
           // the button so a double-tap cannot send a second resume, halt the
           // poll loop so no scheduled request fires mid-transition, and drop
@@ -1398,8 +1429,7 @@
               // Also restarts the countdown from that fresh server time and
               // re-arms polling.
               renderStatus(resumed);
-            })
-            .catch(function (err) {
+            }, function (err) {
               var msg = (err && err.body && err.body.error)
                 ? err.body.error
                 : 'Failed to resume. Please try again.';
@@ -1449,6 +1479,14 @@
       var urlSessionId = params.get('sessionId') || '';
       var urlClientMac = params.get('clientMac') || params.get('mac') || '';
       var urlToken = params.get('token') || '';
+      var urlVoucher = normalizeVoucherCode(
+        params.get('voucher') || params.get('voucherCode') || ''
+      );
+      // A code in the URL is a fresh connection from the status checker:
+      // destroy the cached identity of the previous one before reading or
+      // storing anything, so this tab cannot answer about the old session.
+      if (urlVoucher) purgeStaleSessionCache();
+
       var storedSessionId = '';
       var storedClientMac = '';
       try {

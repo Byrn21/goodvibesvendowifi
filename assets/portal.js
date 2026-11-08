@@ -285,6 +285,28 @@
     return normalized;
   }
 
+  // Keys that bind this origin to ONE session (or to the code that opened it).
+  // They all go stale the moment the guest checks a different voucher, and a
+  // saved token / session id outranks the new code on status.html — which is
+  // how a normal tab ended up holding the previous connection.
+  var SESSION_CACHE_KEYS = [
+    'portalSessionId',
+    STATUS_TOKEN_STORAGE_KEY,
+    VOUCHER_CODE_STORAGE_KEY
+  ];
+
+  /**
+   * clearSessionCache — forget the previous connection before a new lookup.
+   * Never throws: storage may be blocked in a captive mini browser, in which
+   * case there was nothing cached to clear anyway.
+   */
+  function clearSessionCache() {
+    for (var i = 0; i < SESSION_CACHE_KEYS.length; i += 1) {
+      try { window.localStorage.removeItem(SESSION_CACHE_KEYS[i]); } catch (e) { /* storage unavailable */ }
+      try { window.sessionStorage.removeItem(SESSION_CACHE_KEYS[i]); } catch (e) { /* storage unavailable */ }
+    }
+  }
+
   /**
    * getStoredContext — read the persisted Omada context.
    * Never throws: private mode / disabled storage degrades to URL-only.
@@ -2548,6 +2570,11 @@
       if (input) input.focus();
       return;
     }
+
+    // A submitted code starts a NEW connection. Drop the previous session's
+    // id, signed token and code BEFORE anything fresh is stored, so this tab
+    // can never keep showing (or authorizing against) the old session.
+    clearSessionCache();
 
     statusState.checking = true;
     setStatusInputError('');
