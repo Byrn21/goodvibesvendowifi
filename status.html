@@ -432,6 +432,15 @@
       var CLIENT_MAC = '';
       var SESSION_ID_FROM_URL = false;
 
+      // The 6-digit voucher code the session was started with. It is the one
+      // credential a returning guest always has: the Omada `clientMac` query
+      // parameters exist only on the captive-portal interception URL, and a
+      // manual browser visit may not share the mini browser's storage. Pause
+      // and Resume send it so the backend can authorize the action when this
+      // browser has no control token for the session.
+      var VOUCHER_CODE = '';
+      var SAVED_VOUCHER_KEY = 'portalVoucherCode';
+
       // Shown when the backend answers MISSING_PORTAL_CONTEXT: the device has
       // never loaded the portal page, so its MAC was never captured and no
       // session can be found for it yet. That is a different problem from "your
@@ -477,6 +486,74 @@
           } catch (e) { raw = ''; }
           var mac = normalizeMac(raw);
           if (mac) return mac;
+        }
+        return '';
+      }
+
+      /**
+       * normalizeVoucherCode — the shared 6-digit rule, in this page's form.
+       * Mirrors backend/src/utils/voucher-code.js.
+       * @param {*} value
+       * @returns {string} normalized code, or '' when it is not 6 digits
+       */
+      function normalizeVoucherCode(value) {
+        var digits = String(value == null ? '' : value)
+          .replace(/\D/g, '')
+          .slice(0, 6);
+        return /^\d{6}$/.test(digits) ? digits : '';
+      }
+
+      /**
+       * readSavedVoucher — the voucher code last saved on this origin.
+       * Never throws: storage may be blocked in a captive mini browser.
+       * @returns {string} canonical code, or '' when nothing usable is stored
+       */
+      function readSavedVoucher() {
+        try {
+          return normalizeVoucherCode(
+            window.localStorage.getItem(SAVED_VOUCHER_KEY)
+            || window.sessionStorage.getItem(SAVED_VOUCHER_KEY)
+            || ''
+          );
+        } catch (e) { return ''; }
+      }
+
+      /**
+       * rememberVoucherCode — keep the code for this visit's pause/resume.
+       * @param {string} code
+       * @returns {string} the normalized code, or '' when it is unusable
+       */
+      function rememberVoucherCode(code) {
+        var normalized = normalizeVoucherCode(code);
+        if (!normalized) return '';
+        VOUCHER_CODE = normalized;
+        try {
+          window.localStorage.setItem(SAVED_VOUCHER_KEY, normalized);
+          window.sessionStorage.setItem(SAVED_VOUCHER_KEY, normalized);
+        } catch (e) { /* storage unavailable */ }
+        return normalized;
+      }
+
+      /**
+       * currentVoucherCode — the code to send with a pause/resume request.
+       * URL first (the hand-off is freshest), then memory, then storage.
+       * @returns {string} a 6-digit code, or '' when none is known
+       */
+      function currentVoucherCode() {
+        var fromUrl = '';
+        try {
+          var params = new URLSearchParams(window.location.search);
+          fromUrl = normalizeVoucherCode(
+            params.get('voucher') || params.get('voucherCode') || ''
+          );
+        } catch (e) { fromUrl = ''; }
+
+        if (fromUrl) return rememberVoucherCode(fromUrl);
+        if (normalizeVoucherCode(VOUCHER_CODE)) return VOUCHER_CODE;
+        var saved = readSavedVoucher();
+        if (saved) {
+          VOUCHER_CODE = saved;
+          return saved;
         }
         return '';
       }
@@ -1069,11 +1146,20 @@
         // for a browser that blocks it (the twin every poll already uses).
         var actionToken = currentToken();
         if (actionToken) url += '?token=' + encodeURIComponent(actionToken);
+        // The voucher code is the fallback proof of ownership: a browser that
+        // reached this page without Omada's clientMac parameters (a manual
+        // Chrome/Safari visit after the captive popup closed) has no device
+        // identity, but the code tied to the session still authorizes the
+        // state change on the backend.
+        var payload = { sessionId: SESSION_ID };
+        var voucherCode = currentVoucherCode();
+        if (voucherCode) payload.voucherCode = voucherCode;
+
         return fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ sessionId: SESSION_ID }),
+          body: JSON.stringify(payload),
         }).then(function (r) {
           return r.json()
             .catch(function () { return {}; })
@@ -1383,6 +1469,11 @@
           window.sessionStorage.setItem(SAVED_TOKEN_KEY, urlToken);
         } catch (e) { /* storage unavailable */ }
       }
+      // Keep a voucher code handed over by the status checker (or already
+      // saved here), so Pause/Resume can authorize with it on this visit and
+      // on later manual visits to this page.
+      currentVoucherCode();
+
       if (urlSessionId || CLIENT_MAC) {
         try {
           if (urlSessionId) {

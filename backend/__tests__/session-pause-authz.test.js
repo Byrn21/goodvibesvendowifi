@@ -239,6 +239,97 @@ describe('GET /api/session/status — read identity is not control authority', (
   });
 });
 
+describe('POST /api/session/pause — voucher-code fallback authorization', () => {
+  const MAC = 'aa:bb:cc:dd:ee:ff';
+
+  test('the code tied to the session authorizes pause without a device token', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_code_pause',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+      voucherUsed: '123456',
+    });
+
+    // No cookie and no ?token=: a manual browser visit has neither. Only the
+    // voucher code the guest entered is presented.
+    const res = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_code_pause', voucherCode: '123456' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('paused');
+
+    const after = await sessionService.getSession('sess_code_pause');
+    expect(after.state).toBe('paused');
+  });
+
+  test('a different valid-looking code is still rejected with 403', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_code_wrong',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+      voucherUsed: '123456',
+    });
+
+    const res = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_code_wrong', voucherCode: '654321' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SESSION_MISMATCH');
+
+    const after = await sessionService.getSession('sess_code_wrong');
+    expect(after.state).toBe('active');
+  });
+
+  test('resume accepts the same fallback (query-string form)', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_code_resume',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+      voucherUsed: '222333',
+    });
+
+    const paused = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_code_resume', voucher_code: '222333' });
+    expect(paused.status).toBe(200);
+
+    const resumed = await request(app)
+      .post('/api/session/resume?voucher=222333')
+      .send({ sessionId: 'sess_code_resume' });
+
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.state).toBe('active');
+
+    const after = await sessionService.getSession('sess_code_resume');
+    expect(after.state).toBe('active');
+  });
+
+  test('a session with no voucher_used cannot be authorized by any code', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_code_missing',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+
+    const res = await request(app)
+      .post('/api/session/pause')
+      .send({ sessionId: 'sess_code_missing', voucherCode: '123456' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('SESSION_MISMATCH');
+  });
+});
+
 describe('POST /api/session/pause — the frozen timer', () => {
   async function rowOf(sessionId) {
     return getDb().getOne(

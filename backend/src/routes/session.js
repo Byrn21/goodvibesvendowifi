@@ -31,11 +31,43 @@ const { normalizeMac } = require('../utils/device-id');
 const { resolveClientMacByIp } = require('../utils/portal-context');
 const { normalizeVoucherType } = require('../utils/qos');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
+const { safeEqual } = require('../utils/safe-compare');
 const {
   tokenFromRequest,
   verifySessionToken,
   setSessionCookie,
 } = require('../utils/session-token');
+
+/**
+ * submittedVoucherCode — the voucher code supplied with this request, if any.
+ *
+ * Accepted from the JSON body (`voucherCode`, `voucher_code` or `voucher`),
+ * the query string (same names) and the `x-voucher-code` header. Values are
+ * normalized with the shared rule and an invalid shape is ignored rather than
+ * treated as a wrong credential, so a malformed field cannot turn into a 500.
+ *
+ * @param {Object} req Express request
+ * @returns {string} a normalized 6-digit code, or '' when none was supplied
+ */
+function submittedVoucherCode(req) {
+  const body = req && req.body ? req.body : {};
+  const query = req && req.query ? req.query : {};
+  const header = req && req.headers ? req.headers['x-voucher-code'] : '';
+
+  const candidates = [
+    body.voucherCode, body.voucher_code, body.voucher,
+    query.voucherCode, query.voucher_code, query.voucher,
+    header,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate === null || candidate === undefined) continue;
+    if (typeof candidate !== 'string' && typeof candidate !== 'number') continue;
+    const code = normalizeVoucherCode(candidate);
+    if (validateVoucherCodeFormat(code).ok) return code;
+  }
+  return '';
+}
 
 /**
  * assertSessionOwner — may this request act on this session?
@@ -55,18 +87,33 @@ const {
  * cookie-blocked browsers. A read token (including every token issued before
  * scopes existed) is deliberately NOT sufficient for a state change.
  *
+ * VOUCHER-CODE FALLBACK: a guest who checks their time from the main browser
+ * (Chrome/Safari after the captive popup closed) has no Omada `clientMac`
+ * parameters and may not share the mini browser's cookie or storage, so the
+ * vouched-for device identity is gone. The 6-digit code tied to the session is
+ * the credential they still hold: when it matches `sessions.voucher_used`, the
+ * request is authorized even without a control token. The comparison is
+ * constant-time, and a blank/mismatched code changes nothing.
+ *
  * @param {Object} req Express request
  * @param {Object} session session object from getSession()
  * @returns {boolean} true when the caller proved it owns the session
  */
 function assertSessionOwner(req, session) {
   if (!session || !session.sessionId) return false;
+
   const verified = verifySessionToken(tokenFromRequest(req));
-  return Boolean(
+  if (
     verified &&
     verified.scope === 'control' &&
     verified.sessionId === session.sessionId
-  );
+  ) {
+    return true;
+  }
+
+  const suppliedCode = submittedVoucherCode(req);
+  const sessionCode = normalizeVoucherCode(session.voucherUsed);
+  return Boolean(suppliedCode && sessionCode && safeEqual(suppliedCode, sessionCode));
 }
 
 /**

@@ -263,6 +263,28 @@
     } catch (e) { return ''; }
   }
 
+  // The voucher code the guest just checked. status.html sends it with
+  // pause/resume so the backend can authorize a manual browser visit that has
+  // no Omada clientMac parameters and no control token for the session.
+  var VOUCHER_CODE_STORAGE_KEY = 'portalVoucherCode';
+
+  /**
+   * rememberVoucherCode — persist the 6-digit code for the status page.
+   * Never throws: with storage blocked the URL parameter still carries it.
+   *
+   * @param {string} code
+   * @returns {string} the normalized code, or '' when it is unusable
+   */
+  function rememberVoucherCode(code) {
+    var normalized = String(code == null ? '' : code).replace(/\D/g, '').slice(0, 6);
+    if (!/^\d{6}$/.test(normalized)) return '';
+    try {
+      window.localStorage.setItem(VOUCHER_CODE_STORAGE_KEY, normalized);
+      window.sessionStorage.setItem(VOUCHER_CODE_STORAGE_KEY, normalized);
+    } catch (e) { /* storage unavailable — the URL still carries it */ }
+    return normalized;
+  }
+
   /**
    * getStoredContext — read the persisted Omada context.
    * Never throws: private mode / disabled storage degrades to URL-only.
@@ -2500,10 +2522,14 @@
   // The token covers a mini-browser that rejects the HttpOnly cookie (a
   // cross-site SameSite=Lax cookie is not stored) or partitions its storage;
   // status.html reads ?token= first and re-saves it for later polls.
-  function openSessionStatusPage(token) {
-    var url = 'status.html';
-    if (token) url += '?token=' + encodeURIComponent(token);
-    window.location.href = url;
+  function openSessionStatusPage(token, voucherCode) {
+    var parts = [];
+    if (token) parts.push('token=' + encodeURIComponent(token));
+    // The code authorizes Pause/Resume on the status page when this browser
+    // has no device identity (manual Chrome/Safari visit, tunnel address).
+    var code = rememberVoucherCode(voucherCode);
+    if (code) parts.push('voucher=' + encodeURIComponent(code));
+    window.location.href = parts.length ? 'status.html?' + parts.join('&') : 'status.html';
   }
 
   // GET /api/session/status?voucher=<code> — native fetch, same shape as the
@@ -2568,7 +2594,7 @@
       // warning, which is not what the guest asked for.
       if (hasBoundSession(data)) {
         setStatusResult('Session found \u2014 opening your status page\u2026', 'success');
-        openSessionStatusPage(data.statusToken);
+        openSessionStatusPage(data.statusToken, check.value);
         return;
       }
 
