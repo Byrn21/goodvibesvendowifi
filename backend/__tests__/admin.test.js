@@ -934,6 +934,50 @@ describe('GET /api/admin/stats — Dashboard statistics', () => {
     expect(s.totalRevenue).toBe(6000);
   });
 
+  test('includes InstaPay authorized payments in digital and total revenue', async () => {
+    // InstaPay authorizes straight from the webhook and never creates a voucher.
+    await getDb().run(
+      `INSERT INTO webhook_events (event_id, ref_no, amount, status)
+       VALUES ('evt_insta_1', 'INSTAREF001', 50, 'authorized')`
+    );
+    // Unsettled money is not revenue, and a claimed event's amount is already
+    // counted through its voucher, so neither may be added again.
+    await getDb().run(
+      `INSERT INTO webhook_events (event_id, ref_no, amount, status)
+       VALUES ('evt_insta_2', 'INSTAREF002', 20, 'unclaimed')`
+    );
+    await getDb().run(
+      `INSERT INTO webhook_events (event_id, ref_no, amount, status)
+       VALUES ('evt_insta_3', 'INSTAREF003', 999, 'claimed')`
+    );
+
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    const s = res.body.stats;
+    expect(s.digitalRevenue).toBe(5000);
+    expect(s.totalRevenue).toBe(5000);
+  });
+
+  test('discards digital reservations orphaned for more than 15 minutes', async () => {
+    // A crash between the reservation INSERT and the claim commit strands this
+    // row. Its payment is still 'unclaimed', so deleting it lets the guest retry.
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no, created_at)
+       VALUES ('700001', 'standard', 60, 2500, 'reserved', 'REF-ORPHAN', datetime('now', '-16 minutes'))`
+    );
+    // A claim that is still in flight is not an orphan and remains revenue.
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no)
+       VALUES ('700002', 'standard', 60, 3000, 'reserved', 'REF-INFLIGHT')`
+    );
+
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    expect(res.status).toBe(200);
+    expect(res.body.stats.digitalRevenue).toBe(3000);
+
+    const orphan = await getDb().getOne("SELECT 1 AS found FROM vouchers WHERE code = '700001'");
+    expect(orphan).toBeUndefined();
+  });
+
   test('does not report a ghost total for a lone terminal (expired) session', async () => {
     await seedSession({ sessionId: 'sess-exp-01', state: 'expired' });
     const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
