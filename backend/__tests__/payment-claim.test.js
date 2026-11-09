@@ -160,18 +160,20 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.error).toMatch(/not found or already claimed/i);
   });
 
-  test('200: converts Pesos to centavos and claims the matching voucher + event together', async () => {
-    await seedUnclaimed('REF-ABC1234', 50);                     // 50 pesos = 5000 centavos
-    await seedVoucher('111111', 5000);                          // must be chosen
-    await seedVoucher('222222', 5000, 'active', 'REF-OLD0001'); // already assigned -> skip
+  test('200: converts Pesos to centavos and generates a voucher bound to the payment', async () => {
+    await seedUnclaimed('REF-ABC1234', 50); // 50 pesos = 5000 centavos
 
     const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234', mobile_number: MOBILE });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.voucherCode).toBe('111111');
+    expect(res.body.voucherCode).toMatch(/^\d{6}$/);
     expect(res.body.ref_no).toBe('REF-ABC1234');
 
-    const voucher = await getDb().getOne('SELECT * FROM vouchers WHERE code = ?', ['111111']);
+    const voucher = await getDb().getOne('SELECT * FROM vouchers WHERE code = ?', [res.body.voucherCode]);
+    expect(voucher.type).toBe('standard');
+    expect(voucher.price).toBe(5000);
+    // ₱50 is not a catalog price, so the operator's 10-peso/minute rate applies.
+    expect(voucher.duration_minutes).toBe(5);
     expect(voucher.state).toBe('claimed');
     expect(voucher.assigned_ref_no).toBe('REF-ABC1234');
 
@@ -179,31 +181,50 @@ describe('POST /api/payment/claim', () => {
     expect(event.status).toBe('claimed');
   });
 
-  test('404 NO_VOUCHER_AVAILABLE when no active voucher has the exact centavo price', async () => {
+  test('generates the advertised plan duration and tier for a catalog price', async () => {
+    await seedUnclaimed('REF-PLAN0025', 25); // ₱25 = 5-hour premium plan
+
+    const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '0025', mobile_number: MOBILE });
+    expect(res.status).toBe(200);
+    expect(res.body.voucherCode).toMatch(/^\d{6}$/);
+    expect(res.body.minutes).toBe(300);
+
+    const voucher = await getDb().getOne('SELECT * FROM vouchers WHERE code = ?', [res.body.voucherCode]);
+    expect(voucher.type).toBe('premium');
+    expect(voucher.duration_minutes).toBe(300);
+  });
+
+  test('generates digital inventory even when the shelf is empty, without touching printed stock', async () => {
     await seedUnclaimed('REF-XYZ5678', 50); // -> 5000 centavos
-    await seedVoucher('333333', 50);        // a Peso/centavo mismatch must NOT match
+    await seedVoucher('333333', 50);        // printed stock at a different price
 
     const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '5678', mobile_number: MOBILE });
-    expect(res.status).toBe(404);
-    expect(res.body.code).toBe('NO_VOUCHER_AVAILABLE');
+    expect(res.status).toBe(200);
+    expect(res.body.voucherCode).toMatch(/^\d{6}$/);
+    expect(res.body.voucherCode).not.toBe('333333');
 
-    // Nothing was mutated.
-    const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['333333']);
-    expect(voucher.state).toBe('active');
-    expect(voucher.assigned_ref_no).toBe(null);
-    const event = await getDb().getOne('SELECT status FROM webhook_events WHERE ref_no = ?', ['REF-XYZ5678']);
-    expect(event.status).toBe('unclaimed');
+    const generated = await getDb().getOne(
+      'SELECT price, state, assigned_ref_no FROM vouchers WHERE code = ?',
+      [res.body.voucherCode]
+    );
+    expect(generated.price).toBe(5000);
+    expect(generated.state).toBe('claimed');
+    expect(generated.assigned_ref_no).toBe('REF-XYZ5678');
+
+    // The pre-printed voucher is untouched: claims no longer consume stock.
+    const printed = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['333333']);
+    expect(printed.state).toBe('active');
+    expect(printed.assigned_ref_no).toBe(null);
   });
 
   test('a payment can only be claimed once - the same customer\'s retry gets the SAME voucher back', async () => {
     await seedUnclaimed('REF-DBL0001', 50);
-    await seedVoucher('444444', 5000);
-    await seedVoucher('555555', 5000);
 
     const first = await request(app).post('/api/payment/claim').send({ ref_suffix: '0001', mobile_number: MOBILE });
     expect(first.status).toBe(200);
-    expect(first.body.voucherCode).toBe('444444');
+    expect(first.body.voucherCode).toMatch(/^\d{6}$/);
     expect(first.body.alreadyClaimed).toBeUndefined();
+    const issuedCode = first.body.voucherCode;
 
     // The first response may never have reached the phone. Same digits + same
     // number replays the voucher that payment already produced — no second
@@ -213,9 +234,9 @@ describe('POST /api/payment/claim', () => {
     expect(retry.body.success).toBe(true);
     expect(retry.body.alreadyClaimed).toBe(true);
     expect(retry.body.authorized).toBe(false);
-    expect(retry.body.voucherCode).toBe('444444');
+    expect(retry.body.voucherCode).toBe(issuedCode);
     expect(retry.body.ref_no).toBe('REF-DBL0001');
-    expect(retry.body.minutes).toBe(60);   // the seeded voucher's duration
+    expect(retry.body.minutes).toBe(5);   // the generated voucher's duration
 
     // A different number must not be told anything about someone else's payment.
     const stranger = await request(app)
@@ -226,11 +247,9 @@ describe('POST /api/payment/claim', () => {
     expect(stranger.body.voucherCode).toBeUndefined();
     expect(stranger.body.alreadyClaimed).toBeUndefined();
 
-    // Exactly one voucher was consumed, and the other is still on the shelf.
-    const active = await getDb().getOne(
-      "SELECT COUNT(*) AS c FROM vouchers WHERE state = 'active' AND assigned_ref_no IS NULL"
-    );
-    expect(Number(active.c)).toBe(1);
+    // Exactly one voucher was generated and claimed for this payment.
+    const total = await getDb().getOne('SELECT COUNT(*) AS c FROM vouchers');
+    expect(Number(total.c)).toBe(1);
     const claimed = await getDb().getOne(
       "SELECT COUNT(*) AS c FROM vouchers WHERE state = 'claimed' AND assigned_ref_no = 'REF-DBL0001'"
     );
@@ -256,11 +275,9 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.voucherCode).toBeUndefined();
   });
 
-  test('concurrent claims for the same amount reserve distinct vouchers', async () => {
+  test('concurrent claims for the same amount generate distinct vouchers', async () => {
     await seedUnclaimed('REF-CONC0001', 50);
     await seedUnclaimed('REF-CONC0002', 50);
-    await seedVoucher('909090', 5000);
-    await seedVoucher('919191', 5000);
 
     // Hold both requests inside the Omada call: by then each must already own a
     // DIFFERENT reserved voucher, which is the race the old flow lost.
@@ -283,11 +300,14 @@ describe('POST /api/payment/claim', () => {
     const [a, b] = await Promise.all([first, second]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
-    expect([a.body.voucherCode, b.body.voucherCode].sort()).toEqual(['909090', '919191']);
+    const codes = [a.body.voucherCode, b.body.voucherCode];
+    codes.forEach((code) => expect(code).toMatch(/^\d{6}$/));
+    expect(new Set(codes).size).toBe(2);
 
     const claimed = await getDb().query(
-      "SELECT code, state, assigned_ref_no FROM vouchers WHERE code IN ('909090', '919191') ORDER BY code"
+      'SELECT code, state, assigned_ref_no FROM vouchers ORDER BY code'
     );
+    expect(claimed).toHaveLength(2);
     expect(claimed.map((v) => v.state)).toEqual(['claimed', 'claimed']);
     expect(new Set(claimed.map((v) => v.assigned_ref_no)).size).toBe(2);
 
@@ -297,7 +317,6 @@ describe('POST /api/payment/claim', () => {
   test('matches the newest unclaimed payment when several share the suffix', async () => {
     await seedUnclaimed('REF-ONE1234', 50);
     await seedUnclaimed('REF-TWO1234', 50);
-    await seedVoucher('666666', 5000);
 
     const res = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234', mobile_number: MOBILE });
     expect(res.status).toBe(200);
@@ -306,11 +325,11 @@ describe('POST /api/payment/claim', () => {
 
   test('a claimed voucher connects through the existing /api/auth flow (Connect Now)', async () => {
     await seedUnclaimed('REF-CH1234', 50);
-    await seedVoucher('777777', 5000);
 
     const claim = await request(app).post('/api/payment/claim').send({ ref_suffix: '1234', mobile_number: MOBILE });
     expect(claim.status).toBe(200);
-    expect(claim.body.voucherCode).toBe('777777');
+    expect(claim.body.voucherCode).toMatch(/^\d{6}$/);
+    const issuedCode = claim.body.voucherCode;
 
     const auth = await request(app).post('/api/auth').send({
       voucher: claim.body.voucherCode,
@@ -322,7 +341,7 @@ describe('POST /api/payment/claim', () => {
     expect(auth.status).toBe(200);
     expect(auth.body.success).toBe(true);
 
-    const voucher = await getDb().getOne('SELECT state, used_by_mac FROM vouchers WHERE code = ?', ['777777']);
+    const voucher = await getDb().getOne('SELECT state, used_by_mac FROM vouchers WHERE code = ?', [issuedCode]);
     expect(voucher.state).toBe('used');
     expect(voucher.used_by_mac).toBe(MAC);
   });
@@ -331,7 +350,6 @@ describe('POST /api/payment/claim', () => {
 
   test('400 when mobile_number is missing or not an 11-digit 09 number', async () => {
     await seedUnclaimed('REF-MOB0001', 50);
-    await seedVoucher('888888', 5000);
 
     for (const bad of [undefined, '', '0917123456', '091712345678', '99171234567', '0917-123-4567']) {
       const res = await request(app)
@@ -349,7 +367,6 @@ describe('POST /api/payment/claim', () => {
 
   test('backfills mobile_number on a legacy payment it reconciled', async () => {
     await seedUnclaimed('REF-MOB0002', 50, null);
-    await seedVoucher('818181', 5000);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -366,7 +383,6 @@ describe('POST /api/payment/claim', () => {
 
   test('C-02: a claim with the wrong mobile number does not reveal the voucher', async () => {
     await seedUnclaimed('REF-SEC0001', 50);
-    await seedVoucher('717171', 5000);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -385,9 +401,8 @@ describe('POST /api/payment/claim', () => {
     expect(event.status).toBe('unclaimed');
     expect(event.mobile_number).toBe(MOBILE);
 
-    const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['717171']);
-    expect(voucher.state).toBe('active');
-    expect(voucher.assigned_ref_no).toBeNull();
+    const vouchers = await getDb().getOne('SELECT COUNT(*) AS c FROM vouchers');
+    expect(Number(vouchers.c)).toBe(0);
   });
 
   test('C-02: the 6th failed claim for a suffix is locked even when X-Forwarded-For rotates', async () => {
@@ -413,10 +428,7 @@ describe('POST /api/payment/claim', () => {
   // ── Direct MAC authorization ──────────────────────────────────────────
 
   test('authorizes the MAC through the controller web API (authorized:true + QoS)', async () => {
-    await seedUnclaimed('REF-AUTH0001', 50);   // 50 pesos -> 5 minutes at the old amount rate
-    // The voucher's own duration is 30 minutes, which must win over the 5 the
-    // amount alone would imply.
-    await seedVoucher('828282', 5000, 'active', null, 30);
+    await seedUnclaimed('REF-AUTH0001', 5); // ₱5 = the 1-hour standard plan
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -426,14 +438,14 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.authorized).toBe(true);
     expect(res.body.message).toBe('Device authorized');
-    expect(res.body.minutes).toBe(30);
+    expect(res.body.minutes).toBe(60);
     // The voucher is still returned so the ledger and a manual fallback survive.
-    expect(res.body.voucherCode).toBe('828282');
+    expect(res.body.voucherCode).toMatch(/^\d{6}$/);
     expect(res.body.ref_no).toBe('REF-AUTH0001');
 
     expect(omadaService.authenticateClient).toHaveBeenCalledWith({
       ...AUTH_CTX,
-      durationMinutes: 30,
+      durationMinutes: 60,
     });
 
     // The response must NOT wait for the 2000 ms pre-QoS delay: the claim is
@@ -463,8 +475,7 @@ describe('POST /api/payment/claim', () => {
     // The request address belongs to a DIFFERENT device: trusting it would
     // authorize the wrong guest.
     await seedPortalContext(OTHER_MAC, OTHER_IP);
-    await seedUnclaimed('REF-PICK0001', 50);
-    await seedVoucher('898989', 5000, 'active', null, 30);
+    await seedUnclaimed('REF-PICK0001', 5);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -484,7 +495,7 @@ describe('POST /api/payment/claim', () => {
       apMac: AP_MAC,
       ssidName: SSID,
       radioId: 0,
-      durationMinutes: 30,
+      durationMinutes: 60,
     });
 
     const session = await getDb().getOne(
@@ -498,8 +509,7 @@ describe('POST /api/payment/claim', () => {
     // The deployment case: the request arrives from the tunnel's public
     // address, which no portal_client_context row can match, while the guest's
     // own context is stored under its LAN address.
-    await seedUnclaimed('REF-PICK0004', 50);
-    await seedVoucher('929292', 5000, 'active', null, 15);
+    await seedUnclaimed('REF-PICK0004', 5);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -510,7 +520,7 @@ describe('POST /api/payment/claim', () => {
     expect(res.body.authorized).toBe(true);
     expect(omadaService.authenticateClient).toHaveBeenCalledWith({
       ...AUTH_CTX,
-      durationMinutes: 15,
+      durationMinutes: 60,
     });
 
     const session = await getDb().getOne('SELECT client_mac FROM sessions ORDER BY id DESC LIMIT 1');
@@ -518,8 +528,7 @@ describe('POST /api/payment/claim', () => {
   });
 
   test('falls back to the device at the request address when the body has no MAC', async () => {
-    await seedUnclaimed('REF-PICK0002', 50);
-    await seedVoucher('909090', 5000);             // 60-minute voucher
+    await seedUnclaimed('REF-PICK0002', 5); // 1-hour plan
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -540,8 +549,7 @@ describe('POST /api/payment/claim', () => {
   });
 
   test('a malformed explicit MAC is rejected before any controller call', async () => {
-    await seedUnclaimed('REF-PICK0003', 50);
-    await seedVoucher('919191', 5000);
+    await seedUnclaimed('REF-PICK0003', 5);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -553,8 +561,7 @@ describe('POST /api/payment/claim', () => {
   });
 
   test('records the granted session so the status page can report time', async () => {
-    await seedUnclaimed('REF-SESS0001', 50);
-    await seedVoucher('868686', 5000, 'active', null, 30);
+    await seedUnclaimed('REF-SESS0001', 5); // 1-hour plan
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -571,36 +578,42 @@ describe('POST /api/payment/claim', () => {
     // Same id shape as the voucher-login route (/api/auth).
     expect(session.session_id).toMatch(/^sess_[0-9a-f]{16}$/);
     expect(session.state).toBe('active');
-    expect(session.duration_minutes).toBe(30);
-    expect(session.voucher_used).toBe('868686');
+    expect(session.duration_minutes).toBe(60);
+    expect(session.voucher_used).toBe(res.body.voucherCode);
     expect(session.voucher_type).toBe('standard');
     // The controller context the authorization used travels with the session.
     expect(session.client_ip).toBe(CLIENT_IP);
     expect(session.ap_mac).toBe(AP_MAC);
     expect(session.ssid_name).toBe(SSID);
-    expect(session.total_duration_seconds).toBe(30 * 60);
+    expect(session.total_duration_seconds).toBe(60 * 60);
     expect(new Date(session.expires_at).getTime() - new Date(session.started_at).getTime())
-      .toBe(30 * 60 * 1000);
+      .toBe(60 * 60 * 1000);
 
     // The point of the row: the MAC-direct status lookup now resolves it.
     const status = await request(app).get('/api/session/status?mac=' + encodeURIComponent(MAC));
     expect(status.status).toBe(200);
     expect(status.body.sessionId).toBe(session.session_id);
     expect(status.body.state).toBe('active');
-    expect(status.body.remainingSeconds).toBeGreaterThan(29 * 60);
+    expect(status.body.remainingSeconds).toBeGreaterThan(59 * 60);
   });
 
-  test('records the voucher tier and its per-voucher bandwidth caps', async () => {
-    await seedUnclaimed('REF-SESS0002', 25);
-    await getDb().run(
-      `INSERT INTO vouchers (code, type, duration_minutes, price, down_kbps, up_kbps, state)
-       VALUES ('878787', 'Premium', 45, 2500, 5000, 1024, 'active')`
-    );
+  test('records the generated voucher tier, duration and bandwidth snapshot', async () => {
+    await seedUnclaimed('REF-SESS0002', 25); // ₱25 = 5-hour premium plan
 
     const res = await request(app)
       .post('/api/payment/claim')
       .send({ ref_suffix: '0002', mobile_number: MOBILE, client_mac: MAC });
     expect(res.body.authorized).toBe(true);
+
+    const voucher = await getDb().getOne(
+      'SELECT type, duration_minutes, down_kbps, up_kbps FROM vouchers WHERE code = ?',
+      [res.body.voucherCode]
+    );
+    expect(voucher.type).toBe('premium');
+    expect(voucher.duration_minutes).toBe(300);
+    // No per-voucher caps on generated rows: the premium tier defaults apply.
+    expect(voucher.down_kbps).toBeNull();
+    expect(voucher.up_kbps).toBeNull();
 
     const session = await getDb().getOne(
       `SELECT voucher_type, down_kbps, up_kbps, duration_minutes
@@ -609,16 +622,14 @@ describe('POST /api/payment/claim', () => {
     );
     // Stored lowercased, so pause/resume and the QoS rules agree on the tier.
     expect(session.voucher_type).toBe('premium');
-    // 5000 Kbps is applied as 5 Mbps (unit 2), and the snapshot stores the
-    // binary equivalent of what was applied: 5 * 1024.
-    expect(session.down_kbps).toBe(5120);
+    // 50 Mbps down is snapshotted in Kbps (50 * 1024); 1024 Kbps up stays Kbps.
+    expect(session.down_kbps).toBe(51200);
     expect(session.up_kbps).toBe(1024);
-    expect(session.duration_minutes).toBe(45);
+    expect(session.duration_minutes).toBe(300);
   });
 
   test('records no session when the claim could not authorize the device', async () => {
     await seedUnclaimed('REF-SESS0003', 50);
-    await seedVoucher('888888', 5000);
 
     // No client_mac: the voucher is claimed but nothing is connected.
     const res = await request(app)
@@ -639,7 +650,6 @@ describe('POST /api/payment/claim', () => {
     process.env.PREMIUM_UP_KBPS = '1024';
     try {
       await seedUnclaimed('REF-PREM0001', 25);   // premium amount
-      await seedVoucher('838383', 2500, 'active', null, 45);
 
       const res = await request(app)
         .post('/api/payment/claim')
@@ -649,7 +659,7 @@ describe('POST /api/payment/claim', () => {
       expect(res.body.authorized).toBe(true);
       expect(omadaService.authenticateClient).toHaveBeenCalledWith({
         ...AUTH_CTX,
-        durationMinutes: 45,
+        durationMinutes: 300,
       });
 
       await flushQosDelay();
@@ -671,7 +681,6 @@ describe('POST /api/payment/claim', () => {
     omadaService.setClientRateLimit.mockRejectedValue(new Error('ratelimit 500'));
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     await seedUnclaimed('REF-QOS0001', 50);
-    await seedVoucher('848484', 5000);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -700,7 +709,6 @@ describe('POST /api/payment/claim', () => {
     // associated on the controller); the retry succeeds.
     omadaService.authenticateClient.mockRejectedValueOnce(new Error('controller 503'));
     await seedUnclaimed('REF-FAIL0001', 50);
-    await seedVoucher('858585', 5000);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -717,9 +725,10 @@ describe('POST /api/payment/claim', () => {
     // The QoS step is skipped entirely when the guest never got online.
     expect(omadaService.setClientRateLimit).not.toHaveBeenCalled();
 
-    const untouchedVoucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['858585']);
-    expect(untouchedVoucher.state).toBe('active');
-    expect(untouchedVoucher.assigned_ref_no).toBeNull();
+    // The generated reservation was discarded, so no phantom digital stock
+    // is left behind for a claim that was never authorized.
+    const untouchedVoucher = await getDb().getOne('SELECT COUNT(*) AS c FROM vouchers');
+    expect(Number(untouchedVoucher.c)).toBe(0);
     const untouchedEvent = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-FAIL0001']);
     expect(untouchedEvent.status).toBe('unclaimed');
     expect(untouchedEvent.mobile_number).toBe(MOBILE);
@@ -733,14 +742,17 @@ describe('POST /api/payment/claim', () => {
     expect(retry.status).toBe(200);
     expect(retry.body.success).toBe(true);
     expect(retry.body.authorized).toBe(true);
-    expect(retry.body.voucherCode).toBe('858585');
+    expect(retry.body.voucherCode).toMatch(/^\d{6}$/);
     expect(retry.body.ref_no).toBe('REF-FAIL0001');
-    expect(retry.body.minutes).toBe(60);
+    expect(retry.body.minutes).toBe(5);
 
     // Drain the cap timer the successful retry scheduled.
     await flushQosDelay();
 
-    const voucher = await getDb().getOne('SELECT state, assigned_ref_no FROM vouchers WHERE code = ?', ['858585']);
+    const voucher = await getDb().getOne(
+      'SELECT state, assigned_ref_no FROM vouchers WHERE code = ?',
+      [retry.body.voucherCode]
+    );
     expect(voucher.state).toBe('claimed');
     expect(voucher.assigned_ref_no).toBe('REF-FAIL0001');
     const event = await getDb().getOne('SELECT status, mobile_number FROM webhook_events WHERE ref_no = ?', ['REF-FAIL0001']);
@@ -750,7 +762,6 @@ describe('POST /api/payment/claim', () => {
 
   test('without a client_mac the claim still succeeds, with authorized:false and no Omada call', async () => {
     await seedUnclaimed('REF-NOM0001', 50);
-    await seedVoucher('868686', 5000);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -759,7 +770,7 @@ describe('POST /api/payment/claim', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.authorized).toBe(false);
-    expect(res.body.voucherCode).toBe('868686');
+    expect(res.body.voucherCode).toMatch(/^\d{6}$/);
     expect(res.body.authError).toMatch(/no client_mac/i);
     expect(omadaService.authenticateClient).not.toHaveBeenCalled();
   });
@@ -770,7 +781,6 @@ describe('POST /api/payment/claim', () => {
     // consumes nothing.
     await getDb().exec('DELETE FROM portal_client_context;');
     await seedUnclaimed('REF-NOCTX0001', 50);
-    await seedVoucher('878788', 5000);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -784,15 +794,14 @@ describe('POST /api/payment/claim', () => {
 
     // Nothing was consumed, so the same reference can be claimed after the
     // device reloads the portal page.
-    const voucher = await getDb().getOne('SELECT state FROM vouchers WHERE code = ?', ['878788']);
-    expect(voucher.state).toBe('active');
+    const voucher = await getDb().getOne('SELECT COUNT(*) AS c FROM vouchers');
+    expect(Number(voucher.c)).toBe(0);
     const event = await getDb().getOne('SELECT status FROM webhook_events WHERE ref_no = ?', ['REF-NOCTX0001']);
     expect(event.status).toBe('unclaimed');
   });
 
   test('400 when client_mac is present but malformed', async () => {
     await seedUnclaimed('REF-BAD0001', 50);
-    await seedVoucher('878787', 5000);
 
     const res = await request(app)
       .post('/api/payment/claim')
@@ -829,8 +838,7 @@ describe('POST /api/payment/claim', () => {
       const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
       global.fetch = fetchMock;
 
-      await seedUnclaimed('REF-SMS0001', 50);
-      await seedVoucher('898989', 5000);
+      await seedUnclaimed('REF-SMS0001', 5); // 1-hour plan
 
       const res = await request(app)
         .post('/api/payment/claim')
@@ -853,7 +861,7 @@ describe('POST /api/payment/claim', () => {
 
       expect(params).toEqual({
         target_number: MOBILE,
-        voucher_code: '898989',
+        voucher_code: res.body.voucherCode,
         ref_suffix: '0001',
         ref_no: 'REF-SMS0001',
         authorized: 'true',
@@ -881,8 +889,7 @@ describe('POST /api/payment/claim', () => {
       // value derived from the amount would arrive as minutes=0 (the reported
       // bug). The voucher's own duration is 1 minute and must be reported as
       // exactly 1 — a plain integer in minutes, not milliseconds.
-      await seedUnclaimed('REF-SMS0004', 5);
-      await seedVoucher('929292', 500, 'active', null, 1);
+      await seedUnclaimed('REF-SMS0004', 1);
 
       const res = await request(app)
         .post('/api/payment/claim')
@@ -898,7 +905,7 @@ describe('POST /api/payment/claim', () => {
       const parsed = new URL(url);
       expect(parsed.searchParams.get('secret')).toBe('abc');
       expect(parsed.searchParams.get('target_number')).toBe(MOBILE);
-      expect(parsed.searchParams.get('voucher_code')).toBe('929292');
+      expect(parsed.searchParams.get('voucher_code')).toBe(res.body.voucherCode);
       expect(parsed.searchParams.get('minutes')).toBe('1');
       // BASE_URL is unset, so status_link must be absent rather than "undefined".
       expect(parsed.searchParams.has('status_link')).toBe(false);
@@ -910,7 +917,6 @@ describe('POST /api/payment/claim', () => {
       global.fetch = fetchMock;
 
       await seedUnclaimed('REF-SMS0002', 50);
-      await seedVoucher('909090', 5000);
 
       const res = await request(app)
         .post('/api/payment/claim')
@@ -924,7 +930,6 @@ describe('POST /api/payment/claim', () => {
       global.fetch = jest.fn().mockRejectedValue(new Error('sms endpoint unreachable'));
 
       await seedUnclaimed('REF-SMS0003', 50);
-      await seedVoucher('919191', 5000);
 
       const res = await request(app)
         .post('/api/payment/claim')
@@ -941,12 +946,12 @@ describe('POST /api/payment/claim', () => {
       global.fetch = fetchMock;
 
       await seedUnclaimed('REF-SMS0005', 50);
-      await seedVoucher('939393', 5000);
 
       const first = await request(app)
         .post('/api/payment/claim')
         .send({ ref_suffix: '0005', mobile_number: MOBILE, client_mac: MAC });
       expect(first.status).toBe(200);
+      const issuedCode = first.body.voucherCode;
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       const retry = await request(app)
@@ -954,7 +959,7 @@ describe('POST /api/payment/claim', () => {
         .send({ ref_suffix: '0005', mobile_number: MOBILE, client_mac: MAC });
       expect(retry.status).toBe(200);
       expect(retry.body.alreadyClaimed).toBe(true);
-      expect(retry.body.voucherCode).toBe('939393');
+      expect(retry.body.voucherCode).toBe(issuedCode);
 
       // The code was already texted once; a replay must not text or authorize
       // again (which would extend the session for free).

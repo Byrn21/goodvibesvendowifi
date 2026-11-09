@@ -817,6 +817,13 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
     await seedSession({ sessionId: 'sess-fail-01', state: 'payment_failed', paymentAmount: 1000, createdAt: beforeReset });
     await seedSession({ sessionId: 'sess-act-01', state: 'active', paymentAmount: 3000, createdAt: beforeReset });
     await seedSession({ sessionId: 'sess-pau-01', state: 'paused', paymentAmount: 5000, createdAt: beforeReset });
+    // A printed (cash) voucher redeemed before the baseline: revenue is counted
+    // from the vouchers that were actually sold, not from session rows.
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state, used_by_mac, used_at, created_at)
+       VALUES ('CASH-REV-1', 'standard', 60, 11500, 'used', 'AA:BB:CC:DD:EE:FF', ?, ?)`,
+      [beforeReset, beforeReset]
+    );
 
     const beforeStats = await request(app)
       .get('/api/admin/stats')
@@ -824,6 +831,8 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
     expect(beforeStats.body.stats.totalSessions).toBe(2);
     expect(beforeStats.body.stats.activeSessions).toBe(1);
     expect(beforeStats.body.stats.pausedSessions).toBe(1);
+    expect(beforeStats.body.stats.cashRevenue).toBe(11500);
+    expect(beforeStats.body.stats.digitalRevenue).toBe(0);
     expect(beforeStats.body.stats.totalRevenue).toBe(11500);
 
     const res = await request(app)
@@ -858,12 +867,19 @@ describe('DELETE /api/admin/transactions — Clear Transaction Logs', () => {
     // Created after the reset, so they belong to the new reporting window.
     await seedSession({ sessionId: 'sess-new-act', state: 'active', paymentAmount: 3000 });
     await seedSession({ sessionId: 'sess-new-pau', state: 'paused', paymentAmount: 2000 });
+    // A digital voucher generated after the baseline.
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no)
+       VALUES ('123456', 'standard', 60, 5000, 'claimed', 'REF-AFTER-RESET')`
+    );
 
     const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
     const s = res.body.stats;
     expect(s.totalSessions).toBe(2);
     expect(s.activeSessions).toBe(1);
     expect(s.pausedSessions).toBe(1);
+    expect(s.cashRevenue).toBe(0);
+    expect(s.digitalRevenue).toBe(5000);
     expect(s.totalRevenue).toBe(5000);
   });
 
@@ -893,6 +909,29 @@ describe('GET /api/admin/stats — Dashboard statistics', () => {
     expect(res.status).toBe(200);
     expect(res.body.stats.totalVouchers).toBe(3);
     expect(res.body.stats.totalSessions).toBe(0);
+  });
+
+  test('splits revenue into redeemed cash vouchers and generated digital vouchers', async () => {
+    // Printed stock: only redeemed rows count; unsold sheets are not revenue.
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state, used_by_mac, used_at)
+       VALUES ('CASH-USED', 'standard', 60, 3500, 'used', 'AA:BB:CC:DD:EE:FF', CURRENT_TIMESTAMP)`
+    );
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state)
+       VALUES ('CASH-UNSOLD', 'standard', 60, 9999, 'active')`
+    );
+    // Digital inventory only exists because a payment was received.
+    await getDb().run(
+      `INSERT INTO vouchers (code, type, duration_minutes, price, state, assigned_ref_no)
+       VALUES ('654321', 'premium', 300, 2500, 'claimed', 'REF-DIGITAL1')`
+    );
+
+    const res = await request(app).get('/api/admin/stats').set('X-API-Key', VALID_KEY);
+    const s = res.body.stats;
+    expect(s.cashRevenue).toBe(3500);
+    expect(s.digitalRevenue).toBe(2500);
+    expect(s.totalRevenue).toBe(6000);
   });
 
   test('does not report a ghost total for a lone terminal (expired) session', async () => {
@@ -1000,14 +1039,16 @@ describe('GET /api/admin/transactions/history + /export — Settled payments', (
     res.body.transactions.forEach((t) => { byId[t.event_id] = t; });
 
     expect(Object.keys(byId.evt_hist_1).sort()).toEqual(
-      ['amount_centavos', 'event_id', 'mobile_number', 'processed_at', 'ref_no', 'status', 'voucher_code'].sort()
+      ['amount_centavos', 'assigned_ref_no', 'event_id', 'mobile_number', 'processed_at', 'ref_no', 'status', 'voucher_code'].sort()
     );
     expect(byId.evt_hist_1.ref_no).toBe('HISTREF001');
+    expect(byId.evt_hist_1.assigned_ref_no).toBe('HISTREF001');
     expect(byId.evt_hist_1.mobile_number).toBe('09171234567');
     expect(byId.evt_hist_1.voucher_code).toBe('300001');
     expect(Number(byId.evt_hist_1.amount_centavos)).toBe(5000);
     expect(Number(byId.evt_hist_5.amount_centavos)).toBe(3500);
     expect(byId.evt_hist_2.voucher_code).toBeNull();
+    expect(byId.evt_hist_2.assigned_ref_no).toBeNull();
   });
 
   test('paginates the history table', async () => {
@@ -1036,14 +1077,15 @@ describe('GET /api/admin/transactions/history + /export — Settled payments', (
     expect(res.headers['content-disposition']).toBe('attachment; filename="transactions.csv"');
 
     const lines = res.text.replace(/^\uFEFF/, '').trim().split('\r\n');
-    expect(lines[0]).toBe('Date,Ref No,Mobile,Voucher,Amount');
+    expect(lines[0]).toBe('Date,Ref No,Assigned Ref,Mobile,Voucher,Amount');
     expect(lines).toHaveLength(2);
 
     const cols = lines[1].split(',');
     expect(cols[1]).toBe('HISTREF001');
-    expect(cols[2]).toBe('09171234567');
-    expect(cols[3]).toBe('300001');
-    expect(cols[4]).toBe('50.00');
+    expect(cols[2]).toBe('HISTREF001');
+    expect(cols[3]).toBe('09171234567');
+    expect(cols[4]).toBe('300001');
+    expect(cols[5]).toBe('50.00');
   });
 
   test('filters the history to unclaimed / failed payments for support', async () => {
@@ -1082,7 +1124,7 @@ describe('GET /api/admin/transactions/history + /export — Settled payments', (
       .set('X-API-Key', VALID_KEY);
 
     const lines = res.text.replace(/^\uFEFF/, '').trim().split('\r\n');
-    expect(lines[0]).toBe('Date,Ref No,Mobile,Voucher,Amount');
+    expect(lines[0]).toBe('Date,Ref No,Assigned Ref,Mobile,Voucher,Amount');
     expect(lines).toHaveLength(2);
     expect(lines[1].split(',')[1]).toBe('HISTREF002');
   });

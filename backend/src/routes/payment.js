@@ -18,6 +18,7 @@
 
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { rateLimit } = require('express-rate-limit');
 const { getDb } = require('../db/client');
 const { normalizeMac } = require('../utils/device-id');
@@ -38,7 +39,7 @@ const {
   setSessionCookie,
 } = require('../utils/session-token');
 const claimAttempts = require('../services/claim-attempts');
-const { macroDroidVerifyUrl, PENDING_CLAIM_TTL_MS } = require('../config');
+const { macroDroidVerifyUrl, PENDING_CLAIM_TTL_MS, resolveDigitalVoucherPlan } = require('../config');
 const { listPaymentMethodStates } = require('../services/payment-methods');
 const { v4: uuidv4 } = require('uuid');
 const SITE = process.env.OMADA_SITE || 'Default';
@@ -68,19 +69,22 @@ const claimLimiter = rateLimit({
   message: { success: false, error: 'Too many requests. Try again later.', code: 'RATE_LIMITED' },
 });
 
-// ── Voucher reservation (M-03) ──────────────────────────────────────────
-// The old flow picked a voucher read-only, authorized the device on Omada
-// (seconds), and only then tried to mark the voucher claimed. Two concurrent
-// claims for the same amount could both pick the same row; one won and the
-// other was already online with nothing accounting for them.
+// ── Dynamic digital voucher generation ─────────────────────────────────
+// A digital claim does NOT consume pre-printed inventory any more. The voucher
+// is generated for this payment, reserved in its own short transaction before
+// the controller is contacted, and linked to the payment by assigned_ref_no.
+// That means a claim can never fail because the shelf happens to be empty, and
+// printed/cash stock stays untouched (it is the only inventory left with
+// assigned_ref_no IS NULL).
 //
-// The voucher is now RESERVED in its own short transaction before the
-// controller is contacted. PostgreSQL uses FOR UPDATE SKIP LOCKED so two
-// claims cannot even select the same row; SQLite relies on the conditional
-// update (its writer lock serialises the two transactions) and the retry loop
-// below picks the next voucher when a row was taken in between.
-const RESERVATION_ATTEMPTS = 3;
+// The reservation is a single INSERT: generated codes are checked against the
+// table first, and the UNIQUE constraint on vouchers.code is the backstop for
+// two claims that generate the same code at the same instant. A rejected
+// authorization DELETEs the reservation (see releaseVoucherReservation) so a
+// failed claim never leaves phantom digital stock behind.
+const RESERVATION_ATTEMPTS = 5;
 const RESERVATION_RETRY_DELAY_MS = 20;
+const VOUCHER_CODE_ATTEMPTS = 20;
 
 /**
  * Is this a transient lock/contention error worth retrying?
@@ -95,44 +99,78 @@ function isRetryableLockError(err) {
 }
 
 /**
- * Reserve ONE active, unassigned voucher priced for this payment.
+ * Is this a unique-constraint violation on vouchers.code?
+ * SQLite reports SQLITE_CONSTRAINT_UNIQUE; PostgreSQL reports 23505.
+ * @param {*} err
+ * @returns {boolean}
+ */
+function isUniqueViolation(err) {
+  const code = String((err && err.code) || '');
+  const message = String((err && err.message) || '');
+  return code === '23505' || code.indexOf('SQLITE_CONSTRAINT') === 0 ||
+    /UNIQUE constraint failed|duplicate key/i.test(message);
+}
+
+/**
+ * Generate a unique 6-digit voucher code (100000–999999).
+ *
+ * Checks the vouchers table before returning so the common case needs only one
+ * INSERT. The caller still handles a UNIQUE violation: another claim can take
+ * the same code between this SELECT and its INSERT.
+ *
+ * @param {Object} db
+ * @returns {Promise<string|null>} null when the code space cannot be allocated
+ */
+async function generateUniqueVoucherCode(db) {
+  for (let attempt = 0; attempt < VOUCHER_CODE_ATTEMPTS; attempt++) {
+    // 1000000 is exclusive, so the value is always exactly six digits and
+    // 999999 is reachable (randomInt's upper bound is exclusive).
+    const code = String(crypto.randomInt(100000, 1000000));
+    const existing = await db.getOne('SELECT 1 FROM vouchers WHERE code = ? LIMIT 1', [code]);
+    if (!existing) return code;
+  }
+  return null;
+}
+
+/**
+ * Generate and reserve a digital voucher for this payment.
+ *
+ * The row is created with the plan's duration and tier (see
+ * resolveDigitalVoucherPlan), the payment's price in centavos, state
+ * 'reserved' and assigned_ref_no set — the same fields the old flow read from
+ * a pre-imported voucher, so the rest of the claim path is unchanged.
  *
  * @param {Object} db database handle
- * @param {number} priceCentavos
+ * @param {number} priceCentavos payment amount in centavos
  * @param {string} refNo payment reference this reservation is bound to
- * @returns {Promise<Object|null>} the reserved voucher row, or null when none
+ * @returns {Promise<Object|null>} the reserved voucher row, or null when no
+ *                                 code could be allocated
  */
 async function reserveVoucherForClaim(db, priceCentavos, refNo) {
+  const plan = resolveDigitalVoucherPlan(Number(priceCentavos) / 100);
+
   for (let attempt = 0; attempt < RESERVATION_ATTEMPTS; attempt++) {
+    const code = await generateUniqueVoucherCode(db);
+    if (!code) return null;
+
     try {
-      const outcome = await db.transaction(async (tx) => {
-        const lock = db._driver === 'pg' ? ' FOR UPDATE SKIP LOCKED' : '';
-        const candidate = await tx.getOne(
-          `SELECT id, code, type, duration_minutes, down_kbps, up_kbps FROM vouchers
-            WHERE state = 'active' AND assigned_ref_no IS NULL AND price = ?
-            ORDER BY id ASC LIMIT 1${lock}`,
-          [priceCentavos]
-        );
-        if (!candidate) return { voucher: null, hadCandidate: false };
+      await db.run(
+        `INSERT INTO vouchers
+           (code, type, duration_minutes, price, state, assigned_ref_no)
+         VALUES (?, ?, ?, ?, 'reserved', ?)`,
+        [code, plan.type, plan.durationMinutes, Math.round(Number(priceCentavos)), refNo]
+      );
 
-        const update = await tx.run(
-          `UPDATE vouchers
-              SET state = 'reserved', assigned_ref_no = ?
-            WHERE id = ? AND state = 'active' AND assigned_ref_no IS NULL`,
-          [refNo, candidate.id]
-        );
-        return {
-          voucher: update.rowCount > 0 ? candidate : null,
-          hadCandidate: true,
-        };
-      });
-
-      if (outcome.voucher) return outcome.voucher;
-      // A concurrent claim took the row between SELECT and UPDATE. Try again;
-      // the next attempt selects the next active voucher.
-      if (!outcome.hadCandidate) return null;
+      return await db.getOne(
+        `SELECT id, code, type, duration_minutes, down_kbps, up_kbps
+           FROM vouchers WHERE code = ? LIMIT 1`,
+        [code]
+      );
     } catch (err) {
-      if (!isRetryableLockError(err) || attempt === RESERVATION_ATTEMPTS - 1) throw err;
+      // A concurrent claim generated the same code (or a lock timed out).
+      // Retry with a fresh code; anything else is a real failure.
+      if (!isUniqueViolation(err) && !isRetryableLockError(err)) throw err;
+      if (attempt === RESERVATION_ATTEMPTS - 1) throw err;
       await new Promise((resolve) => setTimeout(resolve, RESERVATION_RETRY_DELAY_MS));
     }
   }
@@ -140,9 +178,13 @@ async function reserveVoucherForClaim(db, priceCentavos, refNo) {
 }
 
 /**
- * Put a reservation back after the authorization or commit failed. The row is
- * only touched while it is still OURS (state 'reserved' + this ref), so a
- * concurrent claim that somehow finished cannot be undone here.
+ * Discard a generated reservation after the authorization or commit failed.
+ *
+ * A generated voucher has no value until its payment is claimed, so it is
+ * DELETEd rather than returned to stock — otherwise a refused authorization
+ * would leave phantom digital inventory priced at that amount. The row is only
+ * touched while it is still OURS (state 'reserved' + this ref + this id), so a
+ * concurrent claim on the same reference cannot be undone here.
  *
  * @param {Object} db
  * @param {number} voucherId
@@ -153,14 +195,13 @@ async function releaseVoucherReservation(db, voucherId, refNo) {
   if (!voucherId) return;
   try {
     await db.run(
-      `UPDATE vouchers
-          SET state = 'active', assigned_ref_no = NULL
+      `DELETE FROM vouchers
         WHERE id = ? AND state = 'reserved' AND assigned_ref_no = ?`,
       [voucherId, refNo]
     );
   } catch (err) {
     console.error(
-      '[payment/claim] could not release reserved voucher ' + voucherId +
+      '[payment/claim] could not discard reserved voucher ' + voucherId +
       ' for ref ' + refNo + ': ' + ((err && err.message) || String(err))
     );
   }

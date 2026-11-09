@@ -182,8 +182,6 @@ describe('POST /api/payment/claim — pending MacroDroid verification', () => {
 
 describe('GET /api/payment/claim/status', () => {
   test('reports pending, then verified, then claimed across the whole flow', async () => {
-    await seedVoucher('WIFI-FLOW-001');
-
     const started = await startPendingClaim();
     const claimId = started.body.claimId;
 
@@ -215,12 +213,12 @@ describe('GET /api/payment/claim/status', () => {
       .send({ ref_suffix: '1234', mobile_number: MOBILE, client_mac: MAC });
     expect(claimed.status).toBe(200);
     expect(claimed.body.authorized).toBe(true);
-    expect(claimed.body.voucherCode).toBe('WIFI-FLOW-001');
+    expect(claimed.body.voucherCode).toMatch(/^\d{6}$/);
 
     status = await request(app).get('/api/payment/claim/status').query({ claimId });
     expect(status.body.state).toBe('claimed');
-    expect(status.body.voucherCode).toBe('WIFI-FLOW-001');
-    expect(status.body.minutes).toBe(60);
+    expect(status.body.voucherCode).toBe(claimed.body.voucherCode);
+    expect(status.body.minutes).toBe(5); // ₱50 at the 10-peso/minute fallback rate
 
     const row = await getDb().getOne('SELECT state FROM pending_claims WHERE claim_id = ?', [claimId]);
     expect(row.state).toBe('claimed');

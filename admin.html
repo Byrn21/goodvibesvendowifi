@@ -1242,6 +1242,8 @@
                   stat('Paused Sessions', s.pausedSessions),
                   stat('Premium Sessions', s.premiumSessions),
                   stat('Total Revenue', '\u20b1' + (s.totalRevenue / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+                  stat('Cash Revenue', '\u20b1' + (s.cashRevenue / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
+                  stat('Digital Revenue', '\u20b1' + (s.digitalRevenue / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })),
                 ].join('');
               }
 
@@ -1334,12 +1336,13 @@
           return '<tr>' +
             '<td>' + escapeHtml(formatDate(tx.processed_at)) + '</td>' +
             '<td>' + (tx.ref_no ? escapeHtml(tx.ref_no) : '&mdash;') + '</td>' +
+            '<td>' + (tx.assigned_ref_no ? escapeHtml(tx.assigned_ref_no) : '<span class="muted">&mdash;</span>') + '</td>' +
             '<td>' + (tx.mobile_number ? escapeHtml(tx.mobile_number) : '<span class="muted">&mdash;</span>') + '</td>' +
             '<td>' + (tx.voucher_code ? escapeHtml(tx.voucher_code) : '<span class="muted">&mdash;</span>') + '</td>' +
             '<td>' + formatHistoryAmount(tx.amount_centavos) + '</td>' +
             '</tr>';
         }).join('');
-        return '<table><thead><tr><th>Date/Time</th><th>Reference No.</th><th>Mobile Number</th><th>Voucher Code</th><th>Amount</th></tr></thead><tbody>' + rows + '</tbody></table>';
+        return '<table><thead><tr><th>Date/Time</th><th>Reference No.</th><th>Assigned Ref</th><th>Mobile Number</th><th>Voucher Code</th><th>Amount</th></tr></thead><tbody>' + rows + '</tbody></table>';
       }
 
       function updateHistoryPagination(currentPage, totalPages) {

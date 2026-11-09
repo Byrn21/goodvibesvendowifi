@@ -16,6 +16,50 @@
 // .env without a code change; falls back to the documented default.
 const PESOS_PER_MINUTE = parseInt(process.env.MACRODROID_PESOS_PER_MINUTE || '10', 10);
 
+// ── Digital plan catalog ────────────────────────────────────────────────
+// The plans the captive portal advertises (config/config.js → plans, rendered
+// by index.html). A digital claim arrives as the plan's price in Pesos, so this
+// mapping is what lets the backend issue a voucher with the duration and tier
+// the guest actually bought instead of a generic code. It lives here because
+// config/config.js is a browser-only bundle (window.CONFIG) and cannot be
+// required by Node.
+//
+// Keep this in sync with config/config.js when a plan is added or repriced.
+const DIGITAL_PLAN_CATALOG = Object.freeze([
+  { priceCentavos: 500,   durationMinutes: 60,    type: 'standard' }, // ₱5   — 1 hour
+  { priceCentavos: 1000,  durationMinutes: 180,   type: 'standard' }, // ₱10  — 3 hours
+  { priceCentavos: 2000,  durationMinutes: 720,   type: 'standard' }, // ₱20  — 12 hours
+  { priceCentavos: 3000,  durationMinutes: 1440,  type: 'standard' }, // ₱30  — 24 hours
+  { priceCentavos: 12000, durationMinutes: 10080, type: 'standard' }, // ₱120 — 7 days
+  { priceCentavos: 35000, durationMinutes: 43200, type: 'standard' }, // ₱350 — 30 days
+  { priceCentavos: 2500,  durationMinutes: 300,   type: 'premium'  }, // ₱25  — 5 hours
+  { priceCentavos: 4500,  durationMinutes: 720,   type: 'premium'  }, // ₱45  — 12 hours
+  { priceCentavos: 8000,  durationMinutes: 1440,  type: 'premium'  }, // ₱80  — 24 hours
+]);
+
+/**
+ * Resolve the voucher a digital payment should generate.
+ *
+ * Catalog prices map to the exact plan the portal sold. Any other amount (a
+ * legacy MacroDroid transfer, an operator's custom price) falls back to the
+ * operator's pesos-per-minute rate so the claim is never refused just because
+ * the price is not on the published menu.
+ *
+ * @param {number|string} amountPesos amount received, in Pesos
+ * @returns {{durationMinutes: number, type: 'standard'|'premium'}}
+ */
+function resolveDigitalVoucherPlan(amountPesos) {
+  const centavos = Math.round(Number(amountPesos) * 100);
+  const plan = DIGITAL_PLAN_CATALOG.find((p) => p.priceCentavos === centavos);
+  if (plan) return { durationMinutes: plan.durationMinutes, type: plan.type };
+
+  const units = Math.floor(Number(amountPesos));
+  const minutes = Number.isFinite(units) && units > 0
+    ? Math.floor(units / PESOS_PER_MINUTE)
+    : 0;
+  return { durationMinutes: Math.max(1, minutes || 1), type: 'standard' };
+}
+
 // ── Environment ─────────────────────────────────────────────────────────
 // Resolved once, at require time. NODE_ENV=production is the only mode that
 // applies the fail-closed rules below.
@@ -183,6 +227,8 @@ module.exports = {
   ADMIN_PASSWORD,
   assertAdminCredentials,
   PESOS_PER_MINUTE,
+  DIGITAL_PLAN_CATALOG,
+  resolveDigitalVoucherPlan,
   PORTAL_CONTEXT_MAX_AGE_MS,
   PREMIUM_HARD_EXPIRY_HOURS,
   OMADA_TIME_UNIT,
