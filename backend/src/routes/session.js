@@ -611,6 +611,35 @@ router.post('/pause', async (req, res, next) => {
     if (rejectIfNotOwner(req, res, session)) return;
 
     const paused = await pauseSession(sessionId);
+
+    // The session is paused in the database, so answer now. Revoking the
+    // client's access on the controller is a BACKGROUND side effect: awaiting
+    // it here made every pause wait on Omada latency (timeouts, a frozen UI and
+    // a pause timestamp recorded seconds after the guest tapped the button).
+    // Failures are logged, never surfaced as a failed pause — the row is the
+    // authority and the guest's time is already frozen.
+    omadaService
+      .unauthenticateClient({
+        clientMac: paused.clientMac,
+        apMac: paused.apMac,
+        ssidName: paused.ssidName,
+      })
+      .then((result) => {
+        if (!result || result.success === false) {
+          console.error(
+            '[session/pause] background Omada deauth did NOT revoke access for ' +
+            paused.clientMac + ' (path=' + (result && result.path) +
+            ') — the session is paused but the client may stay online'
+          );
+        }
+      })
+      .catch((err) => {
+        console.error(
+          '[session/pause] background Omada deauth failed for ' + paused.clientMac +
+          ': ' + String((err && err.message) || err)
+        );
+      });
+
     return res.json({
       success: true,
       state: 'paused',
@@ -619,15 +648,8 @@ router.post('/pause', async (req, res, next) => {
       pausedAt: paused.pausedAt,
     });
   } catch (err) {
-    // A pause that could not stop the client must NOT read as a pause: answer
-    // 502 so the portal shows the retry message and the timer keeps running.
-    if (err && err.code === 'OMADA_ERROR') {
-      return res.status(502).json({
-        success: false,
-        code: 'OMADA_ERROR',
-        error: err.message || 'Could not stop the network session. Please try again.',
-      });
-    }
+    // Omada is no longer part of this request's failure surface (the kick runs
+    // in the background), so only the session-state outcomes need mapping.
     if (err && (err.code === 'SESSION_EXPIRED' || err.code === 'HARD_EXPIRED' || err.code === 'PAUSE_EXPIRED')) {
       return res.status(410).json({ success: false, code: err.code, error: err.message });
     }

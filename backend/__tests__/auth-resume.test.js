@@ -902,8 +902,8 @@ describe('POST /api/session/resume — a frozen zero is not free time', () => {
   });
 });
 
-describe('POST /api/session/pause — the timer only stops when the client is really off', () => {
-  test('a failed Omada deauth aborts the pause, keeps the timer, and answers 502', async () => {
+describe('POST /api/session/pause — the database pauses without waiting for the controller', () => {
+  test('a rejected Omada deauth neither delays nor rolls back the pause', async () => {
     await sessionService.recordSession({
       sessionId: 'sess_pause_deauth',
       clientMac: MAC,
@@ -911,21 +911,10 @@ describe('POST /api/session/pause — the timer only stops when the client is re
       voucherType: 'premium',
       totalDurationSeconds: 3600,
     });
-    const before = await sessionService.getSession('sess_pause_deauth');
 
-    // No route accepted the unauth: the guest is still online.
-    const spy = jest.spyOn(omadaService, 'unauthenticateClient')
-      .mockResolvedValue({ success: false, path: 'admin+operator rejected' });
-
-    await expect(sessionService.pauseSession('sess_pause_deauth'))
-      .rejects.toMatchObject({ code: 'OMADA_ERROR' });
-    spy.mockRestore();
-
-    const after = await sessionService.getSession('sess_pause_deauth');
-    expect(after.state).toBe('active');
-    expect(after.pausedAt).toBeNull();
-    expect(after.expiresAt).toBe(before.expiresAt);
-
+    // No route accepts the unauth. The pause must still commit and answer 200;
+    // the failed kick is only logged in the background (the controller has its
+    // own deauth retry worker for expiry paths).
     const routeSpy = jest.spyOn(omadaService, 'unauthenticateClient')
       .mockResolvedValue({ success: false, path: 'admin+operator rejected' });
     const res = await request(app)
@@ -934,8 +923,35 @@ describe('POST /api/session/pause — the timer only stops when the client is re
       .send({ sessionId: 'sess_pause_deauth' });
     routeSpy.mockRestore();
 
-    expect(res.status).toBe(502);
-    expect(res.body.code).toBe('OMADA_ERROR');
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('paused');
+    expect(res.body.remainingSeconds).toBeGreaterThan(0);
+
+    const after = await sessionService.getSession('sess_pause_deauth');
+    expect(after.state).toBe('paused');
+    expect(after.pausedAt).toBeTruthy();
+    expect(after.expiresAt).toBeNull();
+    expect(after.remainingSeconds).toBeGreaterThan(3500);
+  });
+
+  test('pauseSession freezes the time even when the controller call throws', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_pause_no_omada',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+
+    const spy = jest.spyOn(omadaService, 'unauthenticateClient')
+      .mockRejectedValue(new Error('controller timeout'));
+
+    const paused = await sessionService.pauseSession('sess_pause_no_omada');
+    spy.mockRestore();
+
+    expect(paused.state).toBe('paused');
+    expect(paused.remainingSeconds).toBeGreaterThan(3500);
+    expect(paused.pausedAt).toBeTruthy();
   });
 });
 

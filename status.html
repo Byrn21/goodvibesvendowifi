@@ -110,6 +110,22 @@
       outline-offset: 2px;
     }
     .nf-btn svg { flex-shrink: 0; }
+
+    /* ---- Captive-only hand-off banner ---- */
+    .captive-banner {
+      width: 100%;
+      max-width: 420px;
+      box-sizing: border-box;
+      margin: 0 auto 14px;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: rgba(45, 106, 79, 0.10);
+      border: 1px solid rgba(45, 106, 79, 0.35);
+      color: var(--green, #2d6a4f);
+      font-size: 14px;
+      font-weight: 600;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -171,6 +187,13 @@
     </header>
 
     <main id="main-status" class="portal-main" role="main">
+
+      <!-- Captive-only hand-off notice. Rendered and armed by the init script
+           ONLY when the URL says flow=captive, so a manual visit to this page
+           is never bounced away to the internet. -->
+      <div id="captive-redirect-banner" class="captive-banner hidden" role="status" aria-live="polite">
+        Connected! Redirecting to internet in 3 seconds...
+      </div>
 
       <!-- Loading state -->
       <div id="loading-state" class="status-card" aria-busy="true" aria-label="Loading session information">
@@ -1584,6 +1607,19 @@
       // destroy the cached identity of the previous one before reading or
       // storing anything, so this tab cannot answer about the old session.
       if (urlVoucher) purgeStaleSessionCache();
+
+      // ---- Captive-only hand-off to the internet ----
+      // The login flow lands guests here to see their timer before the OS /
+      // captive mini-browser goes online. Only that explicit flow=captive
+      // hand-off may redirect: a manual visit to the portal domain (no flow
+      // parameter) keeps showing the session and never jumps to Google.
+      if (params.get('flow') === 'captive') {
+        var captiveBanner = document.getElementById('captive-redirect-banner');
+        if (captiveBanner) captiveBanner.classList.remove('hidden');
+        setTimeout(function () {
+          window.location.href = 'http://google.com';
+        }, 3000);
+      }
 
       var storedSessionId = '';
       var storedClientMac = '';

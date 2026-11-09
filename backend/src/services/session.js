@@ -539,7 +539,12 @@ async function expireSession(sessionId, reason = 'time_expired', loaded) {
 
 /**
  * pauseSession — Freeze an active session's timer.
- * Omada unauthenticates the client; time is stored in remaining_seconds.
+ *
+ * The database is the authority and is written FIRST: the remaining time is
+ * calculated and the row is moved to 'paused' without waiting for the
+ * controller. The caller (POST /api/session/pause) kicks the client off Omada
+ * in the background afterwards, so controller latency can no longer freeze the
+ * UI or skew the frozen timestamp. Time is stored in remaining_seconds.
  */
 async function pauseSession(sessionId) {
   const db = getDb();
@@ -584,31 +589,11 @@ async function pauseSession(sessionId) {
     ? Math.max(0, Math.floor((expiresAtMs - now.getTime()) / 1000))
     : Math.max(0, Math.floor(session.remainingSeconds || 0));
 
-  // Deauthorize BEFORE the state write. Freezing the timer while the client is
-  // still online would hand out unmetered browsing: the guest keeps using the
-  // network with a stopped clock. So a failed or refused unauth aborts the
-  // pause entirely and the countdown keeps running.
-  let revoked;
-  try {
-    revoked = await omadaService.unauthenticateClient({
-      clientMac: session.clientMac,
-      apMac: session.apMac,
-      ssidName: session.ssidName,
-    });
-  } catch (err) {
-    revoked = { success: false, path: 'exception', error: err.message };
-  }
-
-  if (!revoked || revoked.success === false) {
-    console.error(
-      '[pauseSession] Omada did NOT revoke access for ' + session.clientMac +
-      ' (path=' + (revoked && revoked.path) + ') — pause refused so the timer keeps running'
-    );
-    const err = new Error('Could not pause because the network session could not be stopped. Please try again.');
-    err.code = 'OMADA_ERROR';
-    throw err;
-  }
-
+  // Commit the freeze immediately. The controller kick is deliberately NOT
+  // awaited here: Omada can take several seconds to answer, and holding the
+  // database write behind it is what made the pause button hang and recorded a
+  // pause timestamp that was already stale. The route fires the unauthorize
+  // call in the background once this write has committed.
   await db.run(`
     UPDATE sessions
     SET state = 'paused', paused_at = ?, remaining_seconds = ?, expires_at = NULL, updated_at = ?
