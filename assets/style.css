@@ -1823,8 +1823,53 @@ body {
   padding: 12px 20px 18px;
   border-top: 1px solid var(--border-light);
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   justify-content: flex-end;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Footer buttons share the row but may drop to a new line instead of
+   spilling past the dialog. .btn defaults to min-width: auto, which stops
+   flex from shrinking a nowrap label — that is what pushed the long
+   "Connect & Send Status Link" button outside the white card. A lone
+   footer button (legal / plan dialogs) keeps its natural width and
+   right-aligned position. */
+.modal-footer > .btn {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding-left: 18px;
+  padding-right: 18px;
+}
+.modal-footer > .btn:only-child {
+  flex: 0 1 auto;
+}
+
+/* Phones: stack the footer buttons, primary action on top. column-reverse
+   is used so the DOM order (Cancel, then the primary action) stays correct
+   for screen readers and keyboard order. nowrap keeps them in one column
+   instead of wrapping into a second column and overflowing sideways. */
+@media (max-width: 480px) {
+  .modal-footer {
+    flex-direction: column-reverse;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .modal-footer > .btn,
+  .modal-footer > .btn:only-child {
+    flex: 0 0 auto;
+    width: 100%;
+    height: auto;
+    min-height: 52px;
+    padding: 14px 16px;
+    font-size: 1rem;
+    line-height: 1.2;
+    white-space: normal;
+  }
 }
 
 /* ---- Legal modals (Terms of Service / Privacy Policy) ---- */
