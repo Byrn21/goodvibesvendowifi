@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#2d6a4f">
+  <meta name="theme-color" content="#0A5C36">
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>GoodVibesVendoWifi</title>
-  <link rel="stylesheet" href="assets/style.css?v=9">
+  <link rel="stylesheet" href="assets/style.css?v=12">
   <link rel="icon" type="image/png" href="assets/images/goodvibes.png">
   <style>
     /* ---- Success card header: icon, heading and subtext all centered ---- */
@@ -27,14 +27,14 @@
       border: none;
       padding: 0;
       font: inherit;
-      color: var(--green, #2d6a4f);
+      color: var(--green, #0A5C36);
       font-weight: 700;
       cursor: pointer;
       -webkit-tap-highlight-color: transparent;
     }
     .support-trigger:hover { text-decoration: underline; }
     .support-trigger:focus-visible {
-      outline: 2px solid var(--green, #2d6a4f);
+      outline: 2px solid var(--green, #0A5C36);
       outline-offset: 2px;
       border-radius: 4px;
     }
@@ -72,15 +72,15 @@
     #redirect-btn.btn--primary {
       height: 54px;
       border-color: transparent;
-      background: linear-gradient(135deg, #2f9e6e 0%, #1f7a54 55%, #17694a 100%);
+      background: linear-gradient(135deg, #0E7A47 0%, #0A5C36 55%, #084A2B 100%);
       box-shadow:
-        0 12px 24px -14px rgba(23, 105, 74, 0.85),
+        0 12px 24px -14px rgba(10, 92, 54, 0.85),
         inset 0 1px 0 rgba(255, 255, 255, 0.22);
     }
     #redirect-btn.btn--primary:hover:not(:disabled) {
-      background: linear-gradient(135deg, #35a977 0%, #238259 55%, #1a7250 100%);
+      background: linear-gradient(135deg, #129155 0%, #0C6B3F 55%, #0A5C36 100%);
       box-shadow:
-        0 16px 28px -14px rgba(23, 105, 74, 0.9),
+        0 16px 28px -14px rgba(10, 92, 54, 0.9),
         inset 0 1px 0 rgba(255, 255, 255, 0.26);
     }
     #redirect-btn.btn--primary:active:not(:disabled) {
@@ -91,7 +91,7 @@
     #status-link.btn--secondary {
       height: 50px;
       background: rgba(255, 255, 255, 0.72);
-      color: #1f6b4a;
+      color: #0A5C36;
       border: 1.5px solid #c7e3cd;
       box-shadow: 0 6px 14px -10px rgba(31, 107, 74, 0.45);
     }
@@ -182,7 +182,7 @@
     }
     .support-modal__close:hover { color: #173d2a; background: #eef7ef; }
     .support-modal__close:focus-visible {
-      outline: 2px solid #2d6a4f;
+      outline: 2px solid #0A5C36;
       outline-offset: 2px;
     }
 
@@ -239,7 +239,7 @@
       width: 100%;
       height: 48px;
       background: #ffffff;
-      color: #1f6b4a;
+      color: #0A5C36;
       font-size: 16px;
       font-weight: 700;
       font-family: inherit;
@@ -252,7 +252,7 @@
     .support-modal__close-btn:hover { background: #f2faf3; border-color: #9ed0ad; }
     .support-modal__close-btn:active { transform: scale(0.98); }
     .support-modal__close-btn:focus-visible {
-      outline: 3px solid rgba(45, 106, 79, 0.4);
+      outline: 3px solid rgba(10, 92, 54, 0.4);
       outline-offset: 2px;
     }
 
@@ -325,8 +325,8 @@
       <section class="success-card" aria-labelledby="success-heading">
         <div class="success-icon" aria-hidden="true">
           <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="32" cy="32" r="30" fill="#e6f4ea" stroke="#188038" stroke-width="3"/>
-            <polyline points="20,32 28,40 44,22" stroke="#188038" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            <circle cx="32" cy="32" r="30" fill="#e6f4ea" stroke="#0A5C36" stroke-width="3"/>
+            <polyline points="20,32 28,40 44,22" stroke="#0A5C36" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </div>
 
@@ -362,7 +362,7 @@
         </div>
 
         <div class="action-links" id="action-links">
-          <a href="status.html?v=10" class="btn btn--secondary btn--full" id="status-link">
+          <a href="status.html?v=12" class="btn btn--secondary btn--full" id="status-link">
             View Session Status
           </a>
         </div>
@@ -750,9 +750,9 @@
         // Plain string concatenation on purpose: no new URL() on a relative
         // path (which throws in some captive WebViews) and no URLSearchParams
         // construction to get wrong. Every appended value is encoded once.
-        // ?v=10 busts the captive mini-browser's cached status page, so the
+        // ?v=12 busts the captive mini-browser's cached status page, so the
         // fetch that now sends credentials / uses the session token is used.
-        var url = 'status.html?v=10';
+        var url = 'status.html?v=12';
         var pairs = [];
         if (sessionId) pairs.push('sessionId=' + encodeURIComponent(sessionId));
         if (clientMac) pairs.push(encodeURIComponent(forwardedMacKey) + '=' + encodeURIComponent(clientMac));
