@@ -2432,8 +2432,7 @@
   // has the printed code in hand: GET /api/session/status?voucher=<code>
   // reports the time left on that code, and the dialog also carries the
   // reconnect steps. Nothing here grants access — the checker is read-only,
-  // and re-opening the firewall is what attemptAutoReconnect()/the voucher
-  // form already do.
+  // and re-opening the firewall is what the voucher form already does.
   var statusState = {
     open: false,
     checking: false,
@@ -2591,7 +2590,7 @@
   }
 
   // GET /api/session/status?voucher=<code> — native fetch, same shape as the
-  // other portal calls (see attemptAutoReconnect / submitClaim).
+  // other portal calls (see submitClaim).
   function checkVoucherStatus() {
     if (statusState.checking) return;
 
@@ -2805,85 +2804,8 @@
     });
   }
 
-  // ===============================================================
-  // AUTO-RECONNECT ON LOAD (MAC-based, no voucher re-entry)
-  // ===============================================================
-  // A device whose session is still live but whose firewall authorization was
-  // lost (Wi-Fi dropped, captive mini-browser reopened, OS re-probe) is
-  // silently re-authorized by MAC so the guest reconnects WITHOUT re-entering a
-  // voucher. The controller call is proxied by the backend (backend mode only);
-  // a 404 (no active session) falls through to the normal voucher form.
-  function attemptAutoReconnect() {
-    if (CONFIG.mockMode || CONFIG.mode !== 'backend') return;
-
-    // Auto-login belongs to Omada's captive intercept only. A guest who opened
-    // the portal by typing its address in a normal tab must get the form, even
-    // when the URL still carries controller context from an earlier visit.
-    if (!isCaptivePortalFlow()) return;
-
-    var clientMac = queryParams.clientMac;
-    if (!clientMac) return;
-
-    fetch((CONFIG.apiBaseUrl || '') + '/api/session/reauthorize', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({
-        clientMac: normalizeMac(clientMac) || clientMac,
-        apMac:     normalizeMac(queryParams.apMac) || queryParams.apMac || '',
-        ssidName:  queryParams.ssidName || '',
-        radioId:   queryParams.radioId,
-      }),
-    }).then(function (r) {
-      return r.json().catch(function () { return {}; }).then(function (data) {
-        return { ok: r.ok, data: data };
-      });
-    }).then(function (res) {
-      var data = res.data || {};
-      if (!res.ok || !data.success || !data.sessionId) {
-        // 404 / not active / anything else → fall through to voucher entry.
-        return;
-      }
-
-      // Persist the identifiers so status.html can recover the session after
-      // the redirect, even if it is opened later without query params.
-      try {
-        window.localStorage.setItem('portalSessionId', data.sessionId);
-        window.sessionStorage.setItem('portalSessionId', data.sessionId);
-        window.localStorage.setItem(
-          'portalClientMac',
-          normalizeMac(clientMac) || clientMac
-        );
-      } catch (e) { /* storage unavailable — URL param still works */ }
-
-      rememberStatusToken(data.statusToken);
-
-      setBanner('Active session detected, reconnecting\u2026', 'info');
-
-      var params = new URLSearchParams();
-      params.set('sessionId', data.sessionId);
-      params.set('clientMac', normalizeMac(clientMac) || clientMac);
-      // Remaining/expiry come straight from the re-authorized session so the
-      // success page's countdown matches the database instead of showing “—”.
-      if (data.expiresAt) params.set('expiresAt', data.expiresAt);
-      if (typeof data.remainingSeconds === 'number') {
-        params.set('remaining', String(data.remainingSeconds));
-      }
-      if (data.voucherType) params.set('voucherType', data.voucherType);
-      if (data.statusToken) params.set('token', data.statusToken);
-      params.set('countdown', '3');
-      // This hand-off is captive by construction (the guard above), so tell
-      // success.html it may perform the external exit.
-      params.set('flow', 'captive');
-      var target = (CONFIG.successPage || 'success.html') + '?' + params.toString();
-
-      // Reuse the post-auth settling delay so Omada's asynchronous firewall
-      // programming finishes before the OS re-probes the network.
-      var delayMs = (typeof CONFIG.connectDelayMs === 'number') ? CONFIG.connectDelayMs : 3500;
-      window.setTimeout(function () { window.location.href = target; }, delayMs);
-    }).catch(function () { /* silent — the voucher form still works */ });
-  }
-
+  // (Auto-reconnect removed: every connection now requires the guest to enter
+  // their 6-digit code on the main screen.)
   function init() {
     // Parse Omada query params first (affects everything)
     parseQueryParams();
@@ -2893,11 +2815,6 @@
     // tab arrives without query params, and localStorage is what keeps the
     // device identifiable for the backend's later authorization call.
     captureOmadaContext();
-
-    // Silent reconnection: only a captive-portal load with controller context
-    // may re-authorize without asking for a voucher. A manual visit keeps the
-    // voucher/status form interactive.
-    attemptAutoReconnect();
 
     // Fire-and-forget context capture: on portal LANDING, beacon the
     // controller context (client/AP MAC, SSID, radioId) to the backend so
