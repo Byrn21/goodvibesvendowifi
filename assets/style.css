@@ -6,6 +6,57 @@
    Single shared stylesheet for all pages.
    ============================================================= */
 
+/* ---- Self-hosted rounded brand font ----
+   Quicksand Regular 400 / Bold 700, split into latin + latin-ext subsets (the
+   ext subset carries the peso sign, U+20B1). Files are served from
+   assets/fonts so the portal keeps its brand typography even before the guest
+   device has internet access — no Google Fonts request. */
+@font-face {
+  font-family: 'Quicksand';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/quicksand-regular.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+                 U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+                 U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Quicksand';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/quicksand-regular-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+                 U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF,
+                 U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+                 U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Quicksand';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/quicksand-bold.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+                 U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+                 U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Quicksand';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/quicksand-bold-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+                 U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF,
+                 U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+                 U+A720-A7FF;
+}
+
 /* ---- CSS Custom Properties ---- */
 :root {
   /* Brand palette — emerald jungle & sunlit cream */
@@ -72,8 +123,8 @@
   --shadow-card: 0 10px 30px rgba(10, 60, 36, 0.10), 0 3px 10px rgba(10, 60, 36, 0.05);
 
   --transition: 180ms ease;
-  /* Clean rounded sans: uses an installed rounded face when available and
-     falls back to the platform UI font, so the portal stays offline-safe. */
+  /* Self-hosted Quicksand first (see @font-face above), then any locally
+     installed rounded face, then the platform UI font. */
   --font: 'Quicksand', 'Poppins', 'Nunito', ui-rounded, 'SF Pro Rounded',
           'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system,
           'Helvetica Neue', Arial, sans-serif;
