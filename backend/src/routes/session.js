@@ -689,6 +689,9 @@ router.post('/resume', async (req, res, next) => {
     // Ownership: a copied sessionId must not restart someone else's pass.
     if (rejectIfNotOwner(req, res, session)) return;
 
+    // resumeSession() has already committed the new expiry and state; the
+    // controller re-auth runs in the background inside the service. Answer
+    // immediately so the first Resume tap never waits on Omada.
     const resumed = await resumeSession(sessionId);
     // Same session, refreshed identity: keep the browser bound to it. This route
     // already required a control token, so it may mint a fresh one.
@@ -706,9 +709,6 @@ router.post('/resume', async (req, res, next) => {
     // the precise reason, so the status page can stop offering Resume.
     if (err && (err.code === 'SESSION_EXPIRED' || err.code === 'HARD_EXPIRED' || err.code === 'PAUSE_EXPIRED')) {
       return res.status(410).json({ success: false, code: err.code, error: err.message });
-    }
-    if (err && err.code === 'OMADA_ERROR') {
-      return res.status(502).json({ success: false, code: 'OMADA_ERROR', error: err.message });
     }
     next(err);
   }

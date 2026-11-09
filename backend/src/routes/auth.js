@@ -774,9 +774,10 @@ async function reuseVoucher(voucher, clientMac, boundMac, redirectUrl, loaded) {
     return fail(401, 'EXPIRED_VOUCHER', 'This voucher has expired.');
   }
 
-  // Re-authorize through Omada and flip the session back to active.
-  // resumeSession() is fail-closed: if the controller rejects or throws, the
-  // session stays paused and the guest can simply try again.
+  // Flip the session back to active NOW, then re-authorize through Omada in
+  // the background (inside resumeSession). The guest's time is running again
+  // the moment this returns; a controller failure is logged, not returned as a
+  // failed login, so the first attempt is never wasted.
   let resumed;
   try {
     resumed = await resumeSession(session.sessionId);

@@ -606,6 +606,11 @@ async function pauseSession(sessionId) {
 /**
  * resumeSession — Restart a paused session.
  * Restarts the timer from the remaining seconds.
+ *
+ * The database is written FIRST (state='active', new expires_at, paused_at
+ * cleared) and the session is returned immediately. The Omada re-auth and the
+ * bandwidth cap run in the background afterwards, so controller latency can
+ * no longer make the first Resume tap appear to fail.
  */
 async function resumeSession(sessionId) {
   const db = getDb();
@@ -672,9 +677,25 @@ async function resumeSession(sessionId) {
 
   const username = (session.voucherType === 'premium' ? 'prem_' : 'paid_') + sessionId;
 
-  // Re-authenticate via Omada
-  try {
-    await omadaService.authenticateClient({
+  // Commit the resume immediately. The new expiry is authoritative from this
+  // write on, and the UI is told the session is active without waiting for the
+  // controller. Omada can take seconds (or time out) to answer extPortal/auth;
+  // awaiting it here is what made the first Resume tap look like a failure and
+  // left the row paused for a retry.
+  await db.run(`
+    UPDATE sessions
+    SET state = 'active', paused_at = NULL, expires_at = ?, updated_at = ?
+    WHERE session_id = ?
+  `, [expiresAt, new Date().toISOString(), sessionId]);
+
+  // Re-open the firewall in the BACKGROUND. A failed or rejected auth is
+  // logged, never surfaced as a failed resume: the guest's time is already
+  // running and tapping Resume again must not cost them another attempt.
+  // The bandwidth cap is re-applied only once the controller reports the
+  // client online (pause de-authorized it, and a per-client rate limit is not
+  // guaranteed to survive that) and is best-effort either way.
+  omadaService
+    .authenticateClient({
       clientMac: session.clientMac,
       clientIp: session.clientIp,
       apMac: session.apMac,
@@ -685,24 +706,26 @@ async function resumeSession(sessionId) {
       // Re-send the same voucher the session was opened with, so every
       // extPortal/auth call carries the `code` field identically.
       voucherCode: session.voucherUsed || '',
+    })
+    .then((result) => {
+      if (!result || result.success === false) {
+        console.error(
+          '[resumeSession] background Omada auth did NOT re-open access for ' +
+          session.clientMac + ' (path=' + (result && result.path) +
+          ') — the session is active but the client may stay offline'
+        );
+        return;
+      }
+      return applySessionRateLimit(session);
+    })
+    .catch((err) => {
+      console.error(
+        '[resumeSession] background Omada auth failed for ' + session.clientMac +
+        ': ' + String((err && err.message) || err)
+      );
     });
-  } catch (err) {
-    console.error('[resumeSession] Omada auth failed:', err.message);
-    throw new Error('Could not reconnect to network. Please try again.');
-  }
 
-  await db.run(`
-    UPDATE sessions
-    SET state = 'active', paused_at = NULL, expires_at = ?, updated_at = ?
-    WHERE session_id = ?
-  `, [expiresAt, new Date().toISOString(), sessionId]);
-
-  // Re-apply the bandwidth cap: pause de-authorized the client, and the
-  // controller is not guaranteed to keep a per-client rate limit across that.
-  // Best-effort — the guest is online either way.
-  await applySessionRateLimit(session);
-
-    return await getSession(sessionId);
+  return await getSession(sessionId);
 }
 
 /**

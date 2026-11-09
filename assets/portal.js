@@ -928,7 +928,11 @@
           ? '&clientMac=' + encodeURIComponent(normalizeMac(queryParams.clientMac) || queryParams.clientMac)
           : '') +
         // The token is what survives a wait in a different browser/origin.
-        (statusToken ? '&token=' + encodeURIComponent(statusToken) : '');
+        (statusToken ? '&token=' + encodeURIComponent(statusToken) : '') +
+        // Only a genuine captive intercept may hand this page the redirect
+        // signal. A manual visit (no controller context in the URL) resumes
+        // into the status page without ever bouncing to the internet.
+        (captiveFlow ? '&flow=captive' : '');
     } else {
       // Build success URL with redirect and session info
       var params = new URLSearchParams();
@@ -958,9 +962,11 @@
       if (statusToken) params.set('token', statusToken);
       params.set('countdown', '3');
       // success.html must know this is a captive hand-off: only that flow may
-      // auto-redirect to the requested website. A manually opened success URL
-      // must leave the guest on the portal.
-      params.set('flow', 'captive');
+      // auto-redirect to the requested website. Gate it on the environment — a
+      // manual login (no controller context in the URL) must never carry the
+      // flag, and a manually opened success URL must leave the guest on the
+      // portal.
+      if (captiveFlow) params.set('flow', 'captive');
 
       // Carry Omada's originUrl (the URL the guest first tried to open) through
       // to success.html so it can nudge the OS with a real internet request.
@@ -2586,6 +2592,9 @@
     // has no device identity (manual Chrome/Safari visit, tunnel address).
     var code = rememberVoucherCode(voucherCode);
     if (code) parts.push('voucher=' + encodeURIComponent(code));
+    // Same rule as the login hand-off: only a guest who arrived through the
+    // captive intercept may ask status.html to perform the internet redirect.
+    if (isCaptivePortalFlow()) parts.push('flow=captive');
     window.location.href = parts.length ? 'status.html?' + parts.join('&') : 'status.html';
   }
 

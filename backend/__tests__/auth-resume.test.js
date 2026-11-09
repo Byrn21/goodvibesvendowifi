@@ -902,6 +902,41 @@ describe('POST /api/session/resume — a frozen zero is not free time', () => {
   });
 });
 
+describe('POST /api/session/resume — the database resumes without waiting for the controller', () => {
+  test('a rejected Omada auth neither delays nor rolls back the resume', async () => {
+    await sessionService.recordSession({
+      sessionId: 'sess_resume_deauth',
+      clientMac: MAC,
+      duration: 60,
+      voucherType: 'premium',
+      totalDurationSeconds: 3600,
+    });
+    await getDb().run(
+      `UPDATE sessions SET state = 'paused', paused_at = ?, remaining_seconds = 1500, expires_at = NULL
+        WHERE session_id = ?`,
+      [new Date().toISOString(), 'sess_resume_deauth']
+    );
+
+    // The controller never re-opens the firewall. The resume must still commit
+    // and answer 200; the failed re-auth is only logged in the background.
+    const spy = jest.spyOn(omadaService, 'authenticateClient')
+      .mockRejectedValue(new Error('controller timeout'));
+    const res = await request(app)
+      .post('/api/session/resume')
+      .set('Cookie', asDevice('sess_resume_deauth'))
+      .send({ sessionId: 'sess_resume_deauth' });
+    spy.mockRestore();
+
+    expect(res.status).toBe(200);
+    expect(res.body.state).toBe('active');
+
+    const after = await sessionService.getSession('sess_resume_deauth');
+    expect(after.state).toBe('active');
+    expect(after.pausedAt).toBeNull();
+    expect(after.expiresAt).toBeTruthy();
+  });
+});
+
 describe('POST /api/session/pause — the database pauses without waiting for the controller', () => {
   test('a rejected Omada deauth neither delays nor rolls back the pause', async () => {
     await sessionService.recordSession({
