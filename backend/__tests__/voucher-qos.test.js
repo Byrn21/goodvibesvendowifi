@@ -34,6 +34,10 @@ process.env.RATE_LIMIT_MAX_REQUESTS = '10000';
 process.env.LOGIN_RATE_LIMIT_MAX = '10000';
 process.env.PREMIUM_DOWN_MBPS = '50';
 process.env.PREMIUM_UP_KBPS = '1024';
+// The cap is applied by the detached runner; force its waits to zero so a
+// single macrotask drains it and assertions stay deterministic.
+process.env.QOS_SETTLE_DELAY_MS = '0';
+process.env.QOS_RETRY_DELAY_MS = '0';
 
 const request = require('supertest');
 const XLSX = require('xlsx');
@@ -73,6 +77,11 @@ function authRequest(body) {
     ssidName: 'GoodVibesVendoWifi',
     termsAccepted: true,
   }, body));
+}
+
+/** Let the detached QoS runner (settle/retry forced to 0) finish. */
+function flushQos() {
+  return new Promise((resolve) => setTimeout(resolve, 25));
 }
 
 beforeAll(async () => {
@@ -300,7 +309,10 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.qosApplied).toBe(true);
+    // The response is sent before the detached cap runs.
+    expect(res.body.qosPending).toBe(true);
+
+    await flushQos();
 
     expect(omada.setClientRateLimit).toHaveBeenCalledTimes(1);
     expect(omada.setClientRateLimit).toHaveBeenCalledWith({
@@ -327,6 +339,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     const res = await authRequest({ voucher: '111222' });
 
     expect(res.status).toBe(200);
+    await flushQos();
     expect(omada.setClientRateLimit).toHaveBeenCalledWith({ clientMac: MAC });
   });
 
@@ -335,6 +348,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
     await authRequest({ voucher: '333444' });
 
+    await flushQos();
     expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
@@ -350,6 +364,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     const res = await authRequest({ voucher: '444555' });
 
     expect(res.status).toBe(200);
+    await flushQos();
     expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {
@@ -374,6 +389,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
       await authRequest({ voucher: '666777' });
 
+      await flushQos();
       expect(omada.setClientRateLimit).toHaveBeenCalledWith({
         clientMac: MAC,
         customRateLimit: {
@@ -405,6 +421,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     expect(stored.down_kbps).toBe(51200);
     expect(stored.up_kbps).toBe(1024);
 
+    await flushQos(); // drain the first login's background cap
     const savedDown = process.env.PREMIUM_DOWN_MBPS;
     process.env.PREMIUM_DOWN_MBPS = '20';
     omada.setClientRateLimit.mockClear();
@@ -412,6 +429,8 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
       const second = await authRequest({ voucher: '888999' });
       expect(second.status).toBe(200);
       expect(second.body.sessionId).toBe(first.body.sessionId);
+
+      await flushQos();
 
       // Still 50 — the cap was granted with the session and is replayed, so a
       // later env change cannot slow a live premium guest mid-pass.
@@ -428,18 +447,18 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
     }
   });
 
-  test('a failed cap does NOT fail the login and is reported in the response', async () => {
+  test('a failed cap retries in the background and never fails the login', async () => {
     await seedVoucher('555666', 'standard', 10000, 2000);
-    omada.setClientRateLimit.mockRejectedValueOnce(
+    omada.setClientRateLimit.mockRejectedValue(
       new Error('OMADA_QOS_REJECTED: 404')
     );
+    const errorLog = jest.spyOn(console, 'error').mockImplementation(() => {});
 
     const res = await authRequest({ voucher: '555666' });
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
-    expect(res.body.qosApplied).toBe(false);
-    expect(res.body.qosError).toContain('OMADA_QOS_REJECTED');
+    expect(res.body.qosPending).toBe(true);
 
     // The session was still recorded, so the guest can see their session.
     const session = await getDb().getOne(
@@ -447,12 +466,42 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
       [res.body.sessionId]
     );
     expect(session.state).toBe('active');
+
+    await flushQos();
+
+    // 4 attempts (default QOS_MAX_ATTEMPTS), each rejected.
+    expect(omada.setClientRateLimit).toHaveBeenCalledTimes(4);
+    const logged = errorLog.mock.calls.map((args) => args.join(' ')).join('\n');
+    expect(logged).toContain(
+      '[QoS] FAILED to apply bandwidth cap for ' + MAC +
+      ' after max retries. User may be unthrottled.'
+    );
+  });
+
+  test('a transient cap failure succeeds on a retry and logs the attempt', async () => {
+    await seedVoucher('999000', 'standard', 10000, 2000);
+    omada.setClientRateLimit
+      .mockRejectedValueOnce(new Error('client not indexed yet'))
+      .mockResolvedValue({ success: true, route: 'v2' });
+    const infoLog = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    const res = await authRequest({ voucher: '999000' });
+    expect(res.status).toBe(200);
+
+    await flushQos();
+
+    expect(omada.setClientRateLimit).toHaveBeenCalledTimes(2);
+    const logged = infoLog.mock.calls.map((args) => args.join(' ')).join('\n');
+    expect(logged).toContain(
+      '[QoS] Successfully applied bandwidth cap for ' + MAC + ' on attempt 2'
+    );
   });
 
   test('a re-login with a still-active voucher re-applies the SESSION caps', async () => {
     await seedVoucher('777888', 'premium', 30000, 10000);
     const first = await authRequest({ voucher: '777888' });
     expect(first.status).toBe(200);
+    await flushQos(); // drain the first login's background cap
 
     // The voucher cap is changed after the fact; the live session must keep
     // the cap it was created with.
@@ -463,6 +512,7 @@ describe('POST /api/auth — applies the voucher bandwidth cap', () => {
 
     expect(second.status).toBe(200);
     expect(second.body.sessionId).toBe(first.body.sessionId);
+    await flushQos();
     expect(omada.setClientRateLimit).toHaveBeenCalledWith({
       clientMac: MAC,
       customRateLimit: {

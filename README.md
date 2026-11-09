@@ -525,9 +525,15 @@ portal operator session (`OMADA_PORTAL_OPERATOR_*`), which Omada requires for
 
 Applying the cap is **best-effort**: the guest is already authorized and the
 voucher already spent, so a rejected/failed rate-limit call never fails the
-login. `POST /api/auth` reports the outcome as `qosApplied`, with `qosError` when
-it failed and `qosMock: true` when no controller is configured (mock mode: no
-`OMADA_BASE_URL`).
+login. It runs **after** the response, and the controller indexes a new
+authorization a moment after `extPortal/auth` returns — so the background
+runner waits 2 s (`QOS_SETTLE_DELAY_MS`) before its first attempt, then retries
+a failed attempt every 3 s (`QOS_RETRY_DELAY_MS`), up to 4 attempts total
+(`QOS_MAX_ATTEMPTS`). `POST /api/auth` answers immediately with
+`qosPending: true`; the outcome is logged as `[QoS] Successfully applied
+bandwidth cap for <mac> on attempt <N>` or `[QoS] FAILED to apply bandwidth cap
+for <mac> after max retries. User may be unthrottled.` (check `OMADA_ADMIN_*`
+credentials or mock mode — no `OMADA_BASE_URL` — when it fails).
 
 Per-voucher caps are set through `POST /api/admin/vouchers`
 (`downKbps`/`upKbps`, both or neither, in Kbps), `PUT /api/admin/vouchers/:id`

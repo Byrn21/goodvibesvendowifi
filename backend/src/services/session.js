@@ -38,6 +38,21 @@ const DEAUTH_MAX_ATTEMPTS = Math.max(1, parseInt(process.env.DEAUTH_MAX_ATTEMPTS
 const DEAUTH_RETRY_BASE_MS = Math.max(1000, parseInt(process.env.DEAUTH_RETRY_BASE_MS || '30000', 10) || 30000);
 const SESSION_WORKER_CONCURRENCY = Math.max(1, parseInt(process.env.SESSION_WORKER_CONCURRENCY || '3', 10) || 3);
 
+// ── QoS retry policy ───────────────────────────────────────────────────
+// Omada indexes a freshly authorized client a moment AFTER extPortal/auth
+// returns; a rate-limit PATCH sent in that window is silently dropped and the
+// guest runs unthrottled. Every background cap therefore waits QOS_SETTLE_MS
+// before its first attempt and retries a failed attempt up to
+// QOS_MAX_ATTEMPTS times, QOS_RETRY_MS apart. Defaults: 2 s settle, 3 s retry,
+// 4 attempts total (bounded, so a dead controller cannot retry forever).
+function envInt(name, fallback, min) {
+  const parsed = parseInt(process.env[name], 10);
+  return Number.isFinite(parsed) && parsed >= min ? parsed : fallback;
+}
+const QOS_SETTLE_MS = envInt('QOS_SETTLE_DELAY_MS', 2000, 0);
+const QOS_RETRY_MS = envInt('QOS_RETRY_DELAY_MS', 3000, 0);
+const QOS_MAX_ATTEMPTS = Math.min(10, envInt('QOS_MAX_ATTEMPTS', 4, 1));
+
 /** sessionId -> { sessionId, clientMac, apMac, ssidName, attempts, nextAttemptAt } */
 const deauthRetryQueue = new Map();
 
@@ -716,7 +731,10 @@ async function resumeSession(sessionId) {
         );
         return;
       }
-      return applySessionRateLimit(session);
+      // Detached on purpose: the auth chain only needs the controller result.
+      // The cap settles, retries and logs on its own, so a slow QoS call can
+      // neither delay the resume nor reject the auth chain.
+      void applySessionRateLimitInBackground(session);
     })
     .catch((err) => {
       console.error(
@@ -811,6 +829,89 @@ async function applySessionRateLimit(session) {
   }
 }
 
+/** Promise-based sleep; 0 resolves immediately without scheduling a timer. */
+function sleepMs(ms) {
+  if (!(ms > 0)) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * applySessionRateLimitInBackground — detached, retrying QoS application.
+ *
+ * NEVER await this from an HTTP handler (POST /api/auth, /api/session/resume,
+ * the re-login path): the guest is already authorized and the response must be
+ * instant. Waiting on the controller's administrator session + QoS PATCH is
+ * what made the first action look slow, and a PATCH sent before Omada indexed
+ * the new client was dropped — leaving the session active but unthrottled.
+ *
+ * The settle wait gives the controller time to register the MAC; a rejected or
+ * unanswered attempt is retried a bounded number of times. Every outcome is
+ * logged with the `[QoS]` prefix, including success on a later attempt, so an
+ * operator can tell a transient index lag from a real misconfiguration.
+ *
+ * Never throws.
+ *
+ * @param {Object} session session object with clientMac + stored caps
+ * @param {{settleMs?: number, retryMs?: number, maxAttempts?: number}} [opts]
+ * @returns {Promise<Object>} the last result (tests await this; routes do not)
+ */
+async function applySessionRateLimitInBackground(session, opts) {
+  const options = opts || {};
+  const settleMs = Number.isFinite(options.settleMs)
+    ? Math.max(0, options.settleMs) : QOS_SETTLE_MS;
+  const retryMs = Number.isFinite(options.retryMs)
+    ? Math.max(0, options.retryMs) : QOS_RETRY_MS;
+  const maxAttempts = Number.isFinite(options.maxAttempts)
+    ? Math.max(1, Math.min(10, options.maxAttempts)) : QOS_MAX_ATTEMPTS;
+
+  if (!session || !session.clientMac) {
+    console.error('[QoS] cannot apply bandwidth cap: session has no clientMac');
+    return { applied: false, error: 'no session/clientMac' };
+  }
+  const mac = session.clientMac;
+
+  // Let the controller expose the fresh auth record to its client/QoS routes.
+  await sleepMs(settleMs);
+
+  let lastResult = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      lastResult = await applySessionRateLimit(session);
+    } catch (err) {
+      // applySessionRateLimit is documented never to throw; keep the retry
+      // loop alive even if that contract is ever broken.
+      lastResult = { applied: false, error: (err && err.message) || String(err) };
+    }
+
+    // Mock mode means no controller is configured: retrying cannot help.
+    // applySessionRateLimit() already logged the configuration warning.
+    if (lastResult && lastResult.mock) return lastResult;
+
+    if (lastResult && lastResult.applied) {
+      console.log(
+        '[QoS] Successfully applied bandwidth cap for ' + mac +
+        ' on attempt ' + attempt
+      );
+      return lastResult;
+    }
+
+    if (attempt < maxAttempts) {
+      console.warn(
+        '[QoS] attempt ' + attempt + '/' + maxAttempts + ' failed for ' + mac +
+        ' (' + ((lastResult && lastResult.error) || 'unknown error') +
+        ') — retrying in ' + retryMs + 'ms'
+      );
+      await sleepMs(retryMs);
+    }
+  }
+
+  console.error(
+    '[QoS] FAILED to apply bandwidth cap for ' + mac +
+    ' after max retries. User may be unthrottled.'
+  );
+  return lastResult || { applied: false, error: 'rate limit not applied' };
+}
+
 /**
  * reauthorizeSession — Re-open the firewall for an ALREADY-ACTIVE session.
  *
@@ -887,7 +988,11 @@ async function reauthorizeSession(sessionId) {
   // A re-authorized client must come back at the speed it paid for. The caps
   // are the ones stored on the session when it was created, so a voucher whose
   // row was edited afterwards cannot silently change a live session.
-  await applySessionRateLimit(session);
+  //
+  // Detached: this runs inside POST /api/auth, which must answer as soon as the
+  // controller has authorized the guest. The settle delay + retries belong to
+  // the background runner, never to the request.
+  void applySessionRateLimitInBackground(session);
 
   return { session, remainingSeconds: grantSeconds };
 }
@@ -1254,4 +1359,5 @@ module.exports = {
   getSessionByVoucher,
   resolveVoucherSession,
   applySessionRateLimit,
+  applySessionRateLimitInBackground,
 };

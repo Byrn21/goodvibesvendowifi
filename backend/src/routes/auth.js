@@ -23,7 +23,7 @@ const {
   getSessionByVoucher,
   resolveVoucherSession,
   isPausableVoucherType,
-  applySessionRateLimit,
+  applySessionRateLimitInBackground,
 } = require('../services/session');
 const { normalizeVoucherCode, validateVoucherCodeFormat } = require('../utils/voucher-code');
 const { normalizeMac: normalizeDeviceMac, isSameMac } = require('../utils/device-id');
@@ -444,7 +444,7 @@ router.post('/', async (req, res, next) => {
       || process.env.DEFAULT_REDIRECT_URL
       || 'https://www.google.com';
 
-    // ── Bandwidth (QoS) cap ─────────────────────────────────────────────
+    // ── Bandwidth (QoS) cap — DETACHED, never awaited ────────────────────
     // The extPortal/auth body carries NO bandwidth fields (TP-Link's External
     // Portal Server spec defines only clientMac/clientIp/apMac/ssidName/radioId
     // (or gatewayMac/vid)/site/time/authType, and an unknown field can make
@@ -454,16 +454,26 @@ router.post('/', async (req, res, next) => {
     // routes. The values come from this voucher's own caps, then the premium
     // tier, then the operator defaults (see utils/qos.js).
     //
-    // Best-effort: the guest is ALREADY authorized by the controller and the
-    // voucher is spent, so a failed cap must never turn a successful login into
-    // an error. The response reports the outcome for the operator.
-    const qos = await applySessionRateLimit({
+    // The cap now runs AFTER this response: the controller needs a moment to
+    // index the authorization (a PATCH sent too early is silently dropped), and
+    // its administrator login + QoS call can take seconds. Awaiting it here is
+    // what made a successful login slow, and a failed cap must never turn the
+    // login into an error anyway. The runner waits, retries, and logs `[QoS]`.
+    applySessionRateLimitInBackground({
       clientMac: normalizedMac,
       // The snapshot written with the session above — identical to resolving
       // the voucher/tier again, but guaranteed to match the stored row.
       downKbps: sessionCaps.downKbps,
       upKbps: sessionCaps.upKbps,
       voucherType: voucherTypeResolved,
+    }).catch((err) => {
+      // Defensive only: the runner never throws and logs every attempt itself.
+      // This keeps a broken promise from becoming an unhandled rejection after
+      // the guest's 200 has already been sent.
+      console.error(
+        '[QoS] background runner crashed for ' + normalizedMac + ': ' +
+        ((err && err.message) || String(err))
+      );
     });
 
     // ── Explicit success log: the Omada response AND the local lock ──
@@ -554,12 +564,11 @@ router.post('/', async (req, res, next) => {
       expiresAt: sessionExpiresAt,
       durationMinutes: duration,
       totalSeconds: sessionTotalSeconds,
-      // Whether the bandwidth cap was actually applied to this client. false =
-      // the guest is online but UNCAPPED (check the server logs: OMADA_ADMIN_*
-      // credentials / mock mode / controller rejection).
-      qosApplied: qos.applied,
-      qosMock: qos.mock === true,
-      ...(qos.applied ? {} : { qosError: qos.error || 'rate limit not applied' }),
+      // The cap runs in the background after this response, so its outcome is
+      // not known here. This flag says the work was scheduled; the server logs
+      // carry the result as `[QoS] ...` (applied on attempt N, or FAILED after
+      // max retries — check OMADA_ADMIN_* / mock mode on a failure).
+      qosPending: true,
       session: {
         state: (storedSession && storedSession.state) || 'active',
         remainingSeconds: sessionRemainingSeconds,

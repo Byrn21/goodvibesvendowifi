@@ -31,6 +31,10 @@ process.env.LOGIN_RATE_LIMIT_MAX = '10000';
 process.env.VOUCHER_STATUS_RATE_LIMIT_MAX = '10000';
 process.env.REAUTHORIZE_RATE_LIMIT_MAX = '10000';
 process.env.PAUSE_ENABLED = 'true';
+// The detached QoS runner must not leave 2 s timers running behind these
+// tests; its own retry behavior is covered in voucher-qos.test.js.
+process.env.QOS_SETTLE_DELAY_MS = '0';
+process.env.QOS_RETRY_DELAY_MS = '0';
 
 const request = require('supertest');
 const app = require('../src/server');
